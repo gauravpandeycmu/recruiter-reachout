@@ -23,7 +23,10 @@ import type {
   AnalyticsSummary,
   AnalyticsGoalSettings,
   WeatherSnapshot,
+  WeatherCondition,
 } from "@recruiter/shared";
+
+export type { WeatherCondition, WeatherSnapshot };
 
 export interface UpcomingSendView {
   queueItemId: string;

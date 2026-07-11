@@ -1,6 +1,15 @@
 import React, { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
+import { getWeather, type WeatherCondition } from "./api";
 import { StreakGrove } from "./StreakGrove";
+import {
+  formatWeatherTemp,
+  PRECISE_LOCATION_CHANGED_EVENT,
+  PRECISE_LOCATION_KEY,
+  readPreciseLocationEnabled,
+  requestPreciseCoordinates,
+  shortLocationLabel,
+} from "./weatherLocation";
 
 /**
  * Real-time WebGL Streak Grove (see apps/web/GROVE3D.md).
@@ -70,8 +79,9 @@ const WATER_Y = -0.35;
 
 /* ---------------- sky (atmospheric-ish) ---------------- */
 
-/** Daylight sun — top-right of frame, above the peaks, so lit faces read on rock. */
-const SUN_DIR = new THREE.Vector3(0.74, 0.58, -0.35).normalize();
+/** Daylight sun — top-right of the visible frame, low enough to sit just above
+ *  the mountain ridge (the old direction was so high it was outside the camera FOV). */
+const SUN_DIR = new THREE.Vector3(0.5, 0.25, -0.82).normalize();
 
 const SKY_VERT = `
 varying vec3 vDir;
@@ -88,6 +98,7 @@ uniform vec3 uHorizon;
 uniform vec3 uGround;
 uniform vec3 uSunDir;
 uniform vec3 uSunColor;
+uniform float uSunGlow;
 uniform float uTime;
 void main() {
   vec3 dir = normalize(vDir);
@@ -96,12 +107,14 @@ void main() {
   col = mix(uGround, col, smoothstep(-0.2, 0.02, y));
   float band = exp(-abs(y - 0.02) * 16.0);
   col += vec3(1.0, 0.78, 0.55) * band * 0.08;
-  // Subtle top-right sun disc + soft aureole
+  // Golden sun disc + aureole — kept below clipping so it stays warm, not white.
+  // uSunGlow fades the whole thing for cloudy / rain / snow.
   float sunDot = max(dot(dir, normalize(uSunDir)), 0.0);
-  col += uSunColor * pow(sunDot, 280.0) * 1.5;
-  col += uSunColor * pow(sunDot, 42.0) * 0.32;
-  col += uSunColor * pow(sunDot, 7.0) * 0.12;
-  col += vec3(1.0, 0.92, 0.78) * pow(sunDot, 2.2) * 0.055;
+  vec3 sunGlow = uSunColor * pow(sunDot, 280.0) * 0.85;
+  sunGlow += uSunColor * pow(sunDot, 42.0) * 0.34;
+  sunGlow += uSunColor * pow(sunDot, 7.0) * 0.14;
+  sunGlow += vec3(1.0, 0.88, 0.66) * pow(sunDot, 2.2) * 0.055;
+  col += sunGlow * uSunGlow;
   gl_FragColor = vec4(col, 1.0);
 }
 `;
@@ -115,7 +128,8 @@ function makeSkyMaterial(): THREE.ShaderMaterial {
       uHorizon: { value: new THREE.Color("#c5d8ea") },
       uGround: { value: new THREE.Color("#b0a890") },
       uSunDir: { value: SUN_DIR.clone() },
-      uSunColor: { value: new THREE.Color("#ffe8c0") },
+      uSunColor: { value: new THREE.Color("#ffd9a0") },
+      uSunGlow: { value: 1 },
       uTime: { value: 0 },
     },
     vertexShader: SKY_VERT,
@@ -130,11 +144,12 @@ function makeSunSprite(): THREE.Sprite {
   c.height = 128;
   const ctx = c.getContext("2d")!;
   const g = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
-  g.addColorStop(0, "rgba(255, 240, 210, 0.9)");
-  g.addColorStop(0.14, "rgba(255, 220, 170, 0.5)");
-  g.addColorStop(0.38, "rgba(255, 200, 140, 0.14)");
-  g.addColorStop(0.7, "rgba(255, 190, 130, 0.03)");
-  g.addColorStop(1, "rgba(255, 180, 120, 0)");
+  // Golden core, amber falloff — deliberately never pure white
+  g.addColorStop(0, "rgba(255, 224, 166, 0.88)");
+  g.addColorStop(0.14, "rgba(255, 204, 138, 0.5)");
+  g.addColorStop(0.38, "rgba(255, 184, 110, 0.14)");
+  g.addColorStop(0.7, "rgba(250, 170, 100, 0.03)");
+  g.addColorStop(1, "rgba(240, 160, 90, 0)");
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, 128, 128);
   const tex = new THREE.CanvasTexture(c);
@@ -151,6 +166,225 @@ function makeSunSprite(): THREE.Sprite {
   sprite.scale.setScalar(20);
   sprite.position.copy(SUN_DIR).multiplyScalar(270);
   return sprite;
+}
+
+/* ---------------- weather ---------------- */
+
+type WeatherKind = "sunny" | "cloudy" | "rain" | "snow";
+
+/** Shared across remounts (Strict Mode / HMR) — canvas generation is the slow part. */
+const texCache: {
+  terrainAlbedo?: THREE.CanvasTexture;
+  terrainNormal?: THREE.CanvasTexture;
+  cloud?: THREE.CanvasTexture;
+  mist?: THREE.CanvasTexture;
+  pineBillboard?: THREE.CanvasTexture;
+  grassBlade?: THREE.CanvasTexture;
+} = {};
+
+type WeatherPreset = {
+  zenith: string;
+  horizon: string;
+  ground: string;
+  fogColor: string;
+  fogDensity: number;
+  clear: string;
+  sunColor: string;
+  sunI: number;
+  hemiI: number;
+  fillI: number;
+  rimI: number;
+  envI: number;
+  exposure: number;
+  sunSpriteOpacity: number;
+  /** World scale of the sun glow sprite — big + faint reads as glow behind cloud. */
+  sunSpriteScale: number;
+  /** Sky-shader sun disc: color and glow multiplier (0 = no disc at all). */
+  sunDiscColor: string;
+  sunDiscGlow: number;
+  cloudMul: number;
+  cloudScaleMul: number;
+  /** Lower clouds (negative) so they hug / shroud the peaks in bad weather. */
+  cloudYOff: number;
+  cloudColor: string;
+  mistMul: number;
+  /** Mist sheets are unlit — tint them per weather or they glow against dark skies. */
+  mistColor: string;
+  /** Multiplied over terrain vertex colors — darkens wet ground, brightens snow. */
+  terrainTint: string;
+};
+
+const WEATHER_PRESETS: Record<WeatherKind, WeatherPreset> = {
+  sunny: {
+    zenith: "#4a7ab8",
+    horizon: "#c5d8ea",
+    ground: "#b0a890",
+    fogColor: "#a8c4dc",
+    fogDensity: 0.0055,
+    clear: "#8eb4d4",
+    sunColor: "#fff4e4",
+    sunI: 1.65,
+    hemiI: 0.58,
+    fillI: 0.28,
+    rimI: 0.22,
+    envI: 0.55,
+    exposure: 1.02,
+    sunSpriteOpacity: 0.85,
+    sunSpriteScale: 26,
+    sunDiscColor: "#ffd9a0",
+    sunDiscGlow: 1,
+    cloudMul: 1,
+    cloudScaleMul: 1,
+    cloudYOff: 0,
+    cloudColor: "#eef2f6",
+    mistMul: 1,
+    mistColor: "#c8d8e8",
+    terrainTint: "#c8cfc0",
+  },
+  cloudy: {
+    zenith: "#7e93a8",
+    horizon: "#ccd3da",
+    ground: "#9c9a92",
+    fogColor: "#b8c2ca",
+    fogDensity: 0.0068,
+    clear: "#aeb9c4",
+    sunColor: "#eceff2",
+    sunI: 0.62,
+    hemiI: 0.9,
+    fillI: 0.32,
+    rimI: 0,
+    envI: 0.48,
+    exposure: 1.0,
+    // Bright diffuse glow where the sun hides behind the deck
+    sunSpriteOpacity: 0.16,
+    sunSpriteScale: 46,
+    sunDiscColor: "#e4e9ee",
+    sunDiscGlow: 0.2,
+    cloudMul: 1.85,
+    cloudScaleMul: 1.3,
+    cloudYOff: -5,
+    cloudColor: "#d8dde4",
+    mistMul: 1.4,
+    mistColor: "#b6c2cc",
+    terrainTint: "#b8beb2",
+  },
+  rain: {
+    zenith: "#525e6a",
+    horizon: "#8a949e",
+    ground: "#767c84",
+    // Fog matches the sky horizon exactly so the ridge fades in without a seam;
+    // light enough that peaks stay a dim, readable silhouette instead of a gray slab
+    fogColor: "#8a949e",
+    fogDensity: 0.0095,
+    clear: "#8a949e",
+    sunColor: "#ccd3da",
+    sunI: 0.3,
+    hemiI: 0.72,
+    fillI: 0.24,
+    rimI: 0,
+    envI: 0.35,
+    exposure: 0.92,
+    sunSpriteOpacity: 0,
+    sunSpriteScale: 26,
+    sunDiscColor: "#c4ccd4",
+    sunDiscGlow: 0.05,
+    cloudMul: 2.3,
+    cloudScaleMul: 1.4,
+    cloudYOff: -14,
+    cloudColor: "#9aa4ae",
+    mistMul: 1.25,
+    mistColor: "#96a2ac",
+    terrainTint: "#96a09c",
+  },
+  snow: {
+    zenith: "#8a9aae",
+    horizon: "#e0e6ec",
+    ground: "#c2c6cc",
+    fogColor: "#ccd4dc",
+    fogDensity: 0.0082,
+    clear: "#c6d0d8",
+    sunColor: "#f2f4f6",
+    sunI: 0.55,
+    hemiI: 1.0,
+    fillI: 0.3,
+    rimI: 0,
+    envI: 0.52,
+    exposure: 1.02,
+    sunSpriteOpacity: 0.22,
+    sunSpriteScale: 38,
+    sunDiscColor: "#eef0f2",
+    sunDiscGlow: 0.25,
+    cloudMul: 1.7,
+    cloudScaleMul: 1.25,
+    cloudYOff: -9,
+    cloudColor: "#e4e9ee",
+    mistMul: 1.3,
+    mistColor: "#d0d8e0",
+    terrainTint: "#d4d8dc",
+  },
+};
+
+/** Map API weather buckets onto the grove's four scene presets. */
+function weatherFromApiCondition(condition: WeatherCondition): WeatherKind {
+  if (condition === "sunny") return "sunny";
+  if (condition === "snowy") return "snow";
+  if (condition === "rainy" || condition === "stormy") return "rain";
+  return "cloudy"; // cloudy + foggy
+}
+
+/** Rain as short vertical line streaks — reads better than dots and is still cheap. */
+function makeRain(): { obj: THREE.LineSegments; count: number } {
+  const count = 420;
+  const pos = new Float32Array(count * 6);
+  for (let i = 0; i < count; i += 1) {
+    const x = -70 + hash2(i, 61) * 140;
+    const y = hash2(i, 62) * 45;
+    const z = -60 + hash2(i, 63) * 110;
+    pos[i * 6] = x;
+    pos[i * 6 + 1] = y;
+    pos[i * 6 + 2] = z;
+    pos[i * 6 + 3] = x + 0.12;
+    pos[i * 6 + 4] = y + 0.95;
+    pos[i * 6 + 5] = z;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  const mat = new THREE.LineBasicMaterial({
+    color: new THREE.Color("#9ab6cc"),
+    transparent: true,
+    opacity: 0.32,
+    fog: true,
+    depthWrite: false,
+  });
+  const obj = new THREE.LineSegments(geo, mat);
+  obj.visible = false;
+  obj.frustumCulled = false;
+  return { obj, count };
+}
+
+function makeSnow(): { obj: THREE.Points; count: number } {
+  const count = 380;
+  const pos = new Float32Array(count * 3);
+  for (let i = 0; i < count; i += 1) {
+    pos[i * 3] = -70 + hash2(i, 71) * 140;
+    pos[i * 3 + 1] = hash2(i, 72) * 42;
+    pos[i * 3 + 2] = -60 + hash2(i, 73) * 110;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  const mat = new THREE.PointsMaterial({
+    color: new THREE.Color("#f2f5f8"),
+    size: 0.22,
+    transparent: true,
+    opacity: 0.85,
+    depthWrite: false,
+    sizeAttenuation: true,
+    fog: true,
+  });
+  const obj = new THREE.Points(geo, mat);
+  obj.visible = false;
+  obj.frustumCulled = false;
+  return { obj, count };
 }
 
 /* ---------------- terrain ---------------- */
@@ -210,6 +444,7 @@ function heightAt(x: number, z: number): number {
 }
 
 function makeTerrainAlbedoTexture(): THREE.CanvasTexture {
+  if (texCache.terrainAlbedo) return texCache.terrainAlbedo;
   const c = document.createElement("canvas");
   c.width = 512;
   c.height = 512;
@@ -241,10 +476,12 @@ function makeTerrainAlbedoTexture(): THREE.CanvasTexture {
   tex.repeat.set(32, 22);
   tex.anisotropy = 8;
   tex.colorSpace = THREE.SRGBColorSpace;
+  texCache.terrainAlbedo = tex;
   return tex;
 }
 
 function makeTerrainNormalTexture(): THREE.CanvasTexture {
+  if (texCache.terrainNormal) return texCache.terrainNormal;
   const c = document.createElement("canvas");
   c.width = 128;
   c.height = 128;
@@ -267,10 +504,13 @@ function makeTerrainNormalTexture(): THREE.CanvasTexture {
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(48, 34);
+  texCache.terrainNormal = tex;
   return tex;
 }
 
-function buildTerrain(): THREE.Mesh {
+type TerrainBuild = { mesh: THREE.Mesh; baseColors: Float32Array; snowColors: Float32Array };
+
+function buildTerrain(): TerrainBuild {
   const W = 320;
   const D = 230;
   const ZC = -42;
@@ -279,8 +519,11 @@ function buildTerrain(): THREE.Mesh {
   geo.rotateX(-Math.PI / 2);
   const pos = geo.attributes.position as THREE.BufferAttribute;
   const colors = new Float32Array(pos.count * 3);
+  const snowColors = new Float32Array(pos.count * 3);
   const col = new THREE.Color();
   const tmp = new THREE.Color();
+  const snowCol = new THREE.Color();
+  const C_SNOW_FRESH = new THREE.Color("#e9eef4");
 
   for (let i = 0; i < pos.count; i += 1) {
     const x = pos.getX(i);
@@ -377,8 +620,19 @@ function buildTerrain(): THREE.Mesh {
     colors[i * 3] = col.r;
     colors[i * 3 + 1] = col.g;
     colors[i * 3 + 2] = col.b;
+
+    // Snow-weather variant: fresh cover settles on flat ground, thins on steep rock
+    {
+      const flatness = 1 - smoothstep(0.55, 1.5, s);
+      const patchy = 0.75 + patch * 0.25;
+      const cover = Math.min(0.92, (0.5 + 0.42 * flatness) * patchy);
+      snowCol.copy(col).lerp(C_SNOW_FRESH, cover);
+      snowColors[i * 3] = snowCol.r;
+      snowColors[i * 3 + 1] = snowCol.g;
+      snowColors[i * 3 + 2] = snowCol.b;
+    }
   }
-  geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+  geo.setAttribute("color", new THREE.BufferAttribute(colors.slice(), 3));
   geo.computeVertexNormals();
 
   const mat = new THREE.MeshStandardMaterial({
@@ -394,12 +648,13 @@ function buildTerrain(): THREE.Mesh {
   const mesh = new THREE.Mesh(geo, mat);
   mesh.receiveShadow = true;
   mesh.castShadow = false;
-  return mesh;
+  return { mesh, baseColors: colors, snowColors };
 }
 
 /* ---------------- clouds / mist / grass helpers ---------------- */
 
 function makeCloudTexture(): THREE.CanvasTexture {
+  if (texCache.cloud) return texCache.cloud;
   // Soft realistic cumulus — wispy edges, cool belly, low contrast
   const W = 384;
   const H = 192;
@@ -437,11 +692,13 @@ function makeCloudTexture(): THREE.CanvasTexture {
   ctx.putImageData(img, 0, 0);
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
+  texCache.cloud = tex;
   return tex;
 }
 
 /** Soft painterly pine silhouette for distant billboards — feathered, not cone spam. */
 function makePineBillboardTexture(): THREE.CanvasTexture {
+  if (texCache.pineBillboard) return texCache.pineBillboard;
   const c = document.createElement("canvas");
   c.width = 160;
   c.height = 240;
@@ -487,6 +744,7 @@ function makePineBillboardTexture(): THREE.CanvasTexture {
 
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
+  texCache.pineBillboard = tex;
   return tex;
 }
 
@@ -551,7 +809,7 @@ void main() {
 }
 `;
 
-function makeWaterMaterial(_envMap: THREE.Texture): THREE.ShaderMaterial {
+function makeWaterMaterial(_envMap?: THREE.Texture | null): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
     transparent: true,
     depthWrite: false,
@@ -569,6 +827,7 @@ function makeWaterMaterial(_envMap: THREE.Texture): THREE.ShaderMaterial {
 }
 
 function makeMistTexture(): THREE.CanvasTexture {
+  if (texCache.mist) return texCache.mist;
   const c = document.createElement("canvas");
   c.width = 256;
   c.height = 64;
@@ -580,10 +839,12 @@ function makeMistTexture(): THREE.CanvasTexture {
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, 256, 64);
   const tex = new THREE.CanvasTexture(c);
+  texCache.mist = tex;
   return tex;
 }
 
 function makeGrassBladeTexture(): THREE.CanvasTexture {
+  if (texCache.grassBlade) return texCache.grassBlade;
   const c = document.createElement("canvas");
   c.width = 32;
   c.height = 64;
@@ -602,6 +863,7 @@ function makeGrassBladeTexture(): THREE.CanvasTexture {
   ctx.fill();
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
+  texCache.grassBlade = tex;
   return tex;
 }
 
@@ -1522,6 +1784,9 @@ type WorldRef = {
   camBase: THREE.Vector3;
   camTarget: THREE.Vector3;
   plant: (streak: number) => void;
+  applyWeather: (kind: WeatherKind) => void;
+  weatherSunI: number;
+  sunSpriteScale: number;
 };
 
 function ageStage(age: number): 0 | 1 | 2 {
@@ -1642,6 +1907,7 @@ function syncGrove(world: WorldRef, streak: number) {
 /* ---------------- component ---------------- */
 
 export function StreakGrove3D({
+  active = true,
   streak,
   bestStreak,
   sentToday,
@@ -1649,6 +1915,7 @@ export function StreakGrove3D({
   title,
   goalMet,
 }: {
+  active?: boolean;
   streak: number;
   bestStreak: number;
   sentToday: number;
@@ -1658,14 +1925,59 @@ export function StreakGrove3D({
 }) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const worldRef = useRef<WorldRef | null>(null);
-  /** TEMP: preview slider overrides real streak so you can inspect layouts. */
-  const [previewStreak, setPreviewStreak] = useState<number | null>(100);
-  const displayStreak = previewStreak ?? streak;
-  const streakRef = useRef(displayStreak);
-  streakRef.current = displayStreak;
+  const groveControlsRef = useRef<{ resize: () => void; syncLoop: () => void } | null>(null);
+  const streakRef = useRef(streak);
+  streakRef.current = streak;
+  const activeRef = useRef(active);
+  activeRef.current = active;
   const [webglFailed, setWebglFailed] = useState(false);
-  const streakAtRisk = streak > 0 && sentToday === 0 && previewStreak === null;
-  const overflow = Math.max(0, displayStreak - MAX_TREES_3D);
+  const streakAtRisk = streak > 0 && sentToday === 0;
+  const overflow = Math.max(0, streak - MAX_TREES_3D);
+
+  // Live weather via /api/weather — IP by default; precise coords when Setup toggle is on
+  const [autoWeather, setAutoWeather] = useState<WeatherKind>("sunny");
+  const [weatherPlace, setWeatherPlace] = useState<string | null>(null);
+  const [weatherTemp, setWeatherTemp] = useState<string | null>(null);
+  const weatherRef = useRef<WeatherKind>(autoWeather);
+  weatherRef.current = autoWeather;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadWeather() {
+      try {
+        const snapshot = readPreciseLocationEnabled()
+          ? await getWeather(await requestPreciseCoordinates())
+          : await getWeather();
+        if (cancelled) return;
+        setAutoWeather(weatherFromApiCondition(snapshot.condition));
+        setWeatherPlace(shortLocationLabel(snapshot.locationLabel));
+        setWeatherTemp(formatWeatherTemp(snapshot.temperatureC, snapshot.locationLabel));
+      } catch {
+        // Offline / denied / IP unavailable — keep last known or sunny default
+      }
+    }
+
+    function onPreciseChange() {
+      void loadWeather();
+    }
+
+    void loadWeather();
+    window.addEventListener(PRECISE_LOCATION_CHANGED_EVENT, onPreciseChange);
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === PRECISE_LOCATION_KEY) onPreciseChange();
+    };
+    window.addEventListener("storage", onStorage);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(PRECISE_LOCATION_CHANGED_EVENT, onPreciseChange);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, []);
+
+  useEffect(() => {
+    worldRef.current?.applyWeather(autoWeather);
+  }, [autoWeather]);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -1691,7 +2003,8 @@ export function StreakGrove3D({
     // Cap pixel ratio hard — biggest laptop-heat saver on Retina
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.25));
     renderer.setClearColor(new THREE.Color("#8eb4d4"), 1);
-    renderer.shadowMap.enabled = true;
+    // Shadows + PMREM are deferred until after the first paint (big cold-start cost)
+    renderer.shadowMap.enabled = false;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.02;
@@ -1702,8 +2015,10 @@ export function StreakGrove3D({
     renderer.domElement.style.height = "100%";
 
     const scene = new THREE.Scene();
-    // Soft blue daylight haze
-    scene.fog = new THREE.FogExp2(new THREE.Color("#a8c4dc"), 0.0055);
+    // Soft blue daylight haze (weather presets override this)
+    const fogExp = new THREE.FogExp2(new THREE.Color("#a8c4dc"), 0.0055);
+    scene.fog = fogExp;
+    scene.environmentIntensity = 0.55;
 
     const camera = new THREE.PerspectiveCamera(46, 900 / 460, 0.4, 700);
     const cam0 = cameraForGrove(streakRef.current);
@@ -1716,12 +2031,8 @@ export function StreakGrove3D({
     const skyDome = new THREE.Mesh(new THREE.SphereGeometry(480, 24, 14), skyMat);
     scene.add(skyDome);
 
-    const pmrem = new THREE.PMREMGenerator(renderer);
-    const skyScene = new THREE.Scene();
-    skyScene.add(new THREE.Mesh(new THREE.SphereGeometry(50, 24, 14), skyMat.clone()));
-    const envRT = pmrem.fromScene(skyScene, 0.04);
-    scene.environment = envRT.texture;
-    scene.environmentIntensity = 0.55;
+    let pmrem: THREE.PMREMGenerator | null = null;
+    let envRT: THREE.WebGLRenderTarget | null = null;
 
     // Natural Earth daylight — key light from top-right so peaks catch sun
     const hemi = new THREE.HemisphereLight(new THREE.Color("#9ec0e0"), new THREE.Color("#4a6840"), 0.58);
@@ -1729,7 +2040,7 @@ export function StreakGrove3D({
     const sun = new THREE.DirectionalLight(new THREE.Color("#fff4e4"), 1.65);
     sun.position.copy(SUN_DIR).multiplyScalar(140);
     sun.target.position.set(18, 18, -72);
-    sun.castShadow = true;
+    sun.castShadow = false;
     sun.shadow.mapSize.set(1024, 1024);
     sun.shadow.camera.left = -90;
     sun.shadow.camera.right = 90;
@@ -1755,24 +2066,21 @@ export function StreakGrove3D({
     scene.add(rim);
     scene.add(rim.target);
 
-    // Build world pieces defensively so one failure doesn't leave a blank canvas
+    // First paint: terrain + trees + water — decorations land on following frames
     let pineBillboards: { mesh: THREE.InstancedMesh; bases: Float32Array } | null = null;
+    let terrain: TerrainBuild | null = null;
     try {
-      scene.add(buildTerrain());
-      scene.add(buildForegroundGrass());
-      pineBillboards = buildFoothillPines();
-      scene.add(pineBillboards.mesh);
-      scene.add(buildShoreRocks());
-      scene.add(buildDock());
+      terrain = buildTerrain();
+      scene.add(terrain.mesh);
     } catch (err) {
-      console.error("[StreakGrove3D] environment build failed", err);
+      console.error("[StreakGrove3D] terrain build failed", err);
     }
 
     const treeGroup = new THREE.Group();
     scene.add(treeGroup);
 
     // Animated lake with fresnel + glitter (cheap custom shader, no Reflector)
-    const waterMat = makeWaterMaterial(envRT.texture);
+    const waterMat = makeWaterMaterial();
     const water = new THREE.Mesh(new THREE.CircleGeometry(1, 80), waterMat);
     water.rotation.x = -Math.PI / 2;
     water.scale.set(LAKE.rx, LAKE.rz, 1);
@@ -1786,10 +2094,6 @@ export function StreakGrove3D({
     const sunSprite = makeSunSprite();
     scene.add(sunSprite);
 
-    // Soft cumulus behind the peaks — slow lateral drift
-    const cloudTex = makeCloudTexture();
-    const cloudSprites: THREE.Sprite[] = [];
-    const cloudHomeX: number[] = [];
     const cloudLayouts = [
       { x: -110, y: 48, z: -168, sx: 110, sy: 34, o: 0.42 },
       { x: -40, y: 56, z: -188, sx: 130, sy: 40, o: 0.36 },
@@ -1799,44 +2103,11 @@ export function StreakGrove3D({
       { x: 15, y: 42, z: -148, sx: 80, sy: 26, o: 0.34 },
       { x: -20, y: 52, z: -195, sx: 100, sy: 32, o: 0.28 },
     ];
-    for (let i = 0; i < cloudLayouts.length; i += 1) {
-      const L = cloudLayouts[i]!;
-      const mat = new THREE.SpriteMaterial({
-        map: cloudTex,
-        transparent: true,
-        opacity: L.o,
-        depthWrite: false,
-        fog: true,
-        color: new THREE.Color("#eef2f6"),
-      });
-      const spr = new THREE.Sprite(mat);
-      const hx = L.x + hash2(i, 31) * 10;
-      spr.position.set(hx, L.y, L.z);
-      spr.scale.set(L.sx, L.sy, 1);
-      scene.add(spr);
-      cloudSprites.push(spr);
-      cloudHomeX.push(hx);
-    }
-
-    // Soft valley mist (subtle — not a white sheet)
-    const mistTex = makeMistTexture();
+    const cloudSprites: THREE.Sprite[] = [];
+    const cloudHomeX: number[] = [];
     const mistMats: THREE.MeshBasicMaterial[] = [];
-    for (let i = 0; i < 2; i += 1) {
-      const mat = new THREE.MeshBasicMaterial({
-        map: mistTex,
-        transparent: true,
-        opacity: 0.12 - i * 0.03,
-        depthWrite: false,
-        side: THREE.DoubleSide,
-        fog: true,
-        color: new THREE.Color("#c8d8e8"),
-      });
-      mistMats.push(mat);
-      const mist = new THREE.Mesh(new THREE.PlaneGeometry(200, 24), mat);
-      mist.position.set(-10 + i * 28, 2.2 + i * 1.2, -35 - i * 30);
-      mist.rotation.x = -0.06;
-      scene.add(mist);
-    }
+    const cloudBaseO = cloudLayouts.map((L) => L.o);
+    const mistBaseO: number[] = [];
 
     // fireflies when grove is alive (cheap points — skip if reduced motion)
     const fireflyGeo = new THREE.BufferGeometry();
@@ -1860,6 +2131,148 @@ export function StreakGrove3D({
     const fireflies = new THREE.Points(fireflyGeo, fireflyMat);
     scene.add(fireflies);
 
+    // Weather particles (hidden unless active)
+    const rain = makeRain();
+    scene.add(rain.obj);
+    const snow = makeSnow();
+    scene.add(snow.obj);
+
+    let cancelled = false;
+    const afterPaint = (fn: () => void) => {
+      requestAnimationFrame(() => {
+        if (cancelled) return;
+        try {
+          fn();
+        } catch (err) {
+          console.error("[StreakGrove3D] deferred build failed", err);
+        }
+      });
+    };
+
+    // Frame 1: foothill scenery
+    afterPaint(() => {
+      scene.add(buildForegroundGrass());
+      pineBillboards = buildFoothillPines();
+      scene.add(pineBillboards.mesh);
+      scene.add(buildShoreRocks());
+      scene.add(buildDock());
+    });
+
+    // Frame 2: clouds + mist (canvas texture gen is expensive cold)
+    afterPaint(() => {
+      afterPaint(() => {
+        const cloudTex = makeCloudTexture();
+        for (let i = 0; i < cloudLayouts.length; i += 1) {
+          const L = cloudLayouts[i]!;
+          const mat = new THREE.SpriteMaterial({
+            map: cloudTex,
+            transparent: true,
+            opacity: L.o,
+            depthWrite: false,
+            fog: true,
+            color: new THREE.Color("#eef2f6"),
+          });
+          const spr = new THREE.Sprite(mat);
+          const hx = L.x + hash2(i, 31) * 10;
+          spr.position.set(hx, L.y, L.z);
+          spr.scale.set(L.sx, L.sy, 1);
+          scene.add(spr);
+          cloudSprites.push(spr);
+          cloudHomeX.push(hx);
+        }
+        const mistTex = makeMistTexture();
+        for (let i = 0; i < 2; i += 1) {
+          const opacity = 0.12 - i * 0.03;
+          const mat = new THREE.MeshBasicMaterial({
+            map: mistTex,
+            transparent: true,
+            opacity,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+            fog: true,
+            color: new THREE.Color("#c8d8e8"),
+          });
+          mistMats.push(mat);
+          mistBaseO.push(opacity);
+          const mist = new THREE.Mesh(new THREE.PlaneGeometry(200, 24), mat);
+          mist.position.set(-10 + i * 28, 2.2 + i * 1.2, -35 - i * 30);
+          mist.rotation.x = -0.06;
+          scene.add(mist);
+        }
+        if (worldRef.current) {
+          worldRef.current.mistMats = mistMats;
+          worldRef.current.cloudSprites = cloudSprites;
+          worldRef.current.cloudHomeX = new Float32Array(cloudHomeX);
+          worldRef.current.applyWeather(weatherRef.current);
+        }
+      });
+    });
+
+    // Frame 3: env map + shadows (heaviest GPU alloc)
+    afterPaint(() => {
+      afterPaint(() => {
+        afterPaint(() => {
+          pmrem = new THREE.PMREMGenerator(renderer);
+          const skyScene = new THREE.Scene();
+          skyScene.add(new THREE.Mesh(new THREE.SphereGeometry(50, 24, 14), skyMat.clone()));
+          envRT = pmrem.fromScene(skyScene, 0.04);
+          scene.environment = envRT.texture;
+          renderer.shadowMap.enabled = true;
+          sun.castShadow = true;
+        });
+      });
+    });
+    let cloudYOffCur = 0;
+
+    const applyWeather = (kind: WeatherKind) => {
+      const p = WEATHER_PRESETS[kind];
+      (skyMat.uniforms.uZenith!.value as THREE.Color).set(p.zenith);
+      (skyMat.uniforms.uHorizon!.value as THREE.Color).set(p.horizon);
+      (skyMat.uniforms.uGround!.value as THREE.Color).set(p.ground);
+      (skyMat.uniforms.uSunColor!.value as THREE.Color).set(p.sunDiscColor);
+      skyMat.uniforms.uSunGlow!.value = p.sunDiscGlow;
+      fogExp.color.set(p.fogColor);
+      fogExp.density = p.fogDensity;
+      renderer.setClearColor(new THREE.Color(p.clear), 1);
+      renderer.toneMappingExposure = p.exposure;
+      sun.color.set(p.sunColor);
+      sun.intensity = p.sunI;
+      hemi.intensity = p.hemiI;
+      fill.intensity = p.fillI;
+      rim.intensity = p.rimI;
+      scene.environmentIntensity = p.envI;
+      const sMat = sunSprite.material as THREE.SpriteMaterial;
+      sMat.opacity = p.sunSpriteOpacity;
+      sunSprite.visible = p.sunSpriteOpacity > 0.01;
+      sunSprite.scale.setScalar(p.sunSpriteScale);
+      for (let i = 0; i < cloudSprites.length; i += 1) {
+        const L = cloudLayouts[i]!;
+        const cMat = cloudSprites[i]!.material as THREE.SpriteMaterial;
+        cMat.opacity = Math.min(0.92, cloudBaseO[i]! * p.cloudMul);
+        cMat.color.set(p.cloudColor);
+        cloudSprites[i]!.scale.set(L.sx * p.cloudScaleMul, L.sy * p.cloudScaleMul, 1);
+        cloudSprites[i]!.position.y = L.y + p.cloudYOff;
+      }
+      cloudYOffCur = p.cloudYOff;
+      for (let i = 0; i < mistMats.length; i += 1) {
+        mistMats[i]!.opacity = Math.min(0.4, mistBaseO[i]! * p.mistMul);
+        mistMats[i]!.color.set(p.mistColor);
+      }
+      // Ground: swap baked colors for snow cover; tint darkens wet rain ground
+      if (terrain) {
+        const attr = terrain.mesh.geometry.getAttribute("color") as THREE.BufferAttribute;
+        (attr.array as Float32Array).set(kind === "snow" ? terrain.snowColors : terrain.baseColors);
+        attr.needsUpdate = true;
+        (terrain.mesh.material as THREE.MeshStandardMaterial).color.set(p.terrainTint);
+      }
+      rain.obj.visible = kind === "rain";
+      snow.obj.visible = kind === "snow";
+      if (worldRef.current) {
+        worldRef.current.weatherSunI = p.sunI;
+        worldRef.current.sunSpriteScale = p.sunSpriteScale;
+      }
+    };
+
     const plant = (nextStreak: number) => {
       const world = worldRef.current;
       if (!world) return;
@@ -1880,9 +2293,13 @@ export function StreakGrove3D({
       camBase,
       camTarget,
       plant,
+      applyWeather,
+      weatherSunI: WEATHER_PRESETS.sunny.sunI,
+      sunSpriteScale: WEATHER_PRESETS.sunny.sunSpriteScale,
     };
     // Plant immediately so React Strict Mode remounts still show trees
     plant(streakRef.current);
+    applyWeather(weatherRef.current);
 
     const resize = () => {
       const w = mount.clientWidth || 900;
@@ -1899,6 +2316,7 @@ export function StreakGrove3D({
     let elapsed = 0;
     let frame = 0;
     const loop = () => {
+      if (!activeRef.current || document.hidden) return;
       const delta = clock.getDelta();
       elapsed += delta;
       frame += 1;
@@ -1920,7 +2338,7 @@ export function StreakGrove3D({
             const span = 150;
             const speed = 2.4 + i * 0.28;
             spr.position.x = home - span * 0.5 + ((elapsed * speed + i * 17) % span);
-            spr.position.y = cloudLayouts[i]!.y + Math.sin(elapsed * 0.15 + i * 1.1) * 1.4;
+            spr.position.y = cloudLayouts[i]!.y + cloudYOffCur + Math.sin(elapsed * 0.15 + i * 1.1) * 1.4;
           }
         }
         // Yaw-only billboards so distant pines face the camera without looking like cones
@@ -1945,8 +2363,32 @@ export function StreakGrove3D({
           if (!reducedMotion) t.group.rotation.z = Math.sin(elapsed * 0.85 + t.phase) * 0.014;
         }
         const pulse = world.goalMet ? 1 + Math.sin(elapsed * 2.2) * 0.03 : 1;
-        world.sun.intensity = 1.65 * pulse;
-        world.sunSprite.scale.setScalar(20 * (0.96 + pulse * 0.04));
+        world.sun.intensity = world.weatherSunI * pulse;
+        world.sunSprite.scale.setScalar(world.sunSpriteScale * (0.96 + pulse * 0.04));
+      }
+
+      // Weather particles
+      if (rain.obj.visible && !reducedMotion) {
+        const arr = rain.obj.geometry.attributes.position as THREE.BufferAttribute;
+        for (let i = 0; i < rain.count; i += 1) {
+          let y = arr.getY(i * 2) - delta * 34;
+          if (y < 0) y += 45;
+          const x = arr.getX(i * 2) + delta * 3.5;
+          const xw = x > 70 ? x - 140 : x;
+          arr.setXYZ(i * 2, xw, y, arr.getZ(i * 2));
+          arr.setXYZ(i * 2 + 1, xw + 0.12, y + 0.95, arr.getZ(i * 2 + 1));
+        }
+        arr.needsUpdate = true;
+      }
+      if (snow.obj.visible && !reducedMotion && frame % 2 === 0) {
+        const arr = snow.obj.geometry.attributes.position as THREE.BufferAttribute;
+        for (let i = 0; i < snow.count; i += 1) {
+          let y = arr.getY(i) - delta * 2 * 1.6;
+          if (y < 0) y += 42;
+          const x = arr.getX(i) + Math.sin(elapsed * 0.8 + i) * 0.02;
+          arr.setXYZ(i, x, y, arr.getZ(i));
+        }
+        arr.needsUpdate = true;
       }
 
       const liveStreak = streakRef.current;
@@ -1961,9 +2403,18 @@ export function StreakGrove3D({
 
       renderer.render(scene, camera);
     };
-    renderer.setAnimationLoop(loop);
+
+    const syncLoop = () => {
+      if (activeRef.current && !document.hidden) {
+        clock.getDelta();
+        renderer.setAnimationLoop(loop);
+      } else {
+        renderer.setAnimationLoop(null);
+      }
+    };
+    syncLoop();
     try {
-      loop();
+      if (activeRef.current) loop();
     } catch (err) {
       console.error("[StreakGrove3D] first frame failed", err);
     }
@@ -1974,16 +2425,17 @@ export function StreakGrove3D({
         console.error("[StreakGrove3D] force render failed", err);
       }
     };
-    const onVisibility = () => {
-      if (document.hidden) renderer.setAnimationLoop(null);
-      else {
-        clock.getDelta();
-        renderer.setAnimationLoop(loop);
-      }
-    };
+    const onVisibility = () => syncLoop();
     document.addEventListener("visibilitychange", onVisibility);
 
+    groveControlsRef.current = {
+      resize,
+      syncLoop,
+    };
+
     return () => {
+      cancelled = true;
+      groveControlsRef.current = null;
       worldRef.current = null;
       document.removeEventListener("visibilitychange", onVisibility);
       ro.disconnect();
@@ -1997,14 +2449,29 @@ export function StreakGrove3D({
           else if (m) m.dispose();
         }
       });
-      envRT.dispose();
-      pmrem.dispose();
+      envRT?.dispose();
+      pmrem?.dispose();
       renderer.dispose();
       if (renderer.domElement.parentElement === mount) mount.removeChild(renderer.domElement);
     };
     // streak is read inside the animation loop for fireflies; scene rebuilds only once
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    activeRef.current = active;
+    const controls = groveControlsRef.current;
+    if (!controls) return;
+    if (active) {
+      // display:none → visible can leave a 0×0 canvas until resize
+      requestAnimationFrame(() => {
+        controls.resize();
+        controls.syncLoop();
+      });
+    } else {
+      controls.syncLoop();
+    }
+  }, [active]);
 
   useEffect(() => {
     const world = worldRef.current;
@@ -2014,13 +2481,13 @@ export function StreakGrove3D({
   useEffect(() => {
     const world = worldRef.current;
     if (!world) return;
-    world.plant(displayStreak);
-  }, [displayStreak]);
+    world.plant(streak);
+  }, [streak]);
 
   if (webglFailed) {
     return (
       <StreakGrove
-        streak={displayStreak}
+        streak={streak}
         bestStreak={bestStreak}
         sentToday={sentToday}
         level={level}
@@ -2030,10 +2497,12 @@ export function StreakGrove3D({
     );
   }
 
+  const weatherLabel = [weatherTemp, weatherPlace].filter(Boolean).join(" · ");
+
   return (
     <div
       className={`outreach-village streak-grove${goalMet ? " celebrating" : ""}`}
-      aria-label={`Streak grove with ${displayStreak} trees`}
+      aria-label={`Streak grove with ${streak} trees`}
     >
       <div className="village-sky-label">
         <div>
@@ -2047,24 +2516,6 @@ export function StreakGrove3D({
               No sends yet today — send one email to keep {streak === 1 ? "your tree" : `all ${streak} trees`} alive.
             </p>
           )}
-          {/* TEMP preview control — remove before shipping */}
-          <label className="grove-preview-slider">
-            <span>
-              Preview streak: <strong>{displayStreak}</strong>
-              {previewStreak !== null ? " (slider)" : ` (live · ${streak})`}
-            </span>
-            <input
-              type="range"
-              min={0}
-              max={Math.min(200, MAX_TREES_3D)}
-              step={1}
-              value={displayStreak}
-              onChange={(e) => setPreviewStreak(Number(e.target.value))}
-            />
-            <button type="button" className="grove-preview-reset" onClick={() => setPreviewStreak(null)}>
-              Use live streak ({streak})
-            </button>
-          </label>
         </div>
         <div className="village-character-card">
           <div className={`village-character level-${Math.min(level, 8)}`} aria-hidden="true">
@@ -2076,14 +2527,8 @@ export function StreakGrove3D({
             <strong>{title}</strong>
             <span>Level {level}</span>
             <span>
-              {displayStreak}-day streak
-              {previewStreak !== null
-                ? ` · preview (live ${streak})`
-                : bestStreak > streak
-                  ? ` · best ${bestStreak}`
-                  : bestStreak > 1
-                    ? " · personal best"
-                    : ""}
+              {streak}-day streak
+              {bestStreak > streak ? ` · best ${bestStreak}` : bestStreak > 1 ? " · personal best" : ""}
             </span>
           </div>
         </div>
@@ -2094,7 +2539,13 @@ export function StreakGrove3D({
         className="village-canvas grove-canvas-3d"
         style={{ aspectRatio: "900 / 460", position: "relative", overflow: "hidden", background: "#8eb4d4" }}
       >
-        {displayStreak === 0 && (
+        {weatherLabel && (
+          <div className="grove-weather-badge" aria-live="polite">
+            <strong>{weatherTemp ?? "—"}</strong>
+            {weatherPlace && <span>{weatherPlace}</span>}
+          </div>
+        )}
+        {streak === 0 && (
           <div className="grove-empty-sign">
             <strong>Bare soil, big plans</strong>
             <span>Send one email today to plant your first tree</span>

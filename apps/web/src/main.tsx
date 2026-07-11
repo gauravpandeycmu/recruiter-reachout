@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import {
   atLocalHour,
   nextMondayAt,
@@ -21,13 +21,10 @@ import {
   addEmailSample,
   applyBatchPreviewEdits,
   clearActiveCandidates,
-  disconnectGmail,
   generateCompanyContent,
   getAnalytics,
   getEnvStatus,
   getCompanyHistory,
-  getGmailAuthUrl,
-  getGmailStatus,
   getJobBacklog,
   getState,
   getWorkerStatus,
@@ -55,8 +52,6 @@ import {
   saveContent,
   scheduleToday,
   selectResume,
-  syncBounces,
-  syncTracking,
   updateCandidate,
   uploadResume,
   type AppData,
@@ -71,9 +66,16 @@ import {
   stripTestModePrefix,
   summarizeUpcomingSends,
 } from "./sendHelpers";
-import { StreakGrove3D } from "./StreakGrove3D";
-import { WeatherWidget } from "./WeatherWidget";
+import { PreciseLocationSetup } from "./WeatherWidget";
 import "./styles.css";
+
+const StreakGrove3D = lazy(() =>
+  import("./StreakGrove3D").then((mod) => ({ default: mod.StreakGrove3D })),
+);
+
+function prefetchGrowChunk() {
+  void import("./StreakGrove3D");
+}
 
 type Tab = "send" | "scheduled" | "setup" | "history" | "analytics";
 
@@ -636,12 +638,12 @@ function App() {
     const pages = Number(initialPrefs.capturePages);
     return pages >= 1 && pages <= 3 ? pages : 2;
   });
-  const [gmail, setGmail] = useState<{ connected: boolean; email?: string }>({ connected: false });
   const [backlog, setBacklog] = useState<JobBacklogSummary[]>([]);
   const [history, setHistory] = useState<CompanyHistorySummary[]>([]);
   const [historyQuery, setHistoryQuery] = useState("");
   const [expandedCompanies, setExpandedCompanies] = useState<Set<string>>(new Set());
   const [analytics, setAnalytics] = useState<AnalyticsSummary>();
+  const [growMounted, setGrowMounted] = useState(() => readStoredTab() === "analytics");
   const [goalDraft, setGoalDraft] = useState("20");
   const [showCatToast, setShowCatToast] = useState(false);
   const celebratedDateRef = useRef<string | null>(null);
@@ -1149,9 +1151,8 @@ function App() {
       setPreviewDirty(false);
     }
 
-    const [gmailResult, backlogResult, historyResult, envResult, discoveryResult, workerResult, settingsResult] =
+    const [backlogResult, historyResult, envResult, discoveryResult, workerResult, settingsResult] =
       await Promise.allSettled([
-        getGmailStatus(),
         getJobBacklog(),
         getCompanyHistory(),
         getEnvStatus(),
@@ -1160,9 +1161,6 @@ function App() {
         getDiscoverySettings(),
       ]);
 
-    if (gmailResult.status === "fulfilled") {
-      setGmail(gmailResult.value);
-    }
     if (backlogResult.status === "fulfilled") {
       setBacklog(backlogResult.value.jobs);
     }
@@ -1304,12 +1302,30 @@ function App() {
       void loadTestModeSettings();
     }
     if (tab === "analytics") {
+      setGrowMounted(true);
       void refreshAnalytics().catch((error: Error) => setMessage(error.message));
     }
     if (tab === "history") {
       void refreshHistory().catch((error: Error) => setMessage(error.message));
     }
   }, [tab]);
+
+  // Prefetch Grow chunk + analytics while idle so the tab opens without a cold start
+  useEffect(() => {
+    const run = () => {
+      prefetchGrowChunk();
+      void refreshAnalytics().catch(() => {
+        // Prefetch is best-effort; Grow tab will retry on open.
+      });
+    };
+    const ric = window.requestIdleCallback?.bind(window);
+    if (ric) {
+      const id = ric(run, { timeout: 2500 });
+      return () => window.cancelIdleCallback?.(id);
+    }
+    const timer = window.setTimeout(run, 1200);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   useEffect(() => {
     writeUiPrefs({
@@ -2361,34 +2377,6 @@ function App() {
     }
   }
 
-  async function connectGmail() {
-    const auth = await getGmailAuthUrl();
-    if (!auth.authUrl) {
-      setMessage(auth.note);
-      return;
-    }
-    window.open(auth.authUrl, "_blank", "noopener,noreferrer");
-    setMessage("Finish Gmail consent in the opened tab, then refresh status.");
-  }
-
-  async function runDisconnectGmail() {
-    await disconnectGmail();
-    setGmail({ connected: false });
-    setMessage("Disconnected Gmail.");
-  }
-
-  async function runSyncTracking() {
-    const result = await syncTracking();
-    setMessage(`Synced ${result.events.length} tracking event(s).`);
-    await refresh();
-  }
-
-  async function runSyncBounces() {
-    const result = await syncBounces();
-    setMessage(`Parsed ${result.parsed} bounce message(s).`);
-    await refresh();
-  }
-
   async function runScheduleToday() {
     await scheduleToday();
     setMessage("Scheduled today's safe send queue.");
@@ -2475,22 +2463,21 @@ function App() {
           <button className={tab === "scheduled" ? "tab active" : "tab"} onClick={() => setTab("scheduled")}>
             Scheduled{upcomingSends.length > 0 ? ` (${upcomingSends.length})` : ""}
           </button>
-          <button className={tab === "setup" ? "tab active" : "tab"} onClick={() => setTab("setup")}>
-            Setup
+          <button
+            className={tab === "analytics" ? "tab active" : "tab"}
+            onClick={() => setTab("analytics")}
+            onMouseEnter={prefetchGrowChunk}
+            onFocus={prefetchGrowChunk}
+          >
+            Grow
           </button>
           <button className={tab === "history" ? "tab active" : "tab"} onClick={() => setTab("history")}>
             History
           </button>
-          <button className={tab === "analytics" ? "tab active" : "tab"} onClick={() => setTab("analytics")}>
-            Analytics
+          <button className={tab === "setup" ? "tab active" : "tab"} onClick={() => setTab("setup")}>
+            Setup
           </button>
         </nav>
-        <div className="header-side">
-          <span className={gmail.connected ? "chip ready" : "chip blocked"}>
-            {gmail.connected ? `Gmail: ${gmail.email}` : "Gmail not connected"}
-          </span>
-          <button onClick={() => void refresh()}>Refresh</button>
-        </div>
       </header>
 
       {envStatus?.testMode.enabled && (
@@ -3134,8 +3121,7 @@ function App() {
                     </div>
                   )}
                   <p className="hint">
-                    Worker sends each email at its slot via Gmail with Streak tracking on (not Gmail Schedule send).
-                    Keep the laptop awake and the worker running. Spacing is approximate (a little jitter).
+                    Mails go out at their scheduled times — keep your laptop on and this app running so they can send.
                   </p>
                 </div>
               </>
@@ -3362,8 +3348,7 @@ function App() {
                 <p className="eyebrow">Queue</p>
                 <h2>Scheduled sends</h2>
                 <p className="hint">
-                  Sends go out automatically while this app is running (API + worker). Keep your laptop on — you do not
-                  need this tab open. Edit or remove any send before its time.
+                  Mails go out at their scheduled times while this app is running. Keep your laptop on — you do not need this tab open.
                 </p>
               </div>
               {upcomingSummary && (
@@ -3644,28 +3629,7 @@ function App() {
             <button onClick={() => void saveTestModeRecipient()}>Save test recipient</button>
           </section>
 
-          <section className="panel">
-            <h2>Gmail &amp; tracking</h2>
-            <p className={gmail.connected ? "ok" : "warning"}>
-              {gmail.connected ? `Connected: ${gmail.email}` : "Gmail is not connected."}
-            </p>
-            <div className="actions">
-              <button className="primary" onClick={() => void connectGmail()}>Connect Gmail</button>
-              <button onClick={() => void runDisconnectGmail()}>Disconnect</button>
-              <button onClick={() => void runSyncTracking()}>Sync tracking</button>
-              <button onClick={() => void runSyncBounces()}>Sync bounces</button>
-            </div>
-            {envStatus?.ok ? (
-              <p className="ok">Public tracking and Gmail environment are configured.</p>
-            ) : (
-              <div className="warning-box">
-                <strong>Setup warnings</strong>
-                {(envStatus?.warnings ?? ["Checking local environment..."]).map((warning) => (
-                  <p key={warning}>{warning}</p>
-                ))}
-              </div>
-            )}
-          </section>
+          <PreciseLocationSetup />
 
           <section className="panel setup-span-full">
             <h2>Sample emails</h2>
@@ -3736,18 +3700,17 @@ function App() {
 
           <section className="panel setup-span-full">
             <h2>Resumes</h2>
-            <p className="hint">Upload multiple PDFs with nicknames. Pick which one to attach on the Send tab.</p>
+            <p className="hint">Upload PDFs with optional nicknames. Choose which one to attach on Send.</p>
             <div className="resume-upload-row">
               <label>
                 Nickname
                 <input
                   value={resumeNickname}
                   onChange={(event) => setResumeNickname(event.target.value)}
-                  placeholder="e.g. SWE intern, Product"
+                  placeholder="e.g. SWE intern"
                 />
               </label>
-              <label>
-                PDF file
+              <label className="resume-file-pick">
                 <input
                   type="file"
                   accept="application/pdf"
@@ -3756,6 +3719,7 @@ function App() {
                     event.target.value = "";
                   }}
                 />
+                Choose PDF
               </label>
             </div>
             {resumes.length === 0 ? (
@@ -4239,23 +4203,37 @@ function App() {
         </section>
       )}
 
-      {tab === "analytics" && (
-        <section className="analytics-stack analytics-funland" key="analytics">
+      {growMounted && (
+        <section
+          className={`analytics-stack analytics-funland${tab === "analytics" ? "" : " tab-panel-dormant"}`}
+          key="analytics"
+          hidden={tab !== "analytics"}
+          aria-hidden={tab !== "analytics"}
+        >
           {!analytics ? (
             <section className="panel">
-              <p className="hint">Loading analytics…</p>
+              <p className="hint">Loading your grove…</p>
             </section>
           ) : (
             <>
               <section className="panel village-hero-panel">
-                <StreakGrove3D
-                  streak={analytics.goalProgress.sendStreak}
-                  bestStreak={analytics.goalProgress.longestSendStreak}
-                  sentToday={analytics.goalProgress.sentToday}
-                  level={analytics.motivation.level}
-                  title={analytics.motivation.title}
-                  goalMet={analytics.goalProgress.met}
-                />
+                <Suspense
+                  fallback={
+                    <div className="grove-canvas-skeleton" aria-hidden="true">
+                      <p className="hint">Growing the forest…</p>
+                    </div>
+                  }
+                >
+                  <StreakGrove3D
+                    active={tab === "analytics"}
+                    streak={analytics.goalProgress.sendStreak}
+                    bestStreak={analytics.goalProgress.longestSendStreak}
+                    sentToday={analytics.goalProgress.sentToday}
+                    level={analytics.motivation.level}
+                    title={analytics.motivation.title}
+                    goalMet={analytics.goalProgress.met}
+                  />
+                </Suspense>
                 <div className="village-goal-rail">
                   <div className="village-goal-copy">
                     <p className="eyebrow">Today · {analytics.today.date}</p>
@@ -4313,7 +4291,6 @@ function App() {
                     <div className="village-chip"><strong>{analytics.week.companiesReached}</strong><span>Companies</span></div>
                     <div className="village-chip"><strong>{analytics.allTime.recruitersContacted}</strong><span>People</span></div>
                   </div>
-                  <WeatherWidget />
                   <label className="goal-edit village-goal-edit">
                     Daily send goal
                     <span className="goal-edit-row">
@@ -4530,7 +4507,7 @@ function App() {
                       <div>
                         <p className="eyebrow">Rhythm</p>
                         <h2>When you schedule</h2>
-                        <p className="hint">Hour of day you clicked Schedule (not the send-out slot).</p>
+                        <p className="hint">Hour of day you clicked Schedule.</p>
                       </div>
                     </div>
                     <HourlySendsChart hourly={analytics.hourly} />

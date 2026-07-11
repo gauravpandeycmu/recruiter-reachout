@@ -94,6 +94,38 @@ export async function resolveCityToCoordinates(
   return { latitude: match.latitude, longitude: match.longitude, label };
 }
 
+/** Best-effort place name for precise coordinates (Nominatim; fails soft → undefined). */
+async function reverseGeocodeLabel(latitude: number, longitude: number): Promise<string | undefined> {
+  try {
+    const url = new URL("https://nominatim.openstreetmap.org/reverse");
+    url.searchParams.set("lat", String(latitude));
+    url.searchParams.set("lon", String(longitude));
+    url.searchParams.set("format", "json");
+    url.searchParams.set("addressdetails", "1");
+    url.searchParams.set("accept-language", "en");
+    const response = await fetch(url, {
+      headers: { "User-Agent": "RecruiterReachout/1.0 (local weather label)" },
+    });
+    if (!response.ok) return undefined;
+    const payload = (await response.json()) as {
+      address?: {
+        city?: string;
+        town?: string;
+        village?: string;
+        municipality?: string;
+        state?: string;
+        country?: string;
+      };
+    };
+    const address = payload.address;
+    if (!address) return undefined;
+    const city = address.city || address.town || address.village || address.municipality;
+    return [city, address.state, address.country].filter(Boolean).join(", ") || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Resolves an approximate, city-level location from the server's own public IP
  * - no coordinates are requested from or sent by the browser. Cached separately
@@ -209,7 +241,8 @@ export async function getWeather(store: Store, query: WeatherQuery): Promise<Wea
     if (query.latitude === undefined || query.longitude === undefined || Number.isNaN(query.latitude) || Number.isNaN(query.longitude)) {
       throw new Error("Both latitude and longitude are required together.");
     }
-    return weatherForCoordinates(store, query.latitude, query.longitude, "precise", undefined);
+    const label = await reverseGeocodeLabel(query.latitude, query.longitude);
+    return weatherForCoordinates(store, query.latitude, query.longitude, "precise", label);
   }
 
   if (query.city?.trim()) {
