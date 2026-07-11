@@ -66,14 +66,16 @@ type Tab = "send" | "setup" | "history" | "analytics";
 
 const SETTLED_STATUSES = new Set(["sent", "opened", "clicked", "bounced", "do_not_contact"]);
 const DISCOVERY_POLL_MS = 2500;
-const IDLE_POLL_MS = 8000;
+const IDLE_POLL_MS = 3000;
 const FOCUS_REFRESH_DEBOUNCE_MS = 400;
 const RECIPIENT_PAGE_SIZE = 5;
 const HISTORY_PEOPLE_PAGE_SIZE = 9;
 const TAB_STORAGE_KEY = "recruiter-reachout.active-tab";
+const SAVE_CHANNEL = "recruiter-reachout-saved";
 const SESSION_STATUS_STORAGE_KEY = "recruiter-reachout.setup-session-status";
 const UI_PREFS_STORAGE_KEY = "recruiter-reachout.ui-prefs";
 const ACTIVE_SEND_QUEUE_IDS_KEY = "recruiter-reachout.active-send-queue-ids";
+const BATCH_COMPANY_CHOICE_KEY = "recruiter-reachout.batch-company-choice";
 const DANCING_CAT_GIF = "https://media.giphy.com/media/JIX9t2j0ZTN9S/giphy.gif";
 
 type UiPrefs = {
@@ -503,7 +505,13 @@ function App() {
   const footerReadyRef = useRef(false);
   const footerSaveTimerRef = useRef<number | null>(null);
   const [envStatus, setEnvStatus] = useState<EnvReport>();
-  const [batchCompanyChoice, setBatchCompanyChoice] = useState("");
+  const [batchCompanyChoice, setBatchCompanyChoice] = useState(() => {
+    try {
+      return window.sessionStorage.getItem(BATCH_COMPANY_CHOICE_KEY) ?? "";
+    } catch {
+      return "";
+    }
+  });
   const [recipientPage, setRecipientPage] = useState(0);
   const [historyPeoplePage, setHistoryPeoplePage] = useState<Record<string, number>>({});
   const [companyFact, setCompanyFact] = useState("");
@@ -601,22 +609,43 @@ function App() {
       .filter((company): company is CompanyHistorySummary => Boolean(company));
   }, [sortedHistory, historyQuery]);
 
-  /** Distinct companies in the active batch, most frequent first. */
+  /** Distinct companies in the active batch — most recently captured first. */
   const batchCompanies = useMemo(() => {
-    const counts = new Map<string, number>();
+    const latestAt = new Map<string, string>();
     for (const candidate of candidates) {
       const name = candidate.company?.trim();
-      if (name) {
-        counts.set(name, (counts.get(name) ?? 0) + 1);
+      if (!name) {
+        continue;
+      }
+      const stamp = candidate.updatedAt || candidate.createdAt || "";
+      const prev = latestAt.get(name);
+      if (!prev || stamp > prev) {
+        latestAt.set(name, stamp);
       }
     }
-    return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([name]) => name);
+    return [...latestAt.entries()]
+      .sort((a, b) => b[1].localeCompare(a[1]))
+      .map(([name]) => name);
   }, [candidates]);
 
   const batchCompany = batchCompanies.includes(batchCompanyChoice) ? batchCompanyChoice : batchCompanies[0];
 
-  /** Recipients for the selected company (auto-capture and extension both land here). */
-  const batchCandidates = useMemo(() => {
+  useEffect(() => {
+    if (!batchCompany) {
+      return;
+    }
+    try {
+      window.sessionStorage.setItem(BATCH_COMPANY_CHOICE_KEY, batchCompany);
+    } catch {
+      // ignore quota errors
+    }
+    if (batchCompanyChoice !== batchCompany && !batchCompanies.includes(batchCompanyChoice)) {
+      setBatchCompanyChoice(batchCompany);
+    }
+  }, [batchCompany, batchCompanies, batchCompanyChoice]);
+
+  /** Company filter — only used for personalize / generate email, never to hide the recipient list. */
+  const companyCandidates = useMemo(() => {
     if (!batchCompany) {
       return candidates;
     }
@@ -627,17 +656,17 @@ function App() {
   }, [batchCompany, candidates]);
 
   const selected = useMemo(
-    () => batchCandidates.find((candidate) => candidate.id === selectedId) ?? batchCandidates[0],
-    [batchCandidates, selectedId],
+    () => candidates.find((candidate) => candidate.id === selectedId) ?? candidates[0],
+    [candidates, selectedId],
   );
 
   useEffect(() => {
     setRecipientPage(0);
-  }, [batchCompany, batchCandidates.length]);
+  }, [batchCompany, candidates.length]);
 
-  const recipientPageCount = Math.max(1, Math.ceil(batchCandidates.length / RECIPIENT_PAGE_SIZE));
+  const recipientPageCount = Math.max(1, Math.ceil(candidates.length / RECIPIENT_PAGE_SIZE));
   const safeRecipientPage = Math.min(recipientPage, recipientPageCount - 1);
-  const pagedCandidates = batchCandidates.slice(
+  const pagedCandidates = candidates.slice(
     safeRecipientPage * RECIPIENT_PAGE_SIZE,
     (safeRecipientPage + 1) * RECIPIENT_PAGE_SIZE,
   );
@@ -746,14 +775,14 @@ function App() {
     setCompanyFact(ctx?.companyFact ?? "");
   }, [batchCompany, batchContent?.id, batchContent?.updatedAt]);
 
-  const readyCandidates = batchCandidates.filter((candidate) => candidate.email && !SETTLED_STATUSES.has(candidate.status));
-  const discoveredCount = batchCandidates.filter((candidate) => candidate.email).length;
-  const notFoundCount = batchCandidates.filter((candidate) => candidate.status === "email_not_found").length;
-  const pendingCount = batchCandidates.filter((candidate) => !candidate.email && candidate.status !== "email_not_found").length;
-  const discoveryPercent = batchCandidates.length === 0 ? 0 : Math.round((discoveredCount / batchCandidates.length) * 100);
+  const readyCandidates = candidates.filter((candidate) => candidate.email && !SETTLED_STATUSES.has(candidate.status));
+  const discoveredCount = candidates.filter((candidate) => candidate.email).length;
+  const notFoundCount = candidates.filter((candidate) => candidate.status === "email_not_found").length;
+  const pendingCount = candidates.filter((candidate) => !candidate.email && candidate.status !== "email_not_found").length;
+  const discoveryPercent = candidates.length === 0 ? 0 : Math.round((discoveredCount / candidates.length) * 100);
   const activeLookupId = workerStatus?.online ? workerStatus.status?.candidateId : undefined;
 
-  const batchCandidateIds = useMemo(() => new Set(batchCandidates.map((candidate) => candidate.id)), [batchCandidates]);
+  const batchCandidateIds = useMemo(() => new Set(candidates.map((candidate) => candidate.id)), [candidates]);
   const batchSendQueue = useMemo(() => {
     const all = state?.sendQueue ?? [];
     if (trackedSendQueueIds.length > 0) {
@@ -983,12 +1012,33 @@ function App() {
 
   useEffect(() => {
     void refresh().catch((error: Error) => setMessage(error.message));
+    const params = new URLSearchParams(window.location.search);
+    if (params.has("saved")) {
+      setTab("send");
+      params.delete("saved");
+      const nextQuery = params.toString();
+      const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash || "#send"}`;
+      window.history.replaceState({}, "", nextUrl);
+    }
   }, []);
 
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
   const tabRef = useRef(tab);
   tabRef.current = tab;
+
+  useEffect(() => {
+    try {
+      const channel = new BroadcastChannel(SAVE_CHANNEL);
+      channel.onmessage = () => {
+        setTab("send");
+        void refreshRef.current().catch((error: Error) => setMessage(error.message));
+      };
+      return () => channel.close();
+    } catch {
+      return undefined;
+    }
+  }, []);
 
   useEffect(() => {
     let debounceTimer: number | undefined;
@@ -1218,7 +1268,7 @@ function App() {
       });
       await runPreview(candidate);
       setMessage(
-        `Saved email edits for all ${batchCandidates.length} recipient(s) in ${result.companyContent.companyDisplayName}.`,
+        `Saved email edits for all ${companyCandidates.length} recipient(s) in ${result.companyContent.companyDisplayName}.`,
       );
       await refresh();
       return true;
@@ -1235,7 +1285,7 @@ function App() {
     try {
       // Clear per-recipient overrides across the batch; company template remains.
       await Promise.all(
-        batchCandidates.map((person) =>
+        companyCandidates.map((person) =>
           updateCandidate(person.id, { customSubject: "", customBody: "" }),
         ),
       );
@@ -1577,8 +1627,7 @@ function App() {
           jobUrl: jobUrl || undefined,
           linkedinPost: linkedinPost || undefined,
           passionate: wantPassionate,
-          recipientTitles: candidates
-            .filter((candidate) => candidate.company?.trim() === batchCompany)
+          recipientTitles: companyCandidates
             .map((candidate) => candidate.title?.trim())
             .filter((title): title is string => Boolean(title)),
         },
@@ -2141,12 +2190,16 @@ function App() {
               <div className="empty-state">
                 <h2>No recruiters in batch yet</h2>
                 <ol>
-                  <li>Enter a company above and click <strong>Find US recruiters</strong>.</li>
-                  <li>Wait while LinkedIn results are scraped (pages you chose).</li>
+                  <li>
+                    On LinkedIn, open the <strong>Recruiter Reachout</strong> extension (v0.1.3+) and click{" "}
+                    <strong>Add this person</strong> or <strong>Save all visible</strong>.
+                  </li>
+                  <li>Or enter a company above and click <strong>Find US recruiters</strong> to auto-capture.</li>
                   <li>People appear here; email discovery starts automatically.</li>
                 </ol>
                 <p className="hint">
-                  Requires a signed-in LinkedIn session under Setup.
+                  If you used <strong>Remove all</strong>, everyone was archived — save again from the extension to
+                  reactivate them. Requires <code>npm run dev</code> (API :4000, dashboard :3000).
                 </p>
               </div>
             ) : (
@@ -2158,7 +2211,14 @@ function App() {
                       <select
                         className="batch-company-select"
                         value={batchCompany}
-                        onChange={(event) => setBatchCompanyChoice(event.target.value)}
+                        onChange={(event) => {
+                          setBatchCompanyChoice(event.target.value);
+                          try {
+                            window.sessionStorage.setItem(BATCH_COMPANY_CHOICE_KEY, event.target.value);
+                          } catch {
+                            // ignore
+                          }
+                        }}
                       >
                         {batchCompanies.map((name) => (
                           <option key={name} value={name}>{name}</option>
@@ -2169,14 +2229,14 @@ function App() {
                     )}
                   </div>
                   <div className="batch-progress">
-                    <strong>{discoveredCount}/{batchCandidates.length}</strong> emails found
+                    <strong>{discoveredCount}/{candidates.length}</strong> emails found
                     {notFoundCount > 0 ? ` · ${notFoundCount} not found` : ""}
                   </div>
                 </div>
 
                 <div className="step">
                   <div className="step-heading">
-                    <p className="step-label">1 · Recipients</p>
+                    <p className="step-label">1 · Recipients ({candidates.length})</p>
                     <button type="button" className="subtle-danger" onClick={() => void clearSendList()}>
                       Remove all
                     </button>
@@ -2196,6 +2256,9 @@ function App() {
                                 <strong>{candidate.fullName}</strong>
                                 {candidate.title && <small className="candidate-title">{candidate.title}</small>}
                                 <small>{candidate.email ?? candidate.company ?? "Waiting on discovery"}</small>
+                                {batchCompanies.length > 1 && candidate.company && (
+                                  <small className="candidate-company">{candidate.company}</small>
+                                )}
                                 {!candidate.email && candidate.lastError && (
                                   <small className="candidate-error">{candidate.lastError}</small>
                                 )}
@@ -2221,7 +2284,7 @@ function App() {
                       );
                     })}
                   </div>
-                  {batchCandidates.length > RECIPIENT_PAGE_SIZE && (
+                  {candidates.length > RECIPIENT_PAGE_SIZE && (
                     <div className="list-pagination">
                       <button
                         type="button"
@@ -2232,8 +2295,8 @@ function App() {
                       </button>
                       <span>
                         {safeRecipientPage * RECIPIENT_PAGE_SIZE + 1}–
-                        {Math.min((safeRecipientPage + 1) * RECIPIENT_PAGE_SIZE, batchCandidates.length)} of{" "}
-                        {batchCandidates.length}
+                        {Math.min((safeRecipientPage + 1) * RECIPIENT_PAGE_SIZE, candidates.length)} of{" "}
+                        {candidates.length}
                       </span>
                       <button
                         type="button"

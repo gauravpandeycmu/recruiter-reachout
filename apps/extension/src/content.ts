@@ -6,12 +6,12 @@ async function preparePageForCapture(): Promise<void> {
   }
   const startY = window.scrollY;
   const step = Math.max(400, Math.floor(window.innerHeight * 0.75));
-  for (let i = 0; i < 8; i += 1) {
+  for (let i = 0; i < 4; i += 1) {
     window.scrollBy(0, step);
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await new Promise((resolve) => setTimeout(resolve, 150));
   }
   window.scrollTo(0, startY);
-  await new Promise((resolve) => setTimeout(resolve, 500));
+  await new Promise((resolve) => setTimeout(resolve, 250));
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -20,7 +20,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   void (async () => {
     try {
-      await preparePageForCapture();
+      if (message.prepareLazyLoad === true) {
+        await preparePageForCapture();
+      }
       sendResponse(parseCurrentPage(document, window.location.href));
     } catch (error) {
       // A parser crash must still answer the popup — otherwise the port closes

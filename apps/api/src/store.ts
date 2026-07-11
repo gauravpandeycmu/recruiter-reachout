@@ -26,8 +26,9 @@ import type {
   LinkedInCaptureJob,
   AnalyticsGoalSettings,
 } from "@recruiter/shared";
-import { resolveCandidateCompany, shouldRewriteCompanyFromEmail, dedupeRepeatedPersonName, extractFirstName } from "@recruiter/shared";
+import { resolveCandidateCompany, shouldRewriteCompanyFromEmail, dedupeRepeatedPersonName, extractFirstName, linkedInUrlsMatch, preferLinkedInUrl } from "@recruiter/shared";
 import { collectEmails, ContactIndex, normalizeLinkedInUrl } from "./contactIndex.js";
+import { findRepoRoot } from "./repoRoot.js";
 
 export interface AppData {
   candidates: RecruiterCandidate[];
@@ -67,7 +68,7 @@ export class Store {
   private readonly db: DatabaseSync;
   readonly contactIndex = new ContactIndex();
 
-  constructor(private readonly filePath = resolve(process.cwd(), "data/recruiter-reachout.sqlite")) {
+  constructor(private readonly filePath = resolve(findRepoRoot(), "apps/api/data/recruiter-reachout.sqlite")) {
     mkdirSync(dirname(this.filePath), { recursive: true });
     this.db = new DatabaseSync(this.filePath);
     this.db.exec("PRAGMA journal_mode = WAL;");
@@ -76,6 +77,7 @@ export class Store {
     this.contactIndex.rebuild(this.listCandidates());
     this.repairCompaniesFromEmails();
     this.repairDoubledNames();
+    this.repairLinkedInDuplicates();
   }
 
   async load(): Promise<void> {
@@ -111,6 +113,91 @@ export class Store {
       fixed += 1;
     }
     return fixed;
+  }
+
+  /**
+   * Merge duplicate rows for the same person (truncated vs full LinkedIn member URLs,
+   * or repeat extension saves after archive).
+   */
+  repairLinkedInDuplicates(): number {
+    const candidates = this.listCandidates();
+    const removed = new Set<string>();
+    let fixed = 0;
+    for (let i = 0; i < candidates.length; i += 1) {
+      const left = candidates[i]!;
+      if (removed.has(left.id)) {
+        continue;
+      }
+      for (let j = i + 1; j < candidates.length; j += 1) {
+        const right = candidates[j]!;
+        if (removed.has(right.id)) {
+          continue;
+        }
+        if (!this.areSamePerson(left, right)) {
+          continue;
+        }
+        const keeper = this.pickDuplicateKeeper(left, right);
+        const duplicate = keeper.id === left.id ? right : left;
+        const mergedActive = keeper.isActive !== false || duplicate.isActive !== false;
+        this.updateCandidate(keeper.id, {
+          linkedinUrl: preferLinkedInUrl(keeper.linkedinUrl, duplicate.linkedinUrl),
+          profilePhotoUrl: keeper.profilePhotoUrl || duplicate.profilePhotoUrl,
+          title: keeper.title || duplicate.title,
+          company: keeper.company || duplicate.company,
+          email: keeper.email || duplicate.email,
+          emailCandidates:
+            (keeper.emailCandidates?.length ?? 0) >= (duplicate.emailCandidates?.length ?? 0)
+              ? keeper.emailCandidates
+              : duplicate.emailCandidates,
+          isActive: mergedActive ? true : false,
+          archivedAt: mergedActive ? undefined : keeper.archivedAt ?? duplicate.archivedAt,
+        });
+        this.deleteRecord("candidates", duplicate.id);
+        this.contactIndex.unindexCandidate(duplicate);
+        removed.add(duplicate.id);
+        fixed += 1;
+      }
+    }
+    if (fixed > 0) {
+      this.contactIndex.rebuild(this.listCandidates());
+    }
+    return fixed;
+  }
+
+  private areSamePerson(left: RecruiterCandidate, right: RecruiterCandidate): boolean {
+    if (linkedInUrlsMatch(left.linkedinUrl, right.linkedinUrl)) {
+      return true;
+    }
+    const leftName = dedupeRepeatedPersonName(left.fullName).toLowerCase();
+    const rightName = dedupeRepeatedPersonName(right.fullName).toLowerCase();
+    if (!leftName || leftName !== rightName) {
+      return false;
+    }
+    const leftCompany = (left.company ?? "").trim().toLowerCase();
+    const rightCompany = (right.company ?? "").trim().toLowerCase();
+    return !leftCompany || !rightCompany || leftCompany === rightCompany;
+  }
+
+  private pickDuplicateKeeper(left: RecruiterCandidate, right: RecruiterCandidate): RecruiterCandidate {
+    const score = (candidate: RecruiterCandidate): number => {
+      let value = 0;
+      if (candidate.isActive !== false) {
+        value += 100;
+      }
+      if (candidate.email?.includes("@")) {
+        value += 50;
+      }
+      if (candidate.linkedinUrl) {
+        value += Math.min(candidate.linkedinUrl.length, 40);
+      }
+      value += Date.parse(candidate.updatedAt || candidate.createdAt || "") / 1_000_000_000_000;
+      return value;
+    };
+    return score(left) >= score(right) ? left : right;
+  }
+
+  private deleteRecord(table: string, id: string): void {
+    this.db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(id);
   }
 
   all(): AppData {

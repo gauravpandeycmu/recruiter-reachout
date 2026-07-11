@@ -132,6 +132,16 @@ h1 {
   margin: 0;
 }
 
+.warning {
+  color: #92400e;
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  border-radius: 8px;
+  font-size: 13px;
+  margin: 0;
+  padding: 8px 10px;
+}
+
 label {
   display: grid;
   font-size: 13px;
@@ -291,4 +301,16 @@ small {
 .badge.error {
   background: #fee2e2;
   color: #991b1b;
+}
+
+.list-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+button.secondary.subtle-danger {
+  color: #991b1b;
+  border-color: #fecaca;
 }

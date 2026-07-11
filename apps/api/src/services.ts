@@ -18,7 +18,7 @@ import type {
   TestModeSettings,
   TrackingEvent,
 } from "@recruiter/shared";
-import { dedupeRepeatedPersonName, extractFirstName, inferCompanyFromEmail, normalizeWhitespace, renderEmail, shouldRewriteCompanyFromEmail, validateCandidateInput } from "@recruiter/shared";
+import { dedupeRepeatedPersonName, extractFirstName, inferCompanyFromEmail, linkedInUrlsMatch, normalizeWhitespace, preferLinkedInUrl, renderEmail, shouldRewriteCompanyFromEmail, validateCandidateInput } from "@recruiter/shared";
 import {
   createGmailAccount,
   createGmailDraft,
@@ -56,12 +56,13 @@ export interface CandidateStatusCheck {
 export interface BulkCandidateResult {
   key: string;
   candidate: Partial<RecruiterCandidate>;
-  status: "saved_now" | "skipped_duplicate" | "previously_contacted" | "known_email";
+  status: "saved_now" | "skipped_duplicate" | "previously_contacted" | "known_email" | "error";
   existingCandidateId?: string;
   savedCandidateId?: string;
   knownEmail?: string;
   knownEmails?: string[];
   company?: string;
+  error?: string;
 }
 
 export function createCandidate(input: Partial<RecruiterCandidate>): RecruiterCandidate {
@@ -134,62 +135,76 @@ function patchProfilePhotoIfMissing(
 
 export function bulkCreateCandidates(store: Store, inputs: Array<Partial<RecruiterCandidate>>, company?: string): BulkCandidateResult[] {
   return dedupeCandidateInputs(withCompany(inputs, company)).map((candidate) => {
-    const existing = findExistingCandidate(store, candidate);
-    if (existing) {
-      const knownEmails = collectKnownEmails(existing);
-      const knownEmail = existing.email?.includes("@") ? existing.email.trim().toLowerCase() : knownEmails[0];
-      const knownFields = {
-        knownEmail,
-        knownEmails: knownEmails.length > 0 ? knownEmails : undefined,
-        company: existing.company ?? candidate.company,
-      };
-      const withPhoto = patchProfilePhotoIfMissing(store, existing, candidate);
-      if (existing.isActive !== false) {
-        return {
-          key: candidateKey(candidate),
-          candidate,
-          status: knownEmail ? ("known_email" as const) : ("skipped_duplicate" as const),
-          existingCandidateId: withPhoto.id,
-          ...knownFields,
-        };
-      }
-      if (hasContactHistory(store, existing.id)) {
-        return {
-          key: candidateKey(candidate),
-          candidate,
-          status: "previously_contacted" as const,
-          existingCandidateId: withPhoto.id,
-          ...knownFields,
-        };
-      }
-      // Reactivate and preserve known email
-      const reactivated = store.updateCandidate(existing.id, {
-        ...candidate,
-        email: existing.email ?? candidate.email,
-        emailCandidates: existing.emailCandidates?.length ? existing.emailCandidates : candidate.emailCandidates,
-        profilePhotoUrl: candidate.profilePhotoUrl || existing.profilePhotoUrl,
-        isActive: true,
-        archivedAt: undefined,
-        status: existing.email ? existing.status : "new",
-      });
+    try {
+      return saveOneBulkCandidate(store, candidate);
+    } catch (error) {
       return {
         key: candidateKey(candidate),
         candidate,
-        status: knownEmail ? ("known_email" as const) : ("saved_now" as const),
-        existingCandidateId: existing.id,
-        savedCandidateId: reactivated?.id,
+        status: "error" as const,
+        error: error instanceof Error ? error.message : "Failed to save candidate.",
+      };
+    }
+  });
+}
+
+function saveOneBulkCandidate(store: Store, candidate: Partial<RecruiterCandidate>): BulkCandidateResult {
+  const existing = findExistingCandidate(store, candidate);
+  if (existing) {
+    const knownEmails = collectKnownEmails(existing);
+    const knownEmail = existing.email?.includes("@") ? existing.email.trim().toLowerCase() : knownEmails[0];
+    const knownFields = {
+      knownEmail,
+      knownEmails: knownEmails.length > 0 ? knownEmails : undefined,
+      company: existing.company ?? candidate.company,
+    };
+    const withPhoto = patchProfilePhotoIfMissing(store, existing, candidate);
+    if (existing.isActive !== false) {
+      return {
+        key: candidateKey(candidate),
+        candidate,
+        status: knownEmail ? ("known_email" as const) : ("skipped_duplicate" as const),
+        existingCandidateId: withPhoto.id,
         ...knownFields,
       };
     }
-    const saved = store.upsertCandidate(createCandidate(candidate));
+    if (hasContactHistory(store, existing.id)) {
+      return {
+        key: candidateKey(candidate),
+        candidate,
+        status: "previously_contacted" as const,
+        existingCandidateId: withPhoto.id,
+        ...knownFields,
+      };
+    }
+    // Reactivate and preserve known email
+    const reactivated = store.updateCandidate(existing.id, {
+      ...candidate,
+      linkedinUrl: preferLinkedInUrl(existing.linkedinUrl, candidate.linkedinUrl),
+      email: existing.email ?? candidate.email,
+      emailCandidates: existing.emailCandidates?.length ? existing.emailCandidates : candidate.emailCandidates,
+      profilePhotoUrl: candidate.profilePhotoUrl || existing.profilePhotoUrl,
+      isActive: true,
+      archivedAt: undefined,
+      status: existing.email ? existing.status : "new",
+    });
     return {
       key: candidateKey(candidate),
       candidate,
-      status: "saved_now" as const,
-      savedCandidateId: saved.id,
-      company: saved.company,
+      status: knownEmail ? ("known_email" as const) : ("saved_now" as const),
+      existingCandidateId: existing.id,
+      savedCandidateId: reactivated?.id,
+      ...knownFields,
     };
-  });
+  }
+  const saved = store.upsertCandidate(createCandidate(candidate));
+  return {
+    key: candidateKey(candidate),
+    candidate,
+    status: "saved_now" as const,
+    savedCandidateId: saved.id,
+    company: saved.company,
+  };
 }
 
 export async function clearActiveCandidates(store: Store): Promise<{ archived: RecruiterCandidate[] }> {
@@ -1396,12 +1411,22 @@ function findExistingCandidate(store: Store, candidate: Partial<RecruiterCandida
   }
   const url = normalizeLinkedInUrl(candidate.linkedinUrl);
   const name = normalizeCandidateName(candidate.fullName);
+  const company = normalizeWhitespace(candidate.company ?? "").toLowerCase();
   return store.listCandidates().find((existing) => {
+    if (linkedInUrlsMatch(existing.linkedinUrl, candidate.linkedinUrl)) {
+      return true;
+    }
     const existingUrl = normalizeLinkedInUrl(existing.linkedinUrl);
     if (url && existingUrl && url === existingUrl) {
       return true;
     }
-    return !url && name && normalizeCandidateName(existing.fullName) === name;
+    if (!name || normalizeCandidateName(existing.fullName) !== name) {
+      return false;
+    }
+    if (!company) {
+      return true;
+    }
+    return normalizeWhitespace(existing.company ?? "").toLowerCase() === company;
   });
 }
 

@@ -1,6 +1,5 @@
 import type { RecruiterCandidate } from "@recruiter/shared";
-
-/** Fast LinkedIn/email → candidateId lookups. Rebuilt on boot; updated on writes. */
+import { linkedInUrlsMatch, normalizeLinkedInUrl } from "@recruiter/shared";
 export class ContactIndex {
   private byLinkedIn = new Map<string, string>();
   private byEmail = new Map<string, string>();
@@ -48,8 +47,16 @@ export class ContactIndex {
     if (!key) {
       return undefined;
     }
-    const id = this.byLinkedIn.get(key);
-    return id ? this.byId.get(id) : undefined;
+    const direct = this.byLinkedIn.get(key);
+    if (direct) {
+      return this.byId.get(direct);
+    }
+    for (const [indexedUrl, id] of this.byLinkedIn) {
+      if (linkedInUrlsMatch(indexedUrl, url)) {
+        return this.byId.get(id);
+      }
+    }
+    return undefined;
   }
 
   findByEmail(email: string | undefined): RecruiterCandidate | undefined {
@@ -70,19 +77,7 @@ export class ContactIndex {
   }
 }
 
-export function normalizeLinkedInUrl(url: string | undefined): string {
-  if (!url) {
-    return "";
-  }
-  try {
-    const parsed = new URL(url);
-    parsed.search = "";
-    parsed.hash = "";
-    return parsed.toString().replace(/\/$/, "").toLowerCase();
-  } catch {
-    return url.split("?")[0]?.replace(/\/$/, "").toLowerCase() ?? "";
-  }
-}
+export { normalizeLinkedInUrl } from "@recruiter/shared";
 
 export function collectEmails(candidate: RecruiterCandidate): string[] {
   const emails = new Set<string>();

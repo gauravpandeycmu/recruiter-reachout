@@ -185,7 +185,7 @@ const server = createServer(async (req, res) => {
       const body = (await readJson(req)) as { candidates?: Array<object>; company?: string };
       const results = bulkCreateCandidates(store, body.candidates ?? [], body.company);
       await store.save();
-      sendJson(res, 201, { results });
+      sendJson(res, 201, { results, activeCount: store.listActiveCandidates().length });
       return;
     }
 
