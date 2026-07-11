@@ -1,0 +1,28 @@
+{
+  "name": "@recruiter/worker",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "discover:one": "tsx scripts/discover-one.ts",
+    "explore:salesql": "tsx scripts/explore-salesql.ts",
+    "probe:salesql": "tsx scripts/probe-salesql.ts",
+    "diagnose:salesql": "tsx scripts/diagnose-salesql.ts",
+    "inspect:salesql": "tsx scripts/inspect-salesql-dom.ts",
+    "watch:salesql": "tsx scripts/watch-salesql.ts",
+    "migrate:salesql-profile": "tsx scripts/migrate-salesql-profile.ts",
+    "open:login": "tsx scripts/open-login.ts",
+    "probe:sessions": "tsx scripts/probe-sessions.ts",
+    "smoke:gmail": "tsx scripts/smoke-gmail.ts",
+    "install:streak": "tsx scripts/install-streak.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@recruiter/shared": "0.1.0",
+    "playwright": "latest",
+    "tsx": "latest"
+  }
+}

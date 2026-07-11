@@ -1,0 +1,128 @@
+/**
+ * Common job / requisition ID patterns found in pasted postings and email bodies.
+ * Prefer labeled forms ("Job ID: 123") over bare codes to reduce false positives.
+ */
+const LABELED_JOB_ID_RE =
+  /\b(?:job\s*(?:id|code|number|ref(?:erence)?)|req(?:uisition)?\s*(?:id|number|#)?|requisition|posting\s*(?:id|number)|reference\s*(?:id|number|#)|opening\s*id)\s*[:#]?\s*([A-Z0-9][A-Z0-9/_-]{2,24})\b/gi;
+const BARE_JOB_ID_RE = /\b((?:JR|REQ|R|JOB|JD)[-_ ]?\d{4,12})\b/gi;
+/** Pure numeric req IDs (Apple, many ATS boards). */
+const NUMERIC_JOB_ID_RE = /\b(\d{5,12})\b/g;
+
+/**
+ * Pulls job / req IDs from a pasted job description so prompts and HTML
+ * linkification can highlight them.
+ */
+export function extractJobIds(jobDescription?: string): string[] {
+  const text = jobDescription?.trim();
+  if (!text) {
+    return [];
+  }
+  const found = new Set<string>();
+  for (const match of text.matchAll(LABELED_JOB_ID_RE)) {
+    const id = normalizeJobId(match[1]);
+    if (id) {
+      found.add(id);
+    }
+  }
+  if (found.size === 0) {
+    for (const match of text.matchAll(BARE_JOB_ID_RE)) {
+      const id = normalizeJobId(match[1]);
+      if (id) {
+        found.add(id);
+      }
+    }
+  }
+  return [...found].slice(0, 3);
+}
+
+/**
+ * Collect the single job/req ID phrase to hyperlink onto the job posting URL.
+ * Returns at most one ID so the email body never gets the same link repeated.
+ * Role titles are excluded — only the job ID becomes a link.
+ */
+export function collectJobLinkTexts(options: {
+  jobUrl?: string;
+  jobDescription?: string;
+  emailBody?: string;
+  roleTitle?: string;
+}): string[] {
+  const fromUrl = extractJobIdFromUrl(options.jobUrl);
+  const fromJd = extractJobIds(options.jobDescription);
+  const fromBodyLabeled = extractJobIds(options.emailBody);
+
+  // Prefer the URL path ID when it also appears in the email (most reliable).
+  if (fromUrl && options.emailBody?.toLowerCase().includes(fromUrl.toLowerCase())) {
+    return [fromUrl];
+  }
+  for (const id of fromBodyLabeled) {
+    if (options.emailBody?.toLowerCase().includes(id.toLowerCase())) {
+      return [id];
+    }
+  }
+  for (const id of fromJd) {
+    if (options.emailBody?.toLowerCase().includes(id.toLowerCase())) {
+      return [id];
+    }
+  }
+  if (fromUrl) {
+    return [fromUrl];
+  }
+
+  // With a job URL, link a lone bare numeric ID in the email body
+  // (common for Apple-style req numbers that never appear as "Job ID: …").
+  if (options.jobUrl && options.emailBody) {
+    const numerics = extractNumericJobIds(options.emailBody);
+    if (numerics.length === 1) {
+      return [numerics[0]!];
+    }
+  }
+
+  return fromBodyLabeled.slice(0, 1);
+}
+
+export function extractJobIdFromUrl(jobUrl?: string): string | undefined {
+  const raw = jobUrl?.trim();
+  if (!raw) {
+    return undefined;
+  }
+  try {
+    const path = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`).pathname;
+    const prefixed = path.match(/\/((?:JR|REQ|R|JOB|JD)[-_]?\d{4,12})(?:\/|$)/i);
+    if (prefixed?.[1]) {
+      return normalizeJobId(prefixed[1]);
+    }
+    // /details/200629114-software-engineer or /778812/
+    const numeric = path.match(/\/(\d{5,12})(?:\/|$|-)/);
+    return normalizeJobId(numeric?.[1]);
+  } catch {
+    return undefined;
+  }
+}
+
+function extractNumericJobIds(text?: string): string[] {
+  if (!text?.trim()) {
+    return [];
+  }
+  const found = new Set<string>();
+  for (const match of text.matchAll(NUMERIC_JOB_ID_RE)) {
+    const id = normalizeJobId(match[1]);
+    if (id) {
+      found.add(id);
+    }
+  }
+  return [...found].slice(0, 3);
+}
+
+function normalizeJobId(raw: string | undefined): string | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  const cleaned = raw.trim().replace(/\s+/g, "-").replace(/[,.;)]+$/g, "");
+  if (cleaned.length < 3 || cleaned.length > 28) {
+    return undefined;
+  }
+  if (/^(https?|www|and|the|for|with|from|this|that|role|team)$/i.test(cleaned)) {
+    return undefined;
+  }
+  return cleaned;
+}

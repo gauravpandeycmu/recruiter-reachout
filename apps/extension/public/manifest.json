@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Recruiter Reachout",
+  "version": "0.1.0",
+  "description": "Collect recruiter candidates from visible pages and send them to the local outreach dashboard.",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Recruiter Reachout"
+  },
+  "permissions": ["activeTab", "scripting"],
+  "host_permissions": ["http://localhost:4000/*", "https://www.linkedin.com/*", "https://www.google.com/*", "https://www.bing.com/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://www.linkedin.com/*", "https://www.google.com/*", "https://www.bing.com/*"],
+      "js": ["assets/content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

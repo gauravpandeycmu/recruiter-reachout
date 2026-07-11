@@ -1,0 +1,674 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { buildMimeMessage } from "../src/gmail.js";
+import {
+  addEmailSample,
+  bulkCreateCandidates,
+  checkCandidateStatuses,
+  clearActiveCandidates,
+  createCandidate,
+  createEvent,
+  generateContentForCompany,
+  listEmailSamples,
+  MAX_DISCOVERY_ATTEMPTS,
+  nextDiscoveryCandidate,
+  recordDiscoveryResult,
+  removeEmailSample,
+  requestDiscovery,
+  requestSalesqlSweep,
+  resolveContentForCandidate,
+  setOutreachContent,
+  previewEmail,
+  createDraft,
+  removeActiveCandidate,
+  removeActiveCandidatesMatching,
+  removeResume,
+  saveResume,
+  updateWorkerStatus,
+  getWorkerStatusView,
+  WORKER_OFFLINE_AFTER_MS,
+  getDiscoverySettings,
+  updateDiscoverySettings,
+} from "../src/services.js";
+import { Store } from "../src/store.js";
+
+describe("api services", () => {
+  it("stores candidates and creates validated draft payloads", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.json"));
+    await store.load();
+
+    const candidate = store.upsertCandidate(
+      createCandidate({
+        fullName: "Jane Doe",
+        title: "Technical Recruiter",
+        email: "jane.doe@example.com",
+      }),
+    );
+    setOutreachContent(store, {
+      subject: "Quick note, {firstName}",
+      body: "Hi {firstName},\n\nPlease see my resume attached.",
+    });
+    await saveResume(store, {
+      fileName: "resume.pdf",
+      mimeType: "application/pdf",
+      dataBase64: Buffer.from("%PDF-1.4\nfake test pdf").toString("base64"),
+    });
+
+    const preview = previewEmail(store, candidate.id);
+    expect(preview.subject).toBe("Quick note, Jane");
+    expect(preview.to).toBe("jane.doe@example.com");
+    expect(preview.hasResumeAttachment).toBe(true);
+    expect(preview.validationWarnings).toEqual([]);
+
+    const draft = await createDraft(store, candidate.id);
+    expect(draft.candidate?.status).toBe("draft_created");
+    expect(store.all().events[0]?.type).toBe("draft");
+
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("builds MIME messages with a real PDF attachment part", () => {
+    const message = buildMimeMessage(
+      {
+        candidateId: "candidate-1",
+        to: "jane.doe@example.com",
+        subject: "Hello Jane",
+        textBody: "Hi Jane",
+        htmlBody: "<p>Hi Jane</p>",
+        missingPlaceholders: [],
+        validationWarnings: [],
+        hasResumeAttachment: true,
+      },
+      "me@example.com",
+      {
+        fileName: "resume.pdf",
+        mimeType: "application/pdf",
+        data: Buffer.from("%PDF-1.4\nfake test pdf"),
+      },
+    );
+
+    expect(message).toContain("Content-Type: application/pdf; name=\"resume.pdf\"");
+    expect(message).toContain("Content-Disposition: attachment; filename=\"resume.pdf\"");
+    expect(message).toContain(Buffer.from("%PDF-1.4\nfake test pdf").toString("base64"));
+  });
+
+  it("removes the uploaded resume from saved outreach content", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    await saveResume(store, {
+      fileName: "resume.pdf",
+      mimeType: "application/pdf",
+      dataBase64: Buffer.from("%PDF-1.4\nfake test pdf").toString("base64"),
+    });
+    expect(store.getContent()?.resumeFileName).toBe("resume.pdf");
+
+    const content = await removeResume(store);
+
+    expect(content.resumeFileName).toBeUndefined();
+    expect(content.resumePath).toBeUndefined();
+    expect(content.resumeMimeType).toBeUndefined();
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("bulk saves only new candidates and reports duplicates", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const firstRun = bulkCreateCandidates(store, [
+      { fullName: "Jane Doe", linkedinUrl: "https://www.linkedin.com/in/jane-doe?trk=abc" },
+      { fullName: "Jane Doe", linkedinUrl: "https://www.linkedin.com/in/jane-doe?trk=def" },
+      { fullName: "John Smith", linkedinUrl: "https://www.linkedin.com/in/john-smith/" },
+    ], "Example");
+
+    expect(firstRun.map((result) => result.status)).toEqual(["saved_now", "saved_now"]);
+    expect(store.listCandidates()).toHaveLength(2);
+    expect(store.listCandidates()[0]?.company).toBe("Example");
+
+    const statuses = checkCandidateStatuses(store, [
+      { fullName: "Jane Doe", linkedinUrl: "https://www.linkedin.com/in/jane-doe/" },
+      { fullName: "Priya Shah", linkedinUrl: "https://www.linkedin.com/in/priya-shah" },
+    ]);
+
+    expect(statuses.map((result) => result.status)).toEqual(["already_active", "new"]);
+
+    const secondRun = bulkCreateCandidates(store, [
+      { fullName: "Jane Doe", linkedinUrl: "https://www.linkedin.com/in/jane-doe/" },
+    ]);
+
+    expect(secondRun).toMatchObject([{ status: "skipped_duplicate" }]);
+    expect(store.listCandidates()).toHaveLength(2);
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("patches missing profile photos when re-adding an active duplicate", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const firstRun = bulkCreateCandidates(store, [
+      { fullName: "Jane Doe", linkedinUrl: "https://www.linkedin.com/in/jane-doe" },
+    ]);
+    const candidateId = firstRun[0]?.savedCandidateId ?? "";
+    expect(store.getJson("candidates", candidateId)?.profilePhotoUrl).toBeUndefined();
+
+    const secondRun = bulkCreateCandidates(store, [
+      {
+        fullName: "Jane Doe",
+        linkedinUrl: "https://www.linkedin.com/in/jane-doe",
+        profilePhotoUrl: "https://media.licdn.com/dms/image/v2/profile-displayphoto/jane.jpg",
+      },
+    ]);
+    expect(secondRun[0]?.status).toBe("skipped_duplicate");
+    expect(store.getJson("candidates", candidateId)?.profilePhotoUrl).toBe(
+      "https://media.licdn.com/dms/image/v2/profile-displayphoto/jane.jpg",
+    );
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("clears and removes active candidates while preserving sent company history", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const [sentCandidateResult, unsentCandidateResult] = bulkCreateCandidates(store, [
+      { fullName: "Sent Person", email: "sent@example.com", linkedinUrl: "https://www.linkedin.com/in/sent-person" },
+      { fullName: "Unsent Person", linkedinUrl: "https://www.linkedin.com/in/unsent-person" },
+    ], "Example");
+    const sentCandidateId = sentCandidateResult?.savedCandidateId ?? "";
+    const unsentCandidateId = unsentCandidateResult?.savedCandidateId ?? "";
+    store.addEvent(createEvent(sentCandidateId, "send"));
+
+    await removeActiveCandidate(store, unsentCandidateId);
+    expect(store.listActiveCandidates().map((candidate) => candidate.id)).toEqual([sentCandidateId]);
+
+    await clearActiveCandidates(store);
+    expect(store.listActiveCandidates()).toEqual([]);
+    expect(store.getCompanyHistory()).toMatchObject([
+      {
+        companyName: "Example",
+        sent: 1,
+        recruiters: [{ id: sentCandidateId, fullName: "Sent Person" }],
+      },
+    ]);
+
+    const previous = checkCandidateStatuses(store, [
+      { fullName: "Sent Person", linkedinUrl: "https://www.linkedin.com/in/sent-person" },
+    ]);
+    expect(previous[0]?.status).toBe("known_email");
+    expect(previous[0]?.knownEmail).toBe("sent@example.com");
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("removes only matching active candidates from the dashboard", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    bulkCreateCandidates(
+      store,
+      [
+        { fullName: "Jane Doe", linkedinUrl: "https://www.linkedin.com/in/jane-doe/" },
+        { fullName: "John Roe", linkedinUrl: "https://www.linkedin.com/in/john-roe/" },
+      ],
+      "Example",
+    );
+
+    const result = await removeActiveCandidatesMatching(store, [
+      { fullName: "Jane Doe", linkedinUrl: "https://www.linkedin.com/in/jane-doe/" },
+    ]);
+
+    expect(result.archived).toHaveLength(1);
+    expect(result.archived[0]?.fullName).toBe("Jane Doe");
+    expect(store.listActiveCandidates().map((candidate) => candidate.fullName)).toEqual(["John Roe"]);
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+});
+
+describe("email samples and per-company personalization", () => {
+  afterEach(() => {
+    delete process.env.GEMINI_API_KEY;
+    vi.restoreAllMocks();
+  });
+
+  it("adds, lists, and removes email samples", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const sample = addEmailSample(store, { subject: "Hi {firstName}", body: "Body text" });
+    expect(listEmailSamples(store)).toHaveLength(1);
+
+    await removeEmailSample(store, sample.id);
+    expect(listEmailSamples(store)).toHaveLength(0);
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("generates and stores per-company content via Gemini, falling back to global content for candidates without it", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    process.env.GEMINI_API_KEY = "test-key";
+    addEmailSample(store, { subject: "Hi {firstName}", body: "Sample body" });
+    setOutreachContent(store, { subject: "Global subject", body: "Global body" });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            candidates: [
+              { content: { parts: [{ text: '{"subject": "Hi {firstName} from Acme", "body": "Acme body"}' }] } },
+            ],
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+
+    const content = await generateContentForCompany(store, "Acme Corp");
+    expect(content).toMatchObject({ company: "acme corp", subject: "Hi {firstName} from Acme", source: "generated" });
+
+    const acmeCandidate = store.upsertCandidate(createCandidate({ fullName: "Jane Doe", company: "Acme Corp" }));
+    const otherCandidate = store.upsertCandidate(createCandidate({ fullName: "John Roe", company: "Other Co" }));
+
+    expect(resolveContentForCandidate(store, acmeCandidate)?.subject).toBe("Hi {firstName} from Acme");
+    expect(resolveContentForCandidate(store, otherCandidate)?.subject).toBe("Global subject");
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("fetches and extracts a job description when only a job URL is provided", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    process.env.GEMINI_API_KEY = "test-key";
+    addEmailSample(store, { subject: "Hi {firstName}", body: "Sample body" });
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("jobs.acme.com")) {
+        return new Response(
+          "<html><body><h1>Software Engineer</h1><p>Job ID: 778812</p><p>Build distributed systems in Java and Kubernetes for our platform team.</p></body></html>",
+          { status: 200, headers: { "content-type": "text/html" } },
+        );
+      }
+      if (url.includes("generativelanguage.googleapis.com") && fetchMock.mock.calls.length === 2) {
+        return new Response(
+          JSON.stringify({
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      text: JSON.stringify({
+                        roleTitle: "Software Engineer",
+                        jobIds: ["778812"],
+                        jobDescription:
+                          "Software Engineer. Build distributed systems in Java and Kubernetes for the platform team.",
+                      }),
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: JSON.stringify({
+                      subject: "SWE - Java, K8s",
+                      body: "Hi {firstName},\n\nReaching out about 778812 (https://jobs.acme.com/778812).",
+                    }),
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const content = await generateContentForCompany(store, "Acme Corp", {
+      jobUrl: "https://jobs.acme.com/778812",
+    });
+
+    expect(content.generationContext?.jobDescription).toContain("778812");
+    expect(content.generationContext?.roleTitle).toBe("Software Engineer");
+    expect(content.generationContext?.jobUrl).toContain("jobs.acme.com/778812");
+    expect(content.body).toContain("778812");
+    expect(fetchMock).toHaveBeenCalled();
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+});
+
+describe("automatic email discovery bookkeeping", () => {
+  it("picks the least-recently-attempted active candidate missing an email", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const withEmail = store.upsertCandidate(
+      createCandidate({ fullName: "Has Email", linkedinUrl: "https://linkedin.com/in/has-email", email: "has@example.com" }),
+    );
+    const attemptedRecently = store.upsertCandidate(
+      createCandidate({ fullName: "Attempted Recently", linkedinUrl: "https://linkedin.com/in/attempted-recently" }),
+    );
+    store.updateCandidate(attemptedRecently.id, { lastDiscoveryAttemptAt: new Date().toISOString() });
+    const neverAttempted = store.upsertCandidate(
+      createCandidate({ fullName: "Never Attempted", linkedinUrl: "https://linkedin.com/in/never-attempted" }),
+    );
+
+    const next = nextDiscoveryCandidate(store);
+    expect(next?.id).toBe(neverAttempted.id);
+    expect(next?.id).not.toBe(withEmail.id);
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("records a found email with high-confidence api_verified evidence", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const candidate = store.upsertCandidate(
+      createCandidate({ fullName: "Jane Doe", linkedinUrl: "https://linkedin.com/in/jane-doe" }),
+    );
+
+    const updated = await recordDiscoveryResult(store, candidate.id, { status: "found", email: "Jane.Doe@Example.com" });
+
+    expect(updated.email).toBe("jane.doe@example.com");
+    expect(updated.status).toBe("email_guessed");
+    expect(updated.emailCandidates).toMatchObject([{ pattern: "api_verified", confidence: "high", evidence: "jobright" }]);
+    expect(updated.lastDiscoveryAttemptAt).toBeDefined();
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("records a not_found result as a lastError without touching the email field", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const candidate = store.upsertCandidate(
+      createCandidate({ fullName: "Jane Doe", linkedinUrl: "https://linkedin.com/in/jane-doe" }),
+    );
+
+    const updated = await recordDiscoveryResult(store, candidate.id, { status: "not_found" });
+
+    expect(updated.email).toBeUndefined();
+    expect(updated.lastError).toContain("no contact info found");
+    expect(updated.discoveryAttempts).toBe(1);
+    expect(updated.status).not.toBe("email_not_found");
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("records an error result without spending the not_found retry budget, so it's retried indefinitely", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const candidate = store.upsertCandidate(
+      createCandidate({ fullName: "Jane Doe", linkedinUrl: "https://linkedin.com/in/jane-doe" }),
+    );
+
+    let updated = candidate;
+    // A transient/infra failure (e.g. a logged-out session) is not evidence the
+    // candidate is unfindable, so repeating it many times must never park the
+    // candidate the way repeated not_found results do.
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      updated = await recordDiscoveryResult(store, candidate.id, { status: "error", message: "Automation timed out." });
+      expect(updated.discoveryAttempts ?? 0).toBe(0);
+      expect(updated.status).not.toBe("email_not_found");
+      expect(updated.lastError).toBe("Automation timed out.");
+    }
+    expect(nextDiscoveryCandidate(store)?.id).toBe(candidate.id);
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("gives up after MAX_DISCOVERY_ATTEMPTS and stops offering the candidate for auto-discovery", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const candidate = store.upsertCandidate(
+      createCandidate({ fullName: "Jane Doe", linkedinUrl: "https://linkedin.com/in/jane-doe" }),
+    );
+
+    let updated = candidate;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      updated = await recordDiscoveryResult(store, candidate.id, { status: "not_found" });
+      expect(updated.discoveryAttempts).toBe(attempt);
+    }
+
+    expect(updated.status).toBe("email_not_found");
+    expect(updated.lastError).toContain("gave up after 3 attempts");
+    // Once parked, the worker must not keep re-selecting it (this is what previously
+    // caused an infinite retry loop that burned Jobright lookups forever).
+    expect(nextDiscoveryCandidate(store)?.id).toBeUndefined();
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("resets discoveryAttempts back to 0 once an email is eventually found", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const candidate = store.upsertCandidate(
+      createCandidate({ fullName: "Jane Doe", linkedinUrl: "https://linkedin.com/in/jane-doe" }),
+    );
+
+    await recordDiscoveryResult(store, candidate.id, { status: "not_found" });
+    const found = await recordDiscoveryResult(store, candidate.id, { status: "found", email: "jane@example.com" });
+
+    expect(found.discoveryAttempts).toBe(0);
+    expect(found.status).toBe("email_guessed");
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("records a dry_run result by only bumping lastDiscoveryAttemptAt", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const candidate = store.upsertCandidate(
+      createCandidate({ fullName: "Jane Doe", linkedinUrl: "https://linkedin.com/in/jane-doe", lastError: "previous error" }),
+    );
+
+    const updated = await recordDiscoveryResult(store, candidate.id, { status: "dry_run" });
+
+    expect(updated.email).toBeUndefined();
+    expect(updated.lastError).toBe("previous error");
+    expect(updated.lastDiscoveryAttemptAt).toBeDefined();
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("requestDiscovery revives a given-up candidate and jumps it to the front of the queue", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const stuck = store.upsertCandidate(
+      createCandidate({ fullName: "Stuck Person", linkedinUrl: "https://linkedin.com/in/stuck-person" }),
+    );
+    for (let i = 0; i < MAX_DISCOVERY_ATTEMPTS; i += 1) {
+      await recordDiscoveryResult(store, stuck.id, { status: "not_found" });
+    }
+    const recentlyAttempted = store.upsertCandidate(
+      createCandidate({ fullName: "Recently Attempted", linkedinUrl: "https://linkedin.com/in/recently-attempted" }),
+    );
+    store.updateCandidate(recentlyAttempted.id, { lastDiscoveryAttemptAt: new Date().toISOString() });
+
+    expect(store.listCandidates().find((candidate) => candidate.id === stuck.id)?.status).toBe("email_not_found");
+    expect(nextDiscoveryCandidate(store)?.id).toBe(recentlyAttempted.id);
+
+    const revived = await requestDiscovery(store, stuck.id);
+
+    expect(revived.status).toBe("new");
+    expect(revived.discoveryAttempts).toBe(0);
+    expect(revived.lastDiscoveryAttemptAt).toBeUndefined();
+    expect(nextDiscoveryCandidate(store)?.id).toBe(stuck.id);
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("requestDiscovery({ forceSalesql: true }) sets forceProvider, and a found result clears it", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const candidate = store.upsertCandidate(
+      createCandidate({ fullName: "Jane Doe", linkedinUrl: "https://linkedin.com/in/jane-doe" }),
+    );
+
+    const forced = await requestDiscovery(store, candidate.id, { forceSalesql: true });
+    expect(forced.forceProvider).toBe("salesql");
+
+    const found = await recordDiscoveryResult(store, candidate.id, {
+      status: "found",
+      email: "jane@example.com",
+      provider: "salesql",
+    });
+    expect(found.forceProvider).toBeUndefined();
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("requestSalesqlSweep queues every active candidate still missing an email", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    store.upsertCandidate(
+      createCandidate({ fullName: "Has Email", linkedinUrl: "https://linkedin.com/in/has-email", email: "has@example.com" }),
+    );
+    const missing1 = store.upsertCandidate(
+      createCandidate({ fullName: "Missing One", linkedinUrl: "https://linkedin.com/in/missing-one" }),
+    );
+    const missing2 = store.upsertCandidate(
+      createCandidate({ fullName: "Missing Two", linkedinUrl: "https://linkedin.com/in/missing-two" }),
+    );
+
+    const result = await requestSalesqlSweep(store);
+
+    expect(result.queued).toBe(2);
+    expect(result.candidateIds.sort()).toEqual([missing1.id, missing2.id].sort());
+    for (const id of result.candidateIds) {
+      expect(store.listCandidates().find((candidate) => candidate.id === id)?.forceProvider).toBe("salesql");
+    }
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+});
+
+describe("worker status heartbeats", () => {
+  it("stores worker progress and reports online while the heartbeat is fresh", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const status = updateWorkerStatus(store, {
+      phase: "looking_up",
+      message: "Looking up Danny Conforti via Jobright…",
+      candidateId: "c1",
+      candidateName: "Danny Conforti",
+      provider: "jobright",
+    });
+
+    expect(status.phase).toBe("looking_up");
+    expect(status.candidateName).toBe("Danny Conforti");
+    expect(getWorkerStatusView(store)).toMatchObject({
+      online: true,
+      status: { message: "Looking up Danny Conforti via Jobright…" },
+    });
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("treats a stale heartbeat as offline", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const stale = new Date(Date.now() - WORKER_OFFLINE_AFTER_MS - 5_000).toISOString();
+    store.setWorkerStatus({
+      phase: "looking_up",
+      message: "Looking up Danny Conforti via Jobright…",
+      candidateName: "Danny Conforti",
+      lastHeartbeatAt: stale,
+      updatedAt: stale,
+    });
+
+    expect(getWorkerStatusView(store).online).toBe(false);
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+});
+
+describe("discovery settings", () => {
+  it("defaults SalesQL auto-fallback to off and persists toggle changes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    expect(getDiscoverySettings(store).salesqlAutoFallback).toBe(false);
+
+    const enabled = await updateDiscoverySettings(store, { salesqlAutoFallback: true });
+    expect(enabled.salesqlAutoFallback).toBe(true);
+    expect(getDiscoverySettings(store).salesqlAutoFallback).toBe(true);
+
+    const disabled = await updateDiscoverySettings(store, { salesqlAutoFallback: false });
+    expect(disabled.salesqlAutoFallback).toBe(false);
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+});

@@ -1,0 +1,25 @@
+{
+  "name": "recruiter-reachout",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web,worker -c blue,green,magenta \"npm run dev -w @recruiter/api\" \"npm run dev -w @recruiter/web\" \"npm run dev -w @recruiter/worker\"",
+    "build": "npm run build -ws",
+    "typecheck": "npm run typecheck -ws",
+    "test": "npm run build -w @recruiter/shared && npm run test -ws --if-present",
+    "lint": "npm run typecheck"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "@vitejs/plugin-react": "latest",
+    "concurrently": "latest",
+    "typescript": "latest",
+    "vite": "latest",
+    "vitest": "latest"
+  }
+}

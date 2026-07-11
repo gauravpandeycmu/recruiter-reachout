@@ -1,0 +1,28 @@
+node_modules
+dist
+.DS_Store
+*.log
+
+# Local IDE / agent config
+.claude
+.cursor
+
+# Secrets and environment
+.env
+.env.*
+client_secret*.json
+apps/api/.env
+apps/web/.env
+apps/*/.env
+apps/*/.env.*
+
+# Local runtime data (DB, resumes, browser profiles)
+data/
+apps/api/data/
+apps/worker/data
+apps/extension/dist
+
+# SQLite artifacts
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

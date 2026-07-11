@@ -1,0 +1,8 @@
+name = "recruiter-reachout-relay"
+main = "src/worker.ts"
+compatibility_date = "2026-05-13"
+
+[[kv_namespaces]]
+binding = "TRACKING_EVENTS"
+id = "941de21d622b429c94249d8f1b80e3d7"
+preview_id = "428611157f8e4c0e9a2e2225c4be8174"

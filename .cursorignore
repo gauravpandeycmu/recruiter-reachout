@@ -1,0 +1,4 @@
+.env
+.env.*
+apps/*/.env
+apps/*/.env.*
