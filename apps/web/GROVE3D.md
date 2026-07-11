@@ -74,16 +74,33 @@ technology class games use. `three@0.185.1` is installed in the `@recruiter/web`
 - Meadow reads flat mid-distance — Part 2/4: grass detail texture (canvas-generated
   noise map as `map` with repeat), or fine color noise at higher vertex density.
 - Terrain green a touch uniform; add clover/dry patch contrast.
-- [ ] **Part 2 — water & depth:** `Reflector` mirror water with blue tint, shore
-      darkening ring, distant-forest billboards/cone clusters on foothills, valley
-      mist plane (transparent soft texture), camera drift.
-- [ ] **Part 3 — trees & streak:** 6 procedural species with growth stages, slot
-      planting from streak (focal-point ordering, lake exclusion), newest-tree sparkle
-      (Points), elder-tree glow, wind sway, cast shadows.
-- [ ] **Part 4 — polish:** fireflies (Points, additive), bloom-ish sun glow sprite,
-      empty-state & overflow signs as HTML overlays on the canvas container, goal-met
-      celebration (confetti particles or sun pulse), reduced-motion support, perf pass,
-      delete-or-keep decision on SVG fallback, final commit.
+- [x] **Part 2 (partial) — depth & detail:** ridged 2-octave mountain crests, snowline
+      at h>29, darker rock, fog 0.0044, canvas grass-detail texture multiplied over
+      terrain vertex colors, camera drift. STILL TODO from part 2: Reflector mirror
+      water (current water = PMREM sky mirror only, no tree reflections), distant
+      conifer clusters on foothills, valley mist plane.
+- [x] **Part 3 — trees & streak:** 6 procedural species (jittered-icosphere blobs w/
+      baked AO vertex colors, cone pines, white birch trunks, leaning willows),
+      sprout/sapling/adult growth stages + growthFor curve, 50-slot jittered grid
+      (x -33..14, z 2..32) sorted from focal (-12,24), lake exclusion margin 1.16,
+      per-tree wind sway, newest-tree grow-in animation, cast+receive shadows.
+      Streak-reactive replant via `worldRef` shared between the two effects
+      (scene effect declared first, planting effect second — order matters).
+      NOTE: shared materials `blobMat/trunkMat/birchTrunkMat` must NOT be disposed
+      in the replant cleanup. HMR does not re-run the scene effect — hard reload the
+      page when verifying scene-level edits.
+- [ ] **Part 4 — polish (NEXT):**
+      1. Leftover Part 2 items: Reflector water, foothill conifer clusters, mist plane.
+      2. Fireflies (THREE.Points, additive, only when streak > 0).
+      3. Empty-state sign ("plant your first tree") + overflow note as HTML overlays
+         positioned over the canvas container (it's position:relative already).
+      4. Goal-met celebration: warm sun pulse (tween sun intensity/sprite scale when
+         goalMet), maybe drifting petals from cherries.
+      5. Foreground grass blades: instanced crossed-quad grass patches near camera
+         (x -30..30, z 30..44) — biggest remaining realism win.
+      6. Perf pass: check drawcalls/fps with ~44 trees; consider merging blob geos.
+      7. Reduced-motion already respected (no drift/sway); re-verify.
+      8. Decide: keep StreakGrove.tsx as WebGL fallback (currently yes).
 
 ## Commits so far
 

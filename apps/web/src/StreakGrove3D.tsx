@@ -107,8 +107,8 @@ const C_GRASS_LIGHT = new THREE.Color("#7cbb60");
 const C_GRASS_DRY = new THREE.Color("#93a84e");
 const C_SAND = new THREE.Color("#9a8a5e");
 const C_FOREST = new THREE.Color("#2e5b3a");
-const C_ROCK_LOW = new THREE.Color("#4c5666");
-const C_ROCK_HIGH = new THREE.Color("#93a0b2");
+const C_ROCK_LOW = new THREE.Color("#3d4553");
+const C_ROCK_HIGH = new THREE.Color("#8b98ab");
 const C_SNOW = new THREE.Color("#edf3fb");
 
 /** Terrain height field: rolling meadow -> foothills -> mountain wall, lake basin carved. */
@@ -118,11 +118,12 @@ function heightAt(x: number, z: number): number {
   // foothills (smoothstep with reversed edges: 0 at z=-24, 1 by z=-62)
   const footT = smoothstep(-24, -62, Math.min(z, 0));
   h += footT * (5 + fbm(x * 0.03, z * 0.03 + 5, 4) * 5);
-  // mountain wall
+  // mountain wall — two ridged-noise octaves for sharp crests
   const mtn = smoothstep(-68, -96, z);
   if (mtn > 0) {
-    const ridge = 1 - Math.abs(fbm(x * 0.012, z * 0.02, 4) * 2 - 1);
-    h += mtn * (Math.pow(ridge, 1.7) * 34 + fbm(x * 0.05, z * 0.05, 3) * 3);
+    const r1 = 1 - Math.abs(fbm(x * 0.012, z * 0.02, 4) * 2 - 1);
+    const r2 = 1 - Math.abs(fbm(x * 0.03 + 40, z * 0.04, 3) * 2 - 1);
+    h += mtn * (Math.pow(r1, 2.2) * 40 + Math.pow(r2, 2) * 9 + fbm(x * 0.06, z * 0.06, 3) * 2);
   }
   // lake basin
   const dx = (x - LAKE.x) / LAKE.rx;
@@ -166,10 +167,10 @@ function buildTerrain(): THREE.Mesh {
     const mtn = smoothstep(-68, -96, z);
     const rockAmt = Math.max(smoothstep(0.75, 1.5, s), mtn);
     if (rockAmt > 0) {
-      tmp.copy(C_ROCK_LOW).lerp(C_ROCK_HIGH, smoothstep(2, 26, h));
+      tmp.copy(C_ROCK_LOW).lerp(C_ROCK_HIGH, smoothstep(2, 34, h));
       col.lerp(tmp, rockAmt);
-      if (mtn > 0.4 && h > 21 && s < 1.35) {
-        col.lerp(C_SNOW, smoothstep(21, 26, h) * (1 - smoothstep(1.0, 1.4, s)));
+      if (mtn > 0.4 && h > 29 && s < 1.35) {
+        col.lerp(C_SNOW, smoothstep(29, 36, h) * (1 - smoothstep(1.0, 1.4, s)));
       }
     }
 
@@ -188,11 +189,247 @@ function buildTerrain(): THREE.Mesh {
   geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
   geo.computeVertexNormals();
 
-  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.94, metalness: 0 });
+  const mat = new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    roughness: 0.94,
+    metalness: 0,
+    map: makeGrassDetailTexture(),
+  });
   const mesh = new THREE.Mesh(geo, mat);
   mesh.receiveShadow = true;
   return mesh;
 }
+
+/** Repeating speckle texture multiplied over the vertex colors — close-up turf detail. */
+function makeGrassDetailTexture(): THREE.CanvasTexture {
+  const c = document.createElement("canvas");
+  c.width = 256;
+  c.height = 256;
+  const ctx = c.getContext("2d")!;
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, 256, 256);
+  for (let i = 0; i < 5200; i += 1) {
+    const x = hash2(i, 1) * 256;
+    const y = hash2(i, 2) * 256;
+    const l = 210 + hash2(i, 3) * 65; // mostly light speckle so it darkens subtly
+    const len = 1.5 + hash2(i, 4) * 3.5;
+    ctx.strokeStyle = `rgb(${l | 0},${(l + 8) | 0},${(l - 6) | 0})`;
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + (hash2(i, 5) - 0.5) * 2, y - len);
+    ctx.stroke();
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(46, 32);
+  tex.anisotropy = 4;
+  return tex;
+}
+
+/* ---------------- trees ---------------- */
+
+type Species = "oak" | "pine" | "birch" | "cherry" | "maple" | "willow";
+
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+type Slot3D = { x: number; z: number; species: Species; seed: number };
+
+function buildSlots3D(): Slot3D[] {
+  const slots: Slot3D[] = [];
+  let n = 0;
+  for (let iz = 0; iz < 5; iz += 1) {
+    for (let ix = 0; ix < 10; ix += 1) {
+      const rand = mulberry32(n * 7919 + 977);
+      const x = -33 + ix * 5 + (rand() - 0.5) * 3.6;
+      const z = 2 + iz * 7 + (rand() - 0.5) * 3.6;
+      n += 1;
+      const dx = (x - LAKE.x) / (LAKE.rx * 1.16);
+      const dz = (z - LAKE.z) / (LAKE.rz * 1.16);
+      const lakeD2 = dx * dx + dz * dz;
+      if (lakeD2 < 1) continue;
+      const roll = rand();
+      const species: Species =
+        lakeD2 < 2 && roll < 0.5
+          ? "willow"
+          : roll < 0.14
+            ? "cherry"
+            : roll < 0.28
+              ? "maple"
+              : roll < 0.44
+                ? "birch"
+                : roll < 0.66
+                  ? "pine"
+                  : "oak";
+      slots.push({ x, z, species, seed: n * 31 + 11 });
+    }
+  }
+  const focal = { x: -12, z: 24 };
+  return slots.sort(
+    (a, b) =>
+      (a.x - focal.x) ** 2 +
+      (a.z - focal.z) ** 2 -
+      ((b.x - focal.x) ** 2 + (b.z - focal.z) ** 2),
+  );
+}
+
+const SLOTS_3D = buildSlots3D();
+const MAX_TREES_3D = SLOTS_3D.length;
+
+function growthFor(age: number): number {
+  return Math.min(0.42 + Math.max(0, age - 3) * 0.055, 1.18);
+}
+
+const CANOPY_COLORS: Record<Species, [string, string]> = {
+  oak: ["#3f7d47", "#77b163"],
+  pine: ["#26543a", "#3f7a52"],
+  birch: ["#8db94f", "#c0dc82"],
+  cherry: ["#e295b7", "#f7c6da"],
+  maple: ["#c9722f", "#eda85a"],
+  willow: ["#6f9c50", "#a4c877"],
+};
+
+const blobMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0 });
+const trunkMat = new THREE.MeshStandardMaterial({ color: new THREE.Color("#6b4a2b"), roughness: 0.95 });
+const birchTrunkMat = new THREE.MeshStandardMaterial({ color: new THREE.Color("#e8e2d2"), roughness: 0.85 });
+
+/** Jittered icosphere with baked bottom-shadow vertex colors. */
+function makeBlob(r: number, species: Species, seed: number, flatten = 1): THREE.Mesh {
+  const geo = new THREE.IcosahedronGeometry(r, 1);
+  const pos = geo.attributes.position as THREE.BufferAttribute;
+  const rand = mulberry32(seed);
+  const jit = r * 0.32;
+  for (let i = 0; i < pos.count; i += 1) {
+    pos.setXYZ(
+      i,
+      pos.getX(i) + (rand() - 0.5) * jit,
+      (pos.getY(i) + (rand() - 0.5) * jit) * flatten,
+      pos.getZ(i) + (rand() - 0.5) * jit,
+    );
+  }
+  geo.computeVertexNormals();
+  const [darkHex, lightHex] = CANOPY_COLORS[species];
+  const dark = new THREE.Color(darkHex);
+  const light = new THREE.Color(lightHex);
+  const colors = new Float32Array(pos.count * 3);
+  const c = new THREE.Color();
+  for (let i = 0; i < pos.count; i += 1) {
+    const t = smoothstep(-r, r, pos.getY(i));
+    c.copy(dark).lerp(light, t * (0.55 + hash2(i, seed) * 0.45));
+    colors[i * 3] = c.r;
+    colors[i * 3 + 1] = c.g;
+    colors[i * 3 + 2] = c.b;
+  }
+  geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+  const mesh = new THREE.Mesh(geo, blobMat);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+function makeTrunk(topR: number, botR: number, h: number, mat: THREE.Material): THREE.Mesh {
+  const mesh = new THREE.Mesh(new THREE.CylinderGeometry(topR, botR, h, 7), mat);
+  mesh.position.y = h / 2;
+  mesh.castShadow = true;
+  return mesh;
+}
+
+/** Full-grown tree for a species; ~2-5 units tall before growth scaling. */
+function buildTreeMesh(species: Species, seed: number): THREE.Group {
+  const g = new THREE.Group();
+  const rand = mulberry32(seed);
+  if (species === "pine") {
+    g.add(makeTrunk(0.09, 0.22, 1.1, trunkMat));
+    const tiers = [
+      { r: 1.7, h: 2.2, y: 1.9 },
+      { r: 1.3, h: 1.9, y: 3.1 },
+      { r: 0.9, h: 1.7, y: 4.2 },
+    ];
+    const [darkHex, lightHex] = CANOPY_COLORS.pine;
+    for (const t of tiers) {
+      const cone = new THREE.Mesh(
+        new THREE.ConeGeometry(t.r * (0.92 + rand() * 0.16), t.h, 7),
+        new THREE.MeshStandardMaterial({
+          color: new THREE.Color(darkHex).lerp(new THREE.Color(lightHex), rand() * 0.5),
+          roughness: 0.9,
+        }),
+      );
+      cone.position.y = t.y;
+      cone.rotation.y = rand() * Math.PI;
+      cone.castShadow = true;
+      cone.receiveShadow = true;
+      g.add(cone);
+    }
+  } else if (species === "birch") {
+    g.add(makeTrunk(0.07, 0.14, 3.1, birchTrunkMat));
+    const b1 = makeBlob(1.05, species, seed + 1);
+    b1.position.set(0.4, 3.4, 0.1);
+    const b2 = makeBlob(0.85, species, seed + 2);
+    b2.position.set(-0.5, 3.0, -0.2);
+    const b3 = makeBlob(0.7, species, seed + 3);
+    b3.position.set(0, 3.9, 0.3);
+    g.add(b1, b2, b3);
+  } else if (species === "willow") {
+    const trunk = makeTrunk(0.12, 0.3, 2.1, trunkMat);
+    trunk.rotation.z = 0.16;
+    g.add(trunk);
+    const b1 = makeBlob(2.1, species, seed + 1, 0.72);
+    b1.position.set(-0.3, 2.7, 0);
+    const b2 = makeBlob(1.3, species, seed + 2, 0.8);
+    b2.position.set(0.9, 2.1, 0.4);
+    g.add(b1, b2);
+  } else {
+    // oak / maple / cherry share a broadleaf shape
+    const h = species === "cherry" ? 1.7 : 2.3;
+    g.add(makeTrunk(0.13, 0.3, h, trunkMat));
+    const spread = species === "cherry" ? 1.5 : 1.75;
+    const main = makeBlob(spread, species, seed + 1, 0.92);
+    main.position.set(0, h + spread * 0.7, 0);
+    const s1 = makeBlob(spread * 0.62, species, seed + 2);
+    s1.position.set(spread * 0.7, h + spread * 0.4, spread * 0.3);
+    const s2 = makeBlob(spread * 0.55, species, seed + 3);
+    s2.position.set(-spread * 0.65, h + spread * 0.45, -spread * 0.25);
+    g.add(main, s1, s2);
+  }
+  g.rotation.y = rand() * Math.PI * 2;
+  return g;
+}
+
+/** Tree at a given age: sprout -> sapling -> growing adult. */
+function buildTreeForAge(species: Species, seed: number, age: number): THREE.Group {
+  if (age <= 1) {
+    const g = new THREE.Group();
+    const cone = new THREE.Mesh(
+      new THREE.ConeGeometry(0.16, 0.6, 5),
+      new THREE.MeshStandardMaterial({ color: new THREE.Color("#4c8a4e"), roughness: 0.85 }),
+    );
+    cone.position.y = 0.3;
+    cone.castShadow = true;
+    g.add(cone);
+    return g;
+  }
+  if (age <= 3) {
+    const g = new THREE.Group();
+    g.add(makeTrunk(0.06, 0.11, 0.9, trunkMat));
+    const blob = makeBlob(0.55, species, seed + 9);
+    blob.position.y = 1.2;
+    g.add(blob);
+    return g;
+  }
+  return buildTreeMesh(species, seed);
+}
+
+type TreeState = { group: THREE.Group; phase: number; targetScale: number; bornAt: number };
 
 /* ---------------- sun glow sprite ---------------- */
 
@@ -239,6 +476,7 @@ export function StreakGrove3D({
   goalMet: boolean;
 }) {
   const mountRef = useRef<HTMLDivElement | null>(null);
+  const worldRef = useRef<{ treeGroup: THREE.Group; treeStates: TreeState[]; reducedMotion: boolean } | null>(null);
   const [webglFailed, setWebglFailed] = useState(false);
   const streakAtRisk = streak > 0 && sentToday === 0;
 
@@ -268,11 +506,11 @@ export function StreakGrove3D({
     renderer.domElement.style.height = "100%";
 
     const scene = new THREE.Scene();
-    scene.fog = new THREE.FogExp2(new THREE.Color("#c9d8e6"), 0.0062);
+    scene.fog = new THREE.FogExp2(new THREE.Color("#c9d8e6"), 0.0044);
 
-    const camera = new THREE.PerspectiveCamera(42, 900 / 460, 0.5, 600);
-    const camBase = new THREE.Vector3(0, 12.5, 46);
-    const camTarget = new THREE.Vector3(0, 4.5, -8);
+    const camera = new THREE.PerspectiveCamera(48, 900 / 460, 0.5, 600);
+    const camBase = new THREE.Vector3(-2, 11, 47);
+    const camTarget = new THREE.Vector3(-2, 4, -4);
     camera.position.copy(camBase);
     camera.lookAt(camTarget);
 
@@ -309,6 +547,10 @@ export function StreakGrove3D({
     const terrain = buildTerrain();
     scene.add(terrain);
 
+    const treeGroup = new THREE.Group();
+    scene.add(treeGroup);
+    worldRef.current = { treeGroup, treeStates: [], reducedMotion };
+
     const waterGeo = new THREE.CircleGeometry(1, 72);
     const waterMat = new THREE.MeshStandardMaterial({
       color: new THREE.Color("#31708f"),
@@ -341,11 +583,21 @@ export function StreakGrove3D({
     const clock = new THREE.Clock();
     let elapsed = 0;
     const loop = () => {
-      elapsed += clock.getDelta();
+      const delta = clock.getDelta();
+      elapsed += delta;
       if (!reducedMotion) {
         camera.position.x = camBase.x + Math.sin(elapsed * 0.31) * 0.9;
         camera.position.y = camBase.y + Math.sin(elapsed * 0.23) * 0.25;
         camera.lookAt(camTarget);
+      }
+      const world = worldRef.current;
+      if (world) {
+        for (const t of world.treeStates) {
+          if (t.group.scale.x < t.targetScale) {
+            t.group.scale.setScalar(Math.min(t.targetScale, t.group.scale.x + delta * Math.max(t.targetScale, 0.4) * 1.4));
+          }
+          if (!reducedMotion) t.group.rotation.z = Math.sin(elapsed * 0.9 + t.phase) * 0.012;
+        }
       }
       renderer.render(scene, camera);
     };
@@ -361,6 +613,7 @@ export function StreakGrove3D({
     document.addEventListener("visibilitychange", onVisibility);
 
     return () => {
+      worldRef.current = null;
       document.removeEventListener("visibilitychange", onVisibility);
       ro.disconnect();
       renderer.setAnimationLoop(null);
@@ -377,6 +630,38 @@ export function StreakGrove3D({
       if (renderer.domElement.parentElement === mount) mount.removeChild(renderer.domElement);
     };
   }, []);
+
+  // (Re)plant the grove whenever the streak changes. Runs after the scene effect.
+  useEffect(() => {
+    const world = worldRef.current;
+    if (!world) return;
+    const { treeGroup, treeStates } = world;
+    // clear previous planting (geometries are unique per tree; materials may be shared)
+    for (const child of [...treeGroup.children]) {
+      child.traverse((obj) => {
+        const mesh = obj as THREE.Mesh;
+        if (mesh.geometry) mesh.geometry.dispose();
+        const m = mesh.material as THREE.Material | undefined;
+        if (m && m !== blobMat && m !== trunkMat && m !== birchTrunkMat) m.dispose();
+      });
+      treeGroup.remove(child);
+    }
+    treeStates.length = 0;
+
+    const count = Math.min(Math.max(0, streak), MAX_TREES_3D);
+    for (let i = 0; i < count; i += 1) {
+      const slot = SLOTS_3D[i]!;
+      const age = streak - i;
+      const tree = buildTreeForAge(slot.species, slot.seed, age);
+      const y = Math.max(heightAt(slot.x, slot.z), WATER_Y + 0.15);
+      tree.position.set(slot.x, y - 0.06, slot.z);
+      const targetScale = age <= 3 ? 1 : growthFor(age);
+      const isNewest = i === count - 1;
+      tree.scale.setScalar(isNewest && !world.reducedMotion ? 0.02 : targetScale);
+      treeGroup.add(tree);
+      treeStates.push({ group: tree, phase: slot.seed % 7, targetScale, bornAt: 0 });
+    }
+  }, [streak]);
 
   if (webglFailed) {
     return (
