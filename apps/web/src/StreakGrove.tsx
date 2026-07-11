@@ -59,7 +59,7 @@ function Sapling({ tint, dark }: { tint: string; dark: string }) {
       <ellipse cx={-1.5} cy={1.5} rx={9} ry={2.8} fill="url(#sgShadow)" />
       <path d="M-1.2 0 C-0.9 -5 -0.8 -10 -0.5 -14.5 L0.8 -14.5 C1 -10 1.1 -5 1.4 0 Z" fill="url(#sgBark)" />
       <path d="M-0.4 -12 C-2 -13.5 -3.4 -15 -4.6 -16.8" stroke="#5c4128" strokeWidth={0.9} fill="none" strokeLinecap="round" />
-      <g filter="url(#sgLeaf)">
+      <g filter="url(#sgCanopyTex)">
         <ellipse cx={-3.5} cy={-16.5} rx={5.4} ry={4.6} fill={dark} />
         <ellipse cx={0.5} cy={-20} rx={7.4} ry={6.4} fill={tint} />
         <ellipse cx={3.6} cy={-22.4} rx={4} ry={3.4} fill="#ffffff" opacity={0.25} />
@@ -79,11 +79,12 @@ function OakTree({ rand, warm }: { rand: () => number; warm?: boolean }) {
       <path
         d="M-5 0 Q-3.6 -1.8 -3 -5 C-2.6 -9.5 -2.3 -13.5 -2.2 -16.2 C-2.2 -18.2 -5.6 -21.8 -9.4 -25.6 L-7.7 -27.2 C-4.7 -23.8 -2.2 -21.2 -1 -19.6 C-0.8 -23.2 -0.3 -27.2 0.7 -30.8 L2.9 -30.4 C2.1 -26.2 1.75 -22.6 1.75 -19.8 C3.1 -21.6 5.5 -24 8.3 -26.8 L9.9 -25.2 C6.3 -21.2 3.7 -18 3.3 -15.8 C3.2 -12.2 3.4 -8 4.1 -4.4 Q4.6 -1.6 6 0 Z"
         fill="url(#sgBark)"
+        filter="url(#sgBarkTex)"
       />
       <path d="M-4 -2 C-3 -8 -2.6 -13 -2.5 -16" stroke="#3a2a1e" strokeWidth={0.7} opacity={0.5} fill="none" />
       <path d="M1 -4 C1.4 -9 1.6 -13 1.6 -17" stroke="#8a6238" strokeWidth={0.6} opacity={0.6} fill="none" />
       {/* canopy: shadow mass behind, lobed main mass, sunlit clusters upper-right */}
-      <g filter="url(#sgLeaf)">
+      <g filter="url(#sgCanopyTex)">
         <path
           d="M-21 -36 C-27 -40 -24 -50 -16 -51 C-16 -58 -8 -62 -2 -59 C3 -65 14 -64 17 -57 C25 -56 28 -47 23 -42 C27 -35 20 -29 13 -31 C9 -25 -3 -24 -8 -29 C-16 -27 -23 -31 -21 -36 Z"
           fill={deep}
@@ -107,8 +108,8 @@ function PineTree({ rand }: { rand: () => number }) {
   return (
     <g>
       <ellipse cx={-3.5} cy={2} rx={16} ry={4} fill="url(#sgShadow)" />
-      <path d="M-2.2 0 Q-1.6 -6 -1.3 -14 L1.3 -14 Q1.6 -6 2.2 0 Z" fill="url(#sgBarkDark)" />
-      <g filter="url(#sgLeaf)" transform={`rotate(${tilt})`}>
+      <path d="M-2.2 0 Q-1.6 -6 -1.3 -14 L1.3 -14 Q1.6 -6 2.2 0 Z" fill="url(#sgBarkDark)" filter="url(#sgBarkTex)" />
+      <g filter="url(#sgCanopyTex)" transform={`rotate(${tilt})`}>
         {/* drooping tiers, dark in shadow */}
         <path
           d="M0 -64 C2.5 -58 5.5 -53 9.5 -49 Q4.5 -50 0 -49.4 Q-4.5 -50 -9.5 -49 C-5.5 -53 -2.5 -58 0 -64 Z"
@@ -167,7 +168,7 @@ function BirchTree({ rand }: { rand: () => number }) {
         <path d={`M${sway - 0.4} -33 C${sway - 4} -37 ${sway - 7} -40 ${sway - 9} -44`} />
         <path d={`M${sway + 0.4} -35 C${sway + 4} -39 ${sway + 6} -42 ${sway + 8} -46`} />
       </g>
-      <g filter="url(#sgLeaf)">
+      <g filter="url(#sgCanopyTex)">
         <ellipse cx={sway - 7} cy={-43} rx={8} ry={7} fill="url(#sgBirchCanopy)" opacity={0.92} />
         <ellipse cx={sway + 7} cy={-45} rx={8.5} ry={7} fill="url(#sgBirchCanopy)" />
         <ellipse cx={sway} cy={-51} rx={9} ry={7.5} fill="url(#sgBirchCanopy)" />
@@ -186,8 +187,9 @@ function CherryTree({ withPetals }: { withPetals: boolean }) {
       <path
         d="M-3.2 0 Q-2.2 -2 -1.9 -5 C-1.8 -9 -1.7 -12 -1.7 -14.5 C-1.8 -16.5 -4.6 -19.6 -7.4 -23 L-5.7 -24.5 C-3.5 -22 -1.7 -20 -0.7 -18.4 C-0.5 -21.4 0.3 -24.6 1.5 -27.4 L3.7 -26.6 C2.5 -23.4 2 -20.6 2 -18 C3.2 -19.4 5 -21.2 7.2 -23.2 L8.7 -21.6 C5.7 -18.6 3.6 -16.2 3.2 -14.4 C3.1 -10.4 3.3 -6.4 3.9 -3.2 Q4.3 -1.2 5.2 0 Z"
         fill="url(#sgBarkDark)"
+        filter="url(#sgBarkTex)"
       />
-      <g filter="url(#sgLeaf)">
+      <g filter="url(#sgCanopyTex)">
         <path
           d="M-17 -33 C-22 -38 -18 -46 -11 -46 C-10 -53 -1 -56 5 -52 C11 -56 19 -52 19 -45 C25 -42 24 -34 18 -32 C20 -26 12 -22 7 -25 C2 -20 -8 -21 -11 -26 C-17 -25 -20 -29 -17 -33 Z"
           fill="url(#sgCherryCanopy)"
@@ -216,8 +218,9 @@ function WillowTree({ rand }: { rand: () => number }) {
       <path
         d={`M-3.4 0 C-2.8 -8 ${1.5 * lean} -14 ${2.6 * lean} -22 C${3 * lean} -25 ${3.4 * lean} -28 ${3.8 * lean} -31 L${6.2 * lean} -30.4 C${5.6 * lean} -27 ${5.2 * lean} -23.6 ${4.8 * lean} -20.6 C${3.2 * lean} -13.6 ${1 * lean} -9 3.4 0 Z`}
         fill="url(#sgBark)"
+        filter="url(#sgBarkTex)"
       />
-      <g filter="url(#sgLeaf)">
+      <g filter="url(#sgCanopyTex)">
         <path
           d={`M${-16 + 2 * lean} -34 C${-22 + 2 * lean} -40 ${-15 + 2 * lean} -49 ${-7 + 2 * lean} -47 C${-4 + 2 * lean} -54 ${8 + 2 * lean} -55 ${11 + 2 * lean} -48 C${19 + 2 * lean} -48 ${22 + 2 * lean} -40 ${16 + 2 * lean} -35 C${18 + 2 * lean} -30 ${8 + 2 * lean} -26 ${3 + 2 * lean} -29 C${-4 + 2 * lean} -25 ${-14 + 2 * lean} -28 ${-16 + 2 * lean} -34 Z`}
           fill="url(#sgWillowCanopy)"
@@ -610,25 +613,65 @@ export function StreakGrove({
           </radialGradient>
 
           {/* ---- Filters ---- */}
-          <filter id="sgLeaf" x="-25%" y="-25%" width="150%" height="150%">
-            <feTurbulence type="fractalNoise" baseFrequency="0.35" numOctaves="3" seed="11" result="n" />
-            <feDisplacementMap in="SourceGraphic" in2="n" scale="5" xChannelSelector="R" yChannelSelector="G" />
-          </filter>
-          <filter id="sgRough" x="-10%" y="-10%" width="120%" height="120%">
-            <feTurbulence type="fractalNoise" baseFrequency="0.018 0.06" numOctaves="2" seed="4" result="n" />
-            <feDisplacementMap in="SourceGraphic" in2="n" scale="7" />
-          </filter>
-          <filter id="sgGrain">
-            <feTurbulence type="fractalNoise" baseFrequency="0.7" numOctaves="2" seed="9" />
-            <feColorMatrix
-              type="matrix"
-              values="0 0 0 0 0.1  0 0 0 0 0.25  0 0 0 0 0.08  0 0 0 0.5 0"
-            />
-            <feComposite operator="in" in2="SourceGraphic" />
-          </filter>
           <filter id="sgBlur1"><feGaussianBlur stdDeviation="1" /></filter>
           <filter id="sgBlur2"><feGaussianBlur stdDeviation="2.2" /></filter>
           <filter id="sgBlur4"><feGaussianBlur stdDeviation="4" /></filter>
+
+          {/* ---- Photo-texture filters: fractal noise lit as a 3D surface, multiplied into the fill ---- */}
+          <filter id="sgRockTex" x="-5%" y="-5%" width="110%" height="110%">
+            <feTurbulence type="fractalNoise" baseFrequency="0.035 0.05" numOctaves="5" seed="7" result="n" />
+            <feDiffuseLighting in="n" lightingColor="#fff2dc" surfaceScale="3.4" diffuseConstant="1.12" result="l">
+              <feDistantLight azimuth="315" elevation="52" />
+            </feDiffuseLighting>
+            <feComposite in="l" in2="SourceGraphic" operator="arithmetic" k1="1" k2="0" k3="0" k4="0" result="lit" />
+            <feComposite in="lit" in2="SourceGraphic" operator="in" />
+          </filter>
+          <filter id="sgGrassTex" x="-3%" y="-6%" width="106%" height="112%">
+            <feTurbulence type="fractalNoise" baseFrequency="0.02 0.14" numOctaves="4" seed="21" result="n" />
+            <feDiffuseLighting in="n" lightingColor="#fff6de" surfaceScale="2" diffuseConstant="1.1" result="l">
+              <feDistantLight azimuth="315" elevation="62" />
+            </feDiffuseLighting>
+            <feComposite in="l" in2="SourceGraphic" operator="arithmetic" k1="1" k2="0" k3="0" k4="0" result="lit" />
+            <feComposite in="lit" in2="SourceGraphic" operator="in" />
+          </filter>
+          <filter id="sgCanopyTex" x="-25%" y="-25%" width="150%" height="150%">
+            <feTurbulence type="fractalNoise" baseFrequency="0.4" numOctaves="3" seed="11" result="edge" />
+            <feDisplacementMap in="SourceGraphic" in2="edge" scale="5" result="disp" />
+            <feTurbulence type="fractalNoise" baseFrequency="0.16" numOctaves="4" seed="13" result="n" />
+            <feDiffuseLighting in="n" lightingColor="#fff4da" surfaceScale="3.2" diffuseConstant="1.12" result="l">
+              <feDistantLight azimuth="315" elevation="56" />
+            </feDiffuseLighting>
+            <feComposite in="l" in2="disp" operator="arithmetic" k1="1" k2="0" k3="0" k4="0" result="lit" />
+            <feComposite in="lit" in2="disp" operator="in" />
+          </filter>
+          <filter id="sgBarkTex" x="-30%" y="-15%" width="160%" height="130%">
+            <feTurbulence type="fractalNoise" baseFrequency="0.32 0.045" numOctaves="4" seed="5" result="n" />
+            <feDiffuseLighting in="n" lightingColor="#ffefd8" surfaceScale="2.2" diffuseConstant="1.15" result="l">
+              <feDistantLight azimuth="315" elevation="50" />
+            </feDiffuseLighting>
+            <feComposite in="l" in2="SourceGraphic" operator="arithmetic" k1="1" k2="0" k3="0" k4="0" result="lit" />
+            <feComposite in="lit" in2="SourceGraphic" operator="in" />
+          </filter>
+          <filter id="sgWaterTex" x="-4%" y="-8%" width="108%" height="116%">
+            <feTurbulence type="fractalNoise" baseFrequency="0.006 0.05" numOctaves="4" seed="17" result="n" />
+            <feDiffuseLighting in="n" lightingColor="#fff8e6" surfaceScale="1.1" diffuseConstant="1.12" result="l">
+              <feDistantLight azimuth="315" elevation="64" />
+            </feDiffuseLighting>
+            <feComposite in="l" in2="SourceGraphic" operator="arithmetic" k1="1" k2="0" k3="0" k4="0" result="lit" />
+            <feComposite in="lit" in2="SourceGraphic" operator="in" />
+          </filter>
+
+          {/* ---- Post-processing ---- */}
+          <radialGradient id="sgVignette" cx="0.5" cy="0.42" r="0.75">
+            <stop offset="0%" stopColor="rgba(15,22,34,0)" />
+            <stop offset="72%" stopColor="rgba(15,22,34,0)" />
+            <stop offset="100%" stopColor="rgba(15,22,34,0.3)" />
+          </radialGradient>
+          <radialGradient id="sgWarmGrade" cx="0.78" cy="0.21" r="1.05">
+            <stop offset="0%" stopColor="#ffd98f" />
+            <stop offset="45%" stopColor="#f2c98e" />
+            <stop offset="100%" stopColor="#5b7fb0" />
+          </radialGradient>
 
           <clipPath id="sgLakeClip">
             <ellipse cx="688" cy="388" rx="218" ry="92" />
@@ -701,8 +744,8 @@ export function StreakGrove({
         </g>
         <rect y="150" width="900" height="112" fill="url(#sgHorizonGlow)" opacity="0.35" />
 
-        {/* Mid range */}
-        <g>
+        {/* Mid range — rock texture catches the light */}
+        <g filter="url(#sgRockTex)">
           <path
             d="M0 208 L92 158 L172 200 L262 150 L352 202 L448 164 L540 206 L636 172 L726 208 L816 180 L900 210 L900 300 L0 300 Z"
             fill="url(#sgMidPeaks)"
@@ -733,7 +776,7 @@ export function StreakGrove({
         </g>
 
         {/* Forested foothills — two depths of conifers, each with a lit face */}
-        <path d="M0 244 Q150 210 300 240 T600 234 T900 240 L900 330 L0 330 Z" fill="url(#sgFoothills)" />
+        <path d="M0 244 Q150 210 300 240 T600 234 T900 240 L900 330 L0 330 Z" fill="url(#sgFoothills)" filter="url(#sgGrassTex)" />
         <g opacity="0.55">
           {Array.from({ length: 24 }, (_, i) => {
             const fx = 16 + i * 37 + (i % 3) * 9;
@@ -755,33 +798,31 @@ export function StreakGrove({
           })}
         </g>
 
-        {/* Meadows — layered contours with sunlit rims and grass grain */}
-        <path d="M0 288 Q220 254 450 286 T900 278 L900 460 L0 460 Z" fill="url(#sgBackMeadow)" />
+        {/* Meadows — turf-textured contours with sunlit rims */}
+        <path d="M0 288 Q220 254 450 286 T900 278 L900 460 L0 460 Z" fill="url(#sgBackMeadow)" filter="url(#sgGrassTex)" />
         <path d="M0 292 Q220 258 450 290 T900 282" fill="none" stroke="#c9e3a2" strokeWidth="2" opacity="0.5" />
         <path
           d="M0 322 Q240 296 470 320 T900 312 L900 322 Q640 330 450 326 Q220 320 0 334 Z"
           fill="#57944a"
           opacity="0.3"
         />
-        <path d="M0 356 Q240 318 480 352 T900 342 L900 460 L0 460 Z" fill="url(#sgFrontMeadow)" />
+        <path d="M0 356 Q240 318 480 352 T900 342 L900 460 L0 460 Z" fill="url(#sgFrontMeadow)" filter="url(#sgGrassTex)" />
         <path d="M0 360 Q240 322 480 356 T900 346" fill="none" stroke="#b8dd8e" strokeWidth="2.4" opacity="0.55" />
         {/* warm light sweeping across the grass from the sun */}
         <g opacity="0.16" fill="#ffe9a8">
           <path d="M900 300 Q600 330 430 400 L560 460 L900 460 Z" />
           <path d="M340 460 Q420 400 560 372 L470 460 Z" />
         </g>
-        {/* grass grain */}
-        <rect x="0" y="256" width="900" height="204" fill="#000" filter="url(#sgGrain)" opacity="0.14" />
 
         {/* Lake */}
         <g>
           {/* damp bank ring */}
           <ellipse cx="688" cy="390" rx="223" ry="95" fill="#4f7a45" opacity="0.55" />
           <ellipse cx="688" cy="389" rx="220" ry="93" fill="#8a7a52" opacity="0.35" />
-          <ellipse cx="688" cy="388" rx="218" ry="92" fill="url(#sgWater)" />
+          <ellipse cx="688" cy="388" rx="218" ry="92" fill="url(#sgWater)" filter="url(#sgWaterTex)" />
           <g clipPath="url(#sgLakeClip)">
             {/* sky sheen on the far water */}
-            <ellipse cx="688" cy="332" rx="200" ry="34" fill="url(#sgWaterSheen)" />
+            <ellipse cx="688" cy="332" rx="200" ry="34" fill="url(#sgWaterSheen)" opacity="0.6" />
             {/* reflected tree line along the far shore */}
             <g opacity="0.16" fill="#1e4a30" filter="url(#sgBlur2)">
               <ellipse cx="580" cy="322" rx="60" ry="10" />
@@ -898,6 +939,27 @@ export function StreakGrove({
           );
         })}
 
+        {/* Foreground grass fringe — slight depth-of-field blur */}
+        <g filter="url(#sgBlur1)" opacity="0.92" aria-hidden="true">
+          {Array.from({ length: 64 }, (_, i) => {
+            const gx = i * 14.3 + ((i * 7) % 11);
+            if (inLake(gx, 470, 0.98)) return null;
+            const h = 13 + ((i * 13) % 11);
+            const lean = ((i * 29) % 11) - 5;
+            const col = i % 3 === 0 ? "#2e6f38" : i % 3 === 1 ? "#3f8a44" : "#57a24e";
+            return (
+              <path
+                key={`fg-${i}`}
+                d={`M${gx} 464 q${lean * 0.4} ${-h * 0.55} ${lean} ${-h}`}
+                stroke={col}
+                strokeWidth={2.4}
+                strokeLinecap="round"
+                fill="none"
+              />
+            );
+          })}
+        </g>
+
         {/* Fireflies drifting over the meadow at all times, denser feel as grove grows */}
         {fireflies.slice(0, Math.max(3, Math.min(9, 3 + streak))).map((fly) => (
           <circle
@@ -945,6 +1007,22 @@ export function StreakGrove({
             const colors = ["#e8564a", "#f2c14e", "#4a9455", "#3d7ab5", "#c084d8"];
             return <path key={i} d={`M${bx - 7} ${by} L${bx + 7} ${by} L${bx} ${by + 13} Z`} fill={colors[i % colors.length]} />;
           })}
+        </g>
+
+        {/* --- Post: god rays, valley mist, warm grade, vignette --- */}
+        <g aria-hidden="true" pointerEvents="none">
+          <g style={{ mixBlendMode: "screen" }} opacity="0.5" filter="url(#sgBlur4)">
+            <path d="M702 96 L560 460 L646 460 Z" fill="rgba(255,232,170,0.16)" />
+            <path d="M702 96 L748 460 L836 460 Z" fill="rgba(255,232,170,0.13)" />
+            <path d="M702 96 L352 428 L436 460 Z" fill="rgba(255,232,170,0.09)" />
+            <path d="M702 96 L878 372 L900 448 Z" fill="rgba(255,232,170,0.11)" />
+          </g>
+          <g className="grove-mist" style={{ mixBlendMode: "screen" }} opacity="0.14" filter="url(#sgBlur4)">
+            <ellipse cx="260" cy="345" rx="240" ry="12" fill="#fdf3dc" />
+            <ellipse cx="640" cy="330" rx="200" ry="9" fill="#fdf3dc" />
+          </g>
+          <rect width="900" height="460" fill="url(#sgWarmGrade)" style={{ mixBlendMode: "soft-light" }} opacity="0.6" />
+          <rect width="900" height="460" fill="url(#sgVignette)" />
         </g>
       </svg>
     </div>
