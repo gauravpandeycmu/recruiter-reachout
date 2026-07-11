@@ -26,10 +26,19 @@ import type {
   LinkedInCaptureJob,
   AnalyticsGoalSettings,
   LlmUsageEvent,
+  WeatherSnapshot,
 } from "@recruiter/shared";
 import { resolveCandidateCompany, shouldRewriteCompanyFromEmail, dedupeRepeatedPersonName, extractFirstName, linkedInUrlsMatch, preferLinkedInUrl } from "@recruiter/shared";
 import { collectEmails, ContactIndex, normalizeLinkedInUrl } from "./contactIndex.js";
 import { findRepoRoot } from "./repoRoot.js";
+
+/** Cached result of resolving the server's own approximate (IP-based) location. */
+export interface IpLocationCacheEntry {
+  latitude: number;
+  longitude: number;
+  label: string;
+  resolvedAt: string;
+}
 
 export interface AppData {
   candidates: RecruiterCandidate[];
@@ -684,6 +693,22 @@ export class Store {
     return this.listJson<LlmUsageEvent>("llm_usage_events");
   }
 
+  getWeatherCache(key: string): WeatherSnapshot | undefined {
+    return this.getJson<WeatherSnapshot>("weather_cache", key);
+  }
+
+  setWeatherCache(key: string, snapshot: WeatherSnapshot): void {
+    this.putJson("weather_cache", key, snapshot);
+  }
+
+  getIpLocationCache(key: string): IpLocationCacheEntry | undefined {
+    return this.getJson<IpLocationCacheEntry>("ip_location_cache", key);
+  }
+
+  setIpLocationCache(key: string, location: IpLocationCacheEntry): void {
+    this.putJson("ip_location_cache", key, location);
+  }
+
   async save(): Promise<void> {
     return Promise.resolve();
   }
@@ -723,6 +748,8 @@ export class Store {
       "test_mode_settings",
       "analytics_goal_settings",
       "llm_usage_events",
+      "weather_cache",
+      "ip_location_cache",
     ]) {
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS ${table} (

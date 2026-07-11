@@ -11,15 +11,15 @@ import type { Store } from "./store.js";
 const SETTLED = new Set(["sent", "opened", "clicked", "bounced", "do_not_contact"]);
 
 const MILESTONES: Array<{ at: number; title: string; blurb: string }> = [
-  { at: 0, title: "Getting started", blurb: "Send your first outreach email to unlock your streak." },
-  { at: 1, title: "First send", blurb: "Nice — you’re in motion. Keep a steady daily rhythm." },
-  { at: 5, title: "Warming up", blurb: "Five sends down. Consistency beats volume." },
-  { at: 15, title: "On a roll", blurb: "Fifteen outreaches. Expand to a new company this week." },
-  { at: 30, title: "Pipeline builder", blurb: "Thirty sends. You’re building real coverage." },
-  { at: 50, title: "Serious hunter", blurb: "Fifty outreaches. Protect your streak and widen companies." },
-  { at: 100, title: "Century club", blurb: "One hundred sends. You’re playing the long game." },
-  { at: 250, title: "Outreach pro", blurb: "Two hundred fifty. Keep quality high as you scale." },
-  { at: 500, title: "Legend", blurb: "Five hundred outreaches. You’re in rare company." },
+  { at: 0, title: "Bare meadow", blurb: "The valley is quiet — send your first note and plant the first seed." },
+  { at: 1, title: "First sprout", blurb: "A seedling is up! Send daily and the grove takes root." },
+  { at: 5, title: "Gardener", blurb: "Five outreaches in. Consistency beats volume." },
+  { at: 15, title: "Grove keeper", blurb: "Fifteen outreaches. The canopy is filling in — open a new company this week." },
+  { at: 30, title: "Forester", blurb: "Thirty sends. You’re shaping real coverage across the valley." },
+  { at: 50, title: "Ranger", blurb: "Fifty sends! Protect your streak and the forest thickens." },
+  { at: 100, title: "Warden of the woods", blurb: "One hundred sends. Your outreach forest is getting famous." },
+  { at: 250, title: "Elder of the grove", blurb: "Two hundred fifty. Keep quality high as the forest spreads." },
+  { at: 500, title: "Spirit of the forest", blurb: "Five hundred outreaches. The whole valley is green." },
 ];
 
 export function buildAnalyticsSummary(
@@ -81,8 +81,11 @@ export function buildAnalyticsSummary(
   const streak = computeStreak(goal.goalMetDates, localDate, met);
   const shouldCelebrate = met && goal.lastGoalCelebratedOn !== localDate;
   const longestStreak = computeLongestStreak(goal.goalMetDates, localDate, met);
+  const sendDates = [...new Set(sendEvents.map((event) => toOffsetYmd(event.createdAt, tzOffsetMinutes)))];
+  const sendStreak = computeStreak(sendDates, localDate, sentToday > 0);
+  const longestSendStreak = computeLongestStreak(sendDates, localDate, sentToday > 0);
   const usage = buildUsageFun(store, events, candidates, longestStreak);
-  const hourly = buildHourlyBuckets(sendEvents, tzOffsetMinutes);
+  const hourly = buildScheduleClickHourly(store, tzOffsetMinutes);
   const cumulativeSends = buildCumulativeSends(daily);
   const queueBreakdown = buildQueueBreakdown(store);
 
@@ -131,6 +134,8 @@ export function buildAnalyticsSummary(
       goal: goal.dailySendGoal,
       met,
       streak,
+      sendStreak,
+      longestSendStreak,
       shouldCelebrate,
     },
     generatedAt: new Date().toISOString(),
@@ -251,19 +256,39 @@ function buildUsageFun(
     linkedInCaptureSaves,
     emailSamples: store.listEmailSamples().length,
     draftsCreated: events.filter((event) => event.type === "draft").length,
+    jobrightLookups: Math.max(
+      store
+        .listProviderUsage()
+        .filter((entry) => entry.provider === "jobright")
+        .reduce((sum, entry) => sum + entry.count, 0),
+      candidates.filter(
+        (candidate) =>
+          candidate.emailCandidates?.some((guess) => guess.evidence === "jobright") ||
+          (candidate.lastError ?? "").toLowerCase().includes("jobright") ||
+          ((candidate.discoveryAttempts ?? 0) > 0 &&
+            !(candidate.emailCandidates?.some((guess) => guess.evidence === "salesql") ?? false)),
+      ).length,
+    ),
+    jobrightEmailsFound: candidates.filter((candidate) =>
+      candidate.emailCandidates?.some((guess) => guess.evidence === "jobright"),
+    ).length,
+    salesqlEmailsFound: candidates.filter((candidate) =>
+      candidate.emailCandidates?.some((guess) => guess.evidence === "salesql"),
+    ).length,
     activeDays,
     avgSendsPerActiveDay: activeDays > 0 ? Number((sent / activeDays).toFixed(1)) : 0,
     longestStreak,
   };
 }
 
-function buildHourlyBuckets(
-  sendEvents: TrackingEvent[],
+/** Hour-of-day for when you clicked Schedule / queued a send — not delivery time. */
+function buildScheduleClickHourly(
+  store: Store,
   tzOffsetMinutes: number,
 ): AnalyticsSummary["hourly"] {
   const counts = Array.from({ length: 24 }, () => 0);
-  for (const event of sendEvents) {
-    const date = new Date(event.createdAt);
+  for (const item of store.listSendQueue()) {
+    const date = new Date(item.createdAt);
     if (Number.isNaN(date.getTime())) continue;
     const shifted = new Date(date.getTime() + tzOffsetMinutes * 60_000);
     const hour = shifted.getUTCHours();

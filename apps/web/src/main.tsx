@@ -71,6 +71,8 @@ import {
   stripTestModePrefix,
   summarizeUpcomingSends,
 } from "./sendHelpers";
+import { StreakGrove } from "./StreakGrove";
+import { WeatherWidget } from "./WeatherWidget";
 import "./styles.css";
 
 type Tab = "send" | "scheduled" | "setup" | "history" | "analytics";
@@ -542,9 +544,9 @@ function CumulativeSendsChart({ points }: { points: Array<{ date: string; total:
 function HourlySendsChart({ hourly }: { hourly: Array<{ hour: number; sent: number }> }) {
   const max = Math.max(1, ...hourly.map((bucket) => bucket.sent));
   return (
-    <div className="hourly-bars" aria-label="Sends by hour of day">
+    <div className="hourly-bars" aria-label="Schedule clicks by hour of day">
       {hourly.map((bucket) => (
-        <div className="hourly-bar" key={bucket.hour} title={`${bucket.hour}:00 · ${bucket.sent} sent`}>
+        <div className="hourly-bar" key={bucket.hour} title={`${bucket.hour}:00 · ${bucket.sent} schedule clicks`}>
           <div
             className="hourly-bar-fill"
             style={{ height: `${Math.max(bucket.sent > 0 ? 8 : 0, Math.round((bucket.sent / max) * 100))}%` }}
@@ -4238,379 +4240,376 @@ function App() {
       )}
 
       {tab === "analytics" && (
-        <section className="analytics-stack" key="analytics">
+        <section className="analytics-stack analytics-funland" key="analytics">
           {!analytics ? (
             <section className="panel">
               <p className="hint">Loading analytics…</p>
             </section>
           ) : (
             <>
-              <section className="panel analytics-hero">
-                <div className="analytics-today-header">
-                  <div>
+              <section className="panel village-hero-panel">
+                <StreakGrove
+                  streak={analytics.goalProgress.sendStreak}
+                  bestStreak={analytics.goalProgress.longestSendStreak}
+                  sentToday={analytics.goalProgress.sentToday}
+                  level={analytics.motivation.level}
+                  title={analytics.motivation.title}
+                  goalMet={analytics.goalProgress.met}
+                />
+                <div className="village-goal-rail">
+                  <div className="village-goal-copy">
                     <p className="eyebrow">Today · {analytics.today.date}</p>
-                    <h2>Outreach pulse</h2>
-                    <p className="hint analytics-motivation-blurb">{analytics.motivation.blurb}</p>
+                    <h3>{analytics.motivation.blurb}</h3>
+                    <div className="goal-progress">
+                      <div className="goal-progress-meta">
+                        <strong>
+                          {analytics.goalProgress.sentToday} / {analytics.goalProgress.goal} sent today
+                        </strong>
+                        <span>
+                          {pct(analytics.goalProgress.sentToday / Math.max(1, analytics.goalProgress.goal))} of daily goal
+                        </span>
+                      </div>
+                      <div className="progress-track village-goal-track">
+                        <div
+                          className="progress-fill"
+                          style={{
+                            width: `${Math.min(
+                              100,
+                              Math.round(
+                                (analytics.goalProgress.sentToday / Math.max(1, analytics.goalProgress.goal)) * 100,
+                              ),
+                            )}%`,
+                          }}
+                        />
+                      </div>
+                      <div className="goal-progress-meta milestone-meta">
+                        <span>Next title at {analytics.motivation.nextMilestone} sends</span>
+                        <span>{pct(analytics.motivation.progressToNext)}</span>
+                      </div>
+                      <div className="progress-track milestone-track">
+                        <div
+                          className="progress-fill milestone-fill"
+                          style={{
+                            width: `${Math.min(100, Math.round(analytics.motivation.progressToNext * 100))}%`,
+                          }}
+                        />
+                      </div>
+                      {analytics.goal.goalMetDates.length > 0 && (
+                        <div className="streak-dots" aria-label="Recent goal days">
+                          {Array.from({ length: 14 }, (_, index) => {
+                            const date = new Date();
+                            date.setDate(date.getDate() - (13 - index));
+                            const key = localYmd(date);
+                            const met = analytics.goal.goalMetDates.includes(key);
+                            return <span key={key} className={met ? "streak-dot on" : "streak-dot"} title={key} />;
+                          })}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                  <div className="analytics-hero-badges">
-                    <span className="chip ready">Level {analytics.motivation.level} · {analytics.motivation.title}</span>
-                    {analytics.goalProgress.streak > 0 && (
-                      <span className="chip ready">{analytics.goalProgress.streak}-day streak</span>
-                    )}
-                    {analytics.goalProgress.met && <span className="chip ready">Goal met</span>}
+                  <div className="village-stat-chips">
+                    <div className="village-chip"><strong>{analytics.today.sent}</strong><span>Today</span></div>
+                    <div className="village-chip"><strong>{analytics.week.sent}</strong><span>This week</span></div>
+                    <div className="village-chip"><strong>{analytics.week.companiesReached}</strong><span>Companies</span></div>
+                    <div className="village-chip"><strong>{analytics.allTime.recruitersContacted}</strong><span>People</span></div>
+                  </div>
+                  <WeatherWidget />
+                  <label className="goal-edit village-goal-edit">
+                    Daily send goal
+                    <span className="goal-edit-row">
+                      <input
+                        type="number"
+                        min={1}
+                        max={500}
+                        value={goalDraft}
+                        onChange={(event) => setGoalDraft(event.target.value)}
+                      />
+                      <button
+                        onClick={() =>
+                          void updateAnalyticsGoal({ dailySendGoal: Number(goalDraft) || 20, localDate: localYmd() })
+                            .then(() => refreshAnalytics())
+                            .then(() => setMessage("Daily goal saved."))
+                        }
+                      >
+                        Save goal
+                      </button>
+                    </span>
+                  </label>
+                </div>
+              </section>
+
+              <section className="analytics-section useful-section">
+                <div className="analytics-section-head">
+                  <div>
+                    <p className="eyebrow">Useful</p>
+                    <h2>What actually matters</h2>
+                    <p className="hint">Cumulative progress, recent pace, and where your outreach landed.</p>
                   </div>
                 </div>
-                <div className="goal-progress">
-                  <div className="goal-progress-meta">
-                    <strong>
-                      {analytics.goalProgress.sentToday} / {analytics.goalProgress.goal} sent today
-                    </strong>
-                    <span>{pct(analytics.goalProgress.sentToday / Math.max(1, analytics.goalProgress.goal))} of goal</span>
-                  </div>
-                  <div className="progress-track">
-                    <div
-                      className="progress-fill"
-                      style={{
-                        width: `${Math.min(100, Math.round((analytics.goalProgress.sentToday / Math.max(1, analytics.goalProgress.goal)) * 100))}%`,
-                      }}
-                    />
-                  </div>
-                  <div className="goal-progress-meta milestone-meta">
-                    <span>Next milestone: {analytics.motivation.nextMilestone} sends</span>
-                    <span>{pct(analytics.motivation.progressToNext)}</span>
-                  </div>
-                  <div className="progress-track milestone-track">
-                    <div
-                      className="progress-fill milestone-fill"
-                      style={{
-                        width: `${Math.min(100, Math.round(analytics.motivation.progressToNext * 100))}%`,
-                      }}
-                    />
-                  </div>
-                  {analytics.goal.goalMetDates.length > 0 && (
-                    <div className="streak-dots" aria-label="Recent goal days">
-                      {Array.from({ length: 14 }, (_, index) => {
-                        const date = new Date();
-                        date.setDate(date.getDate() - (13 - index));
-                        const key = localYmd(date);
-                        const met = analytics.goal.goalMetDates.includes(key);
-                        return <span key={key} className={met ? "streak-dot on" : "streak-dot"} title={key} />;
+
+                <div className="analytics-grid">
+                  <section className="panel analytics-card climb-card">
+                    <div className="setup-section-head">
+                      <div>
+                        <p className="eyebrow">Climb</p>
+                        <h2>Cumulative sends</h2>
+                      </div>
+                    </div>
+                    <CumulativeSendsChart points={analytics.cumulativeSends} />
+                  </section>
+
+                  <section className="panel analytics-card trend-card">
+                    <div className="setup-section-head">
+                      <div>
+                        <p className="eyebrow">Pace</p>
+                        <h2>Last 14 days</h2>
+                      </div>
+                    </div>
+                    <div className="trend-legend">
+                      <span><i className="legend-sent" /> Sent</span>
+                      <span><i className="legend-found" /> Emails found</span>
+                      <span><i className="legend-company" /> Companies</span>
+                    </div>
+                    <div className="trend-bars trend-bars-triple" aria-label="Sends, emails found, and companies per day">
+                      {analytics.daily.map((day) => {
+                        const max = Math.max(
+                          1,
+                          ...analytics.daily.map((d) => Math.max(d.sent, d.discovered, d.companiesReached)),
+                        );
+                        return (
+                          <div
+                            className="trend-bar"
+                            key={day.date}
+                            title={`${day.date}: ${day.sent} sent, ${day.discovered} emails found, ${day.companiesReached} companies`}
+                          >
+                            <div className="trend-bar-stack triple">
+                              <div
+                                className="trend-bar-fill sent"
+                                style={{ height: `${Math.max(day.sent > 0 ? 8 : 0, Math.round((day.sent / max) * 100))}%` }}
+                              />
+                              <div
+                                className="trend-bar-fill found"
+                                style={{ height: `${Math.max(day.discovered > 0 ? 6 : 0, Math.round((day.discovered / max) * 100))}%` }}
+                              />
+                              <div
+                                className="trend-bar-fill company"
+                                style={{ height: `${Math.max(day.companiesReached > 0 ? 6 : 0, Math.round((day.companiesReached / max) * 100))}%` }}
+                              />
+                            </div>
+                            <small>{day.date.slice(5)}</small>
+                          </div>
+                        );
                       })}
                     </div>
-                  )}
+                  </section>
                 </div>
-                <div className="stat-row hero-stats">
-                  <div className="stat accent"><strong>{analytics.today.sent}</strong><span>Sent today</span></div>
-                  <div className="stat"><strong>{analytics.week.sent}</strong><span>Sent this week</span></div>
-                  <div className="stat"><strong>{analytics.week.companiesReached}</strong><span>Companies this week</span></div>
-                  <div className="stat"><strong>{analytics.allTime.companiesTouched}</strong><span>Companies all-time</span></div>
-                  <div className="stat"><strong>{analytics.today.discovered}</strong><span>Emails found today</span></div>
-                  <div className="stat"><strong>{analytics.allTime.recruitersContacted}</strong><span>People contacted</span></div>
-                </div>
-                <label className="goal-edit">
-                  Daily send goal
-                  <span className="goal-edit-row">
-                    <input
-                      type="number"
-                      min={1}
-                      max={500}
-                      value={goalDraft}
-                      onChange={(event) => setGoalDraft(event.target.value)}
-                    />
-                    <button
-                      onClick={() =>
-                        void updateAnalyticsGoal({ dailySendGoal: Number(goalDraft) || 20, localDate: localYmd() })
-                          .then(() => refreshAnalytics())
-                          .then(() => setMessage("Daily goal saved."))
-                      }
-                    >
-                      Save goal
-                    </button>
-                  </span>
-                </label>
-              </section>
 
-              <section className="panel">
-                <div className="setup-section-head">
-                  <div>
-                    <p className="eyebrow">App usage</p>
-                    <h2>Fun stats from using Recruiter Reachout</h2>
-                    <p className="hint">
-                      Gemini totals include live call logs
-                      {analytics.usage.geminiCallsEstimated ? " (older drafts estimated from saved emails)" : ""}.
-                    </p>
-                  </div>
-                </div>
-                <div className="stat-row fun-stats">
-                  <div className="stat accent"><strong>{formatCompact(analytics.usage.geminiCalls)}</strong><span>Gemini calls</span></div>
-                  <div className="stat"><strong>{formatCompact(analytics.usage.charactersGenerated)}</strong><span>Chars generated</span></div>
-                  <div className="stat"><strong>{formatCompact(analytics.usage.charactersPrompted)}</strong><span>Chars prompted</span></div>
-                  <div className="stat"><strong>{formatCompact(analytics.usage.wordsWrittenApprox)}</strong><span>Words written</span></div>
-                  <div className="stat"><strong>{analytics.usage.companiesGenerated}</strong><span>Companies drafted</span></div>
-                  <div className="stat"><strong>{analytics.usage.profilesSaved}</strong><span>Profiles saved</span></div>
-                  <div className="stat"><strong>{analytics.usage.linkedInCaptureSaves}</strong><span>LinkedIn captures</span></div>
-                  <div className="stat"><strong>{analytics.usage.resumesUploaded}</strong><span>Resumes</span></div>
-                  <div className="stat"><strong>{analytics.usage.emailSamples}</strong><span>Voice samples</span></div>
-                  <div className="stat"><strong>{analytics.usage.activeDays}</strong><span>Active send days</span></div>
-                  <div className="stat"><strong>{analytics.usage.avgSendsPerActiveDay}</strong><span>Avg sends / day</span></div>
-                  <div className="stat"><strong>{analytics.usage.longestStreak}</strong><span>Best streak</span></div>
-                </div>
-              </section>
-
-              <div className="analytics-grid">
-                <section className="panel">
+                <section className="panel analytics-card companies-card">
                   <div className="setup-section-head">
                     <div>
-                      <p className="eyebrow">Climb</p>
-                      <h2>Cumulative sends</h2>
+                      <p className="eyebrow">Map</p>
+                      <h2>Companies you&apos;ve reached</h2>
+                      <p className="hint">Click a company to open it in History.</p>
                     </div>
                   </div>
-                  <CumulativeSendsChart points={analytics.cumulativeSends} />
-                </section>
-
-                <section className="panel">
-                  <div className="setup-section-head">
-                    <div>
-                      <p className="eyebrow">Trend</p>
-                      <h2>Last 14 days</h2>
-                    </div>
-                  </div>
-                  <div className="trend-legend">
-                    <span><i className="legend-sent" /> Sent</span>
-                    <span><i className="legend-found" /> Emails found</span>
-                    <span><i className="legend-company" /> Companies</span>
-                  </div>
-                  <div className="trend-bars trend-bars-triple" aria-label="Sends, emails found, and companies per day">
-                    {analytics.daily.map((day) => {
-                      const max = Math.max(
-                        1,
-                        ...analytics.daily.map((d) => Math.max(d.sent, d.discovered, d.companiesReached)),
-                      );
-                      return (
-                        <div
-                          className="trend-bar"
-                          key={day.date}
-                          title={`${day.date}: ${day.sent} sent, ${day.discovered} emails found, ${day.companiesReached} companies`}
-                        >
-                          <div className="trend-bar-stack triple">
-                            <div
-                              className="trend-bar-fill sent"
-                              style={{ height: `${Math.max(day.sent > 0 ? 8 : 0, Math.round((day.sent / max) * 100))}%` }}
-                            />
-                            <div
-                              className="trend-bar-fill found"
-                              style={{ height: `${Math.max(day.discovered > 0 ? 6 : 0, Math.round((day.discovered / max) * 100))}%` }}
-                            />
-                            <div
-                              className="trend-bar-fill company"
-                              style={{ height: `${Math.max(day.companiesReached > 0 ? 6 : 0, Math.round((day.companiesReached / max) * 100))}%` }}
-                            />
-                          </div>
-                          <small>{day.date.slice(5)}</small>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </section>
-              </div>
-
-              <div className="analytics-grid">
-                <section className="panel">
-                  <div className="setup-section-head">
-                    <div>
-                      <p className="eyebrow">Timing</p>
-                      <h2>When you send</h2>
-                      <p className="hint">Hour of day for all logged sends (local time).</p>
-                    </div>
-                  </div>
-                  <HourlySendsChart hourly={analytics.hourly} />
-                </section>
-
-                <section className="panel">
-                  <div className="setup-section-head">
-                    <div>
-                      <p className="eyebrow">Mix</p>
-                      <h2>Batch &amp; queue</h2>
-                    </div>
-                  </div>
-                  <div className="donut-row">
-                    <DonutChart
-                      title="Active batch"
-                      slices={[
-                        { label: "Ready", value: analytics.activeBatch.readyToSend, color: "#2f9e78" },
-                        { label: "Looking up", value: analytics.activeBatch.pendingDiscovery, color: "#3d7ab5" },
-                        { label: "Not found", value: analytics.activeBatch.notFound, color: "#c4785a" },
-                      ]}
-                    />
-                    <DonutChart
-                      title="Send queue"
-                      slices={[
-                        { label: "Scheduled", value: analytics.queueBreakdown.scheduled, color: "#3d7ab5" },
-                        { label: "Sent", value: analytics.queueBreakdown.sent, color: "#2f9e78" },
-                        { label: "Failed", value: analytics.queueBreakdown.failed, color: "#c45a5a" },
-                        { label: "Paused", value: analytics.queueBreakdown.paused, color: "#b59a5a" },
-                        { label: "Other", value: analytics.queueBreakdown.other, color: "#8a94a6" },
-                      ]}
-                    />
-                  </div>
-                </section>
-              </div>
-
-              <div className="analytics-grid">
-                <section className="panel">
-                  <div className="setup-section-head">
-                    <div>
-                      <p className="eyebrow">Pipeline</p>
-                      <h2>From capture to send</h2>
-                    </div>
-                  </div>
-                  <div className="funnel-row funnel-row-compact">
-                    {[
-                      ["Collected", analytics.funnel.collected, null as number | null],
-                      ["Email found", analytics.funnel.emailFound, analytics.funnel.collected],
-                      ["Sent", analytics.funnel.sent, analytics.funnel.emailFound],
-                    ].map(([label, value, previous]) => (
-                      <div className="funnel-stage" key={String(label)}>
-                        <strong>{value}</strong>
-                        <span>{label}</span>
-                        {previous !== null && <small>{funnelRate(Number(value), Number(previous))}</small>}
-                      </div>
-                    ))}
-                  </div>
-                  <div className="stat-row compact" style={{ marginTop: 12 }}>
-                    <div className="stat"><strong>{analytics.allTime.sent}</strong><span>Sent all-time</span></div>
-                    <div className="stat"><strong>{analytics.allTime.discovered}</strong><span>Emails found</span></div>
-                    <div className="stat"><strong>{analytics.usage.draftsCreated}</strong><span>Drafts logged</span></div>
-                  </div>
-                </section>
-
-                <section className="panel">
-                  <div className="setup-section-head">
-                    <div>
-                      <p className="eyebrow">Providers</p>
-                      <h2>Lookup credits</h2>
-                    </div>
-                  </div>
-                  <div className="provider-usage">
-                    {(analytics.providerUsage.length > 0
-                      ? analytics.providerUsage
-                      : [{ provider: "salesql", monthKey: "—", count: 0 }]
-                    ).map((usage) => (
-                      <div className="provider-usage-row" key={`${usage.provider}-${usage.monthKey}`}>
-                        <strong>{usage.provider}</strong>
-                        <span>{usage.monthKey}</span>
-                        <span>{usage.count} lookup{usage.count === 1 ? "" : "s"}</span>
-                      </div>
-                    ))}
-                  </div>
-                </section>
-              </div>
-
-              <section className="panel">
-                <div className="setup-section-head">
-                  <div>
-                    <p className="eyebrow">Companies</p>
-                    <h2>Where you&apos;ve reached out</h2>
-                    <p className="hint">Click a company to open it in History.</p>
-                  </div>
-                </div>
-                {analytics.companies.filter((row) => row.sent > 0).length > 0 ? (
-                  <>
-                    <div className="company-bars" aria-label="Sends by company">
-                      {(() => {
-                        const sentRows = analytics.companies.filter((row) => row.sent > 0).slice(0, 10);
-                        const maxSent = Math.max(1, ...sentRows.map((row) => row.sent));
-                        return sentRows.map((row) => (
-                          <button
-                            type="button"
-                            className="company-bar-row"
-                            key={row.companyName}
-                            onClick={() => {
-                              setTab("history");
-                              setHistoryQuery("");
-                              setExpandedCompanies(new Set([row.companyName]));
-                            }}
-                          >
-                            <span className="company-bar-label">
-                              <strong>{row.companyName}</strong>
-                              <small>
-                                {row.peopleContacted} people · {row.sent} sent
-                                {row.lastSentAt ? ` · ${formatActivityAt(row.lastSentAt)}` : ""}
-                              </small>
-                            </span>
-                            <span className="company-bar-track">
-                              <span
-                                className="company-bar-fill"
-                                style={{ width: `${Math.max(8, Math.round((row.sent / maxSent) * 100))}%` }}
-                              />
-                            </span>
-                          </button>
-                        ));
-                      })()}
-                    </div>
-                    <div className="table-wrap analytics-company-table">
-                      <table>
-                        <thead>
-                          <tr>
-                            <th>Company</th>
-                            <th>Sent</th>
-                            <th>People</th>
-                            <th>With email</th>
-                            <th>Ready</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {analytics.companies.map((row) => (
-                            <tr
+                  {analytics.companies.filter((row) => row.sent > 0).length > 0 ? (
+                    <>
+                      <div className="company-bars" aria-label="Sends by company">
+                        {(() => {
+                          const sentRows = analytics.companies.filter((row) => row.sent > 0).slice(0, 10);
+                          const maxSent = Math.max(1, ...sentRows.map((row) => row.sent));
+                          return sentRows.map((row) => (
+                            <button
+                              type="button"
+                              className="company-bar-row"
                               key={row.companyName}
-                              className="clickable-row"
                               onClick={() => {
                                 setTab("history");
                                 setHistoryQuery("");
                                 setExpandedCompanies(new Set([row.companyName]));
                               }}
                             >
-                              <td><strong>{row.companyName}</strong></td>
-                              <td>{row.sent}</td>
-                              <td>{row.peopleContacted}</td>
-                              <td>{row.withEmail}</td>
-                              <td>{row.readyUnsent}</td>
+                              <span className="company-bar-label">
+                                <strong>{row.companyName}</strong>
+                                <small>
+                                  {row.peopleContacted} people · {row.sent} sent
+                                  {row.lastSentAt ? ` · ${formatActivityAt(row.lastSentAt)}` : ""}
+                                </small>
+                              </span>
+                              <span className="company-bar-track">
+                                <span
+                                  className="company-bar-fill"
+                                  style={{ width: `${Math.max(8, Math.round((row.sent / maxSent) * 100))}%` }}
+                                />
+                              </span>
+                            </button>
+                          ));
+                        })()}
+                      </div>
+                      <div className="table-wrap analytics-company-table">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>Company</th>
+                              <th>Sent</th>
+                              <th>People</th>
+                              <th>With email</th>
+                              <th>Ready</th>
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                          </thead>
+                          <tbody>
+                            {analytics.companies.map((row) => (
+                              <tr
+                                key={row.companyName}
+                                className="clickable-row"
+                                onClick={() => {
+                                  setTab("history");
+                                  setHistoryQuery("");
+                                  setExpandedCompanies(new Set([row.companyName]));
+                                }}
+                              >
+                                <td><strong>{row.companyName}</strong></td>
+                                <td>{row.sent}</td>
+                                <td>{row.peopleContacted}</td>
+                                <td>{row.withEmail}</td>
+                                <td>{row.readyUnsent}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="empty-state compact">
+                      <h2>No company outreach yet</h2>
+                      <ol>
+                        <li>Find recruiters on the Send tab.</li>
+                        <li>Schedule a batch — trees and company bars show up here.</li>
+                      </ol>
                     </div>
-                  </>
-                ) : (
-                  <div className="empty-state compact">
-                    <h2>No company outreach yet</h2>
-                    <ol>
-                      <li>Find recruiters on the Send tab.</li>
-                      <li>Schedule a batch — sends show up here by company.</li>
-                    </ol>
-                  </div>
-                )}
+                  )}
+                </section>
               </section>
 
-              <section className="panel">
-                <div className="setup-section-head">
+              <div className="analytics-divider" role="separator">
+                <span>Fun zone</span>
+              </div>
+
+              <section className="analytics-section fun-section">
+                <div className="analytics-section-head">
                   <div>
-                    <p className="eyebrow">Nudge</p>
-                    <h2>Keep going</h2>
+                    <p className="eyebrow">Playful</p>
+                    <h2>How you use the app</h2>
+                    <p className="hint">
+                      Schedule-click timing, Jobright finds, Gemini drafts, and other delightful side quests.
+                    </p>
                   </div>
                 </div>
-                {analytics.health.length === 0 ? (
-                  <p className="ok">You&apos;re on track — keep the streak and open a new company when you can.</p>
-                ) : (
-                  <div className="warning-box">
-                    {analytics.health.map((warning) => (
-                      <p key={warning}>{warning}</p>
-                    ))}
-                  </div>
+
+                <div className="stat-row fun-stats fun-stats-bright">
+                  <div className="stat accent"><strong>{formatCompact(analytics.usage.jobrightLookups)}</strong><span>Jobright lookups</span></div>
+                  <div className="stat"><strong>{analytics.usage.jobrightEmailsFound}</strong><span>Emails via Jobright</span></div>
+                  <div className="stat"><strong>{analytics.usage.salesqlEmailsFound}</strong><span>Emails via SalesQL</span></div>
+                  <div className="stat"><strong>{formatCompact(analytics.usage.geminiCalls)}</strong><span>Gemini calls{analytics.usage.geminiCallsEstimated ? "*" : ""}</span></div>
+                  <div className="stat"><strong>{formatCompact(analytics.usage.charactersGenerated)}</strong><span>Chars generated</span></div>
+                  <div className="stat"><strong>{analytics.usage.linkedInCaptureSaves}</strong><span>LinkedIn captures</span></div>
+                  <div className="stat"><strong>{analytics.usage.profilesSaved}</strong><span>Profiles saved</span></div>
+                  <div className="stat"><strong>{analytics.usage.resumesUploaded}</strong><span>Resumes</span></div>
+                  <div className="stat"><strong>{analytics.usage.emailSamples}</strong><span>Voice samples</span></div>
+                  <div className="stat"><strong>{analytics.usage.activeDays}</strong><span>Active send days</span></div>
+                  <div className="stat"><strong>{analytics.usage.avgSendsPerActiveDay}</strong><span>Avg sends / day</span></div>
+                  <div className="stat"><strong>{analytics.usage.longestStreak}</strong><span>Best streak</span></div>
+                </div>
+                {analytics.usage.geminiCallsEstimated && (
+                  <p className="hint">* Gemini calls estimated from older saved drafts before live tracking.</p>
                 )}
-                <p className="hint analytics-asof">
-                  As of {new Date(analytics.generatedAt).toLocaleString()}
-                </p>
+
+                <div className="analytics-grid">
+                  <section className="panel analytics-card timing-card">
+                    <div className="setup-section-head">
+                      <div>
+                        <p className="eyebrow">Rhythm</p>
+                        <h2>When you schedule</h2>
+                        <p className="hint">Hour of day you clicked Schedule (not the send-out slot).</p>
+                      </div>
+                    </div>
+                    <HourlySendsChart hourly={analytics.hourly} />
+                  </section>
+
+                  <section className="panel analytics-card mix-card">
+                    <div className="setup-section-head">
+                      <div>
+                        <p className="eyebrow">Mix</p>
+                        <h2>Batch &amp; queue</h2>
+                      </div>
+                    </div>
+                    <div className="donut-row">
+                      <DonutChart
+                        title="Active batch"
+                        slices={[
+                          { label: "Ready", value: analytics.activeBatch.readyToSend, color: "#3f8f4a" },
+                          { label: "Looking up", value: analytics.activeBatch.pendingDiscovery, color: "#3d7ab5" },
+                          { label: "Not found", value: analytics.activeBatch.notFound, color: "#c4785a" },
+                        ]}
+                      />
+                      <DonutChart
+                        title="Send queue"
+                        slices={[
+                          { label: "Scheduled", value: analytics.queueBreakdown.scheduled, color: "#3d7ab5" },
+                          { label: "Sent", value: analytics.queueBreakdown.sent, color: "#3f8f4a" },
+                          { label: "Failed", value: analytics.queueBreakdown.failed, color: "#c45a5a" },
+                          { label: "Paused", value: analytics.queueBreakdown.paused, color: "#b59a5a" },
+                          { label: "Other", value: analytics.queueBreakdown.other, color: "#8a94a6" },
+                        ]}
+                      />
+                    </div>
+                  </section>
+                </div>
+
+                <div className="analytics-grid">
+                  <section className="panel analytics-card">
+                    <div className="setup-section-head">
+                      <div>
+                        <p className="eyebrow">Pipeline</p>
+                        <h2>Capture → find → send</h2>
+                      </div>
+                    </div>
+                    <div className="funnel-row funnel-row-compact">
+                      {[
+                        ["Collected", analytics.funnel.collected, null as number | null],
+                        ["Email found", analytics.funnel.emailFound, analytics.funnel.collected],
+                        ["Sent", analytics.funnel.sent, analytics.funnel.emailFound],
+                      ].map(([label, value, previous]) => (
+                        <div className="funnel-stage" key={String(label)}>
+                          <strong>{value}</strong>
+                          <span>{label}</span>
+                          {previous !== null && <small>{funnelRate(Number(value), Number(previous))}</small>}
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+
+                  <section className="panel analytics-card">
+                    <div className="setup-section-head">
+                      <div>
+                        <p className="eyebrow">Nudge</p>
+                        <h2>Keep the grove growing</h2>
+                      </div>
+                    </div>
+                    {analytics.health.length === 0 ? (
+                      <p className="ok">You&apos;re on track — keep the streak alive and open a new company when you can.</p>
+                    ) : (
+                      <div className="warning-box">
+                        {analytics.health.map((warning) => (
+                          <p key={warning}>{warning}</p>
+                        ))}
+                      </div>
+                    )}
+                    <p className="hint analytics-asof">
+                      As of {new Date(analytics.generatedAt).toLocaleString()}
+                    </p>
+                  </section>
+                </div>
               </section>
             </>
           )}
@@ -4618,11 +4617,11 @@ function App() {
       )}
 
       {showCatToast && (
-        <div className="goal-toast" role="status">
+        <div className="goal-toast village-toast" role="status">
           <img src={DANCING_CAT_GIF} alt="" width={72} height={72} />
           <div>
-            <strong>Daily goal crushed!</strong>
-            <p>You hit today&apos;s send target. Keep the streak going.</p>
+            <strong>Daily goal crushed — new rooftops unlocked!</strong>
+            <p>You hit today&apos;s send target. The countryside just got denser.</p>
           </div>
           <button className="icon-button" aria-label="Dismiss" onClick={() => setShowCatToast(false)}>
             ×

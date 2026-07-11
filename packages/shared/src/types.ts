@@ -398,6 +398,35 @@ export interface LlmUsageEvent {
   createdAt: string;
 }
 
+/** Simplified weather bucket — deliberately just a handful of categories, nothing more. */
+export type WeatherCondition = "sunny" | "cloudy" | "rainy" | "snowy" | "stormy" | "foggy";
+
+/**
+ * How the location behind a WeatherSnapshot was determined — surfaced so the UI
+ * can always disclose it to the user (privacy transparency, not just a nice-to-have):
+ * "ip" = approximate/city-level, resolved silently from the server's own network
+ *   location, no permission prompt ever shown. This is the default.
+ * "precise" = exact coordinates (e.g. browser navigator.geolocation) — only ever
+ *   used after the user explicitly opts in via a toggle and grants permission.
+ * "city" = a free-text place name the user typed in.
+ */
+export type WeatherLocationSource = "ip" | "precise" | "city";
+
+export interface WeatherSnapshot {
+  condition: WeatherCondition;
+  temperatureC: number;
+  isDay: boolean;
+  latitude: number;
+  longitude: number;
+  locationSource: WeatherLocationSource;
+  /** Human-readable place name when known (e.g. "Pittsburgh, Pennsylvania, United States"). */
+  locationLabel?: string;
+  /** When the weather provider took this reading (ISO). */
+  observedAt: string;
+  /** When our cache last refreshed this snapshot (ISO) — may be older than observedAt by up to the cache TTL. */
+  fetchedAt: string;
+}
+
 export interface AnalyticsUsageFun {
   geminiCalls: number;
   /** True when calls were estimated from saved drafts (pre-tracking). */
@@ -411,6 +440,12 @@ export interface AnalyticsUsageFun {
   linkedInCaptureSaves: number;
   emailSamples: number;
   draftsCreated: number;
+  /** Jobright lookup attempts recorded in provider usage. */
+  jobrightLookups: number;
+  /** Emails verified via Jobright. */
+  jobrightEmailsFound: number;
+  /** Emails verified via SalesQL. */
+  salesqlEmailsFound: number;
   activeDays: number;
   avgSendsPerActiveDay: number;
   longestStreak: number;
@@ -418,6 +453,7 @@ export interface AnalyticsUsageFun {
 
 export interface AnalyticsHourBucket {
   hour: number;
+  /** Count of schedule/send clicks in this local hour (not delivery time). */
   sent: number;
 }
 
@@ -475,6 +511,10 @@ export interface AnalyticsSummary {
     goal: number;
     met: boolean;
     streak: number;
+    /** Consecutive days with at least one send (today counts once you send). */
+    sendStreak: number;
+    /** Longest run of consecutive send days ever. */
+    longestSendStreak: number;
     shouldCelebrate: boolean;
   };
   generatedAt: string;

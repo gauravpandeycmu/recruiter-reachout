@@ -655,6 +655,8 @@ export async function recordDiscoveryResult(store: Store, candidateId: string, r
     }
     if (provider === "salesql") {
       await incrementProviderUsage(store, "salesql");
+    } else {
+      await incrementProviderUsage(store, "jobright");
     }
   } else if (report.status === "not_found") {
     const attempts = (candidate.discoveryAttempts ?? 0) + 1;
@@ -664,6 +666,11 @@ export async function recordDiscoveryResult(store: Store, candidateId: string, r
       provider === "salesql"
         ? "SalesQL: No Emails Found for this LinkedIn profile."
         : "Jobright: no contact info found for this LinkedIn profile.";
+    if (provider === "salesql") {
+      await incrementProviderUsage(store, "salesql");
+    } else {
+      await incrementProviderUsage(store, "jobright");
+    }
     // A forced SalesQL miss is conclusive for that credit spend — stop retrying.
     if (attempts >= MAX_DISCOVERY_ATTEMPTS || candidate.forceProvider === "salesql" || provider === "salesql") {
       patch.status = "email_not_found";

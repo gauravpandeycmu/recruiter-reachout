@@ -22,6 +22,7 @@ import type {
   TestModeSettings,
   AnalyticsSummary,
   AnalyticsGoalSettings,
+  WeatherSnapshot,
 } from "@recruiter/shared";
 
 export interface UpcomingSendView {
@@ -132,6 +133,43 @@ export function getAnalytics(localDate?: string): Promise<AnalyticsSummary> {
   const localHour = new Date().getHours();
   const q = `?date=${encodeURIComponent(date)}&tzOffset=${tzOffset}&localHour=${localHour}`;
   return request<AnalyticsSummary>(`/api/analytics${q}`);
+}
+
+/**
+ * Thrown when the server's silent, no-permission IP-based location lookup fails.
+ * This is the ONLY signal that should ever lead to asking for precise browser
+ * geolocation permission (via a toggle) - never ask for it up front or as a
+ * default fallback.
+ */
+export class WeatherIpLocationUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WeatherIpLocationUnavailableError";
+  }
+}
+
+/**
+ * Pass nothing for the default, privacy-preserving path: approximate location
+ * resolved silently server-side from IP, no permission prompt. Only pass
+ * {latitude, longitude} after the user has explicitly opted in (a toggle) and
+ * granted navigator.geolocation permission themselves - never request it here
+ * or by default. {city} is a manual free-text override.
+ */
+export async function getWeather(query: { latitude?: number; longitude?: number; city?: string } = {}): Promise<WeatherSnapshot> {
+  const params = new URLSearchParams();
+  if (query.latitude !== undefined) params.set("lat", String(query.latitude));
+  if (query.longitude !== undefined) params.set("lon", String(query.longitude));
+  if (query.city) params.set("city", query.city);
+  const response = await fetch(`${apiBase}/api/weather?${params.toString()}`);
+  const payload = (await response.json()) as WeatherSnapshot | { error: string; code?: string };
+  if (!response.ok) {
+    const maybeError = payload as { error?: string; code?: string };
+    if (maybeError.code === "IP_LOCATION_UNAVAILABLE") {
+      throw new WeatherIpLocationUnavailableError(maybeError.error ?? "IP-based location is unavailable.");
+    }
+    throw new Error(maybeError.error ?? "Request failed.");
+  }
+  return payload as WeatherSnapshot;
 }
 
 export function getAnalyticsGoal(): Promise<AnalyticsGoalSettings> {

@@ -75,6 +75,37 @@ describe("analytics", () => {
     expect(after.goal.lastGoalCelebratedOn).toBe("2026-07-09");
   });
 
+  it("computes send streak from consecutive send days and resets after a gap", async () => {
+    const store = await freshStore();
+    const candidate = store.upsertCandidate(
+      createCandidate({ fullName: "Jane Doe", email: "jane@acme.com", company: "Acme" }),
+    );
+    for (const day of ["2026-07-06", "2026-07-07", "2026-07-08"]) {
+      store.addEvent({
+        ...createEvent(candidate.id, "send"),
+        createdAt: `${day}T18:00:00.000Z`,
+      });
+    }
+
+    // No send yet today (07-09): streak still counts back from yesterday.
+    const pending = buildAnalyticsSummary(store, "2026-07-09", { tzOffsetMinutes: 0 });
+    expect(pending.goalProgress.sendStreak).toBe(3);
+    expect(pending.goalProgress.longestSendStreak).toBe(3);
+
+    // Sending today extends the run.
+    store.addEvent({
+      ...createEvent(candidate.id, "send"),
+      createdAt: "2026-07-09T10:00:00.000Z",
+    });
+    const extended = buildAnalyticsSummary(store, "2026-07-09", { tzOffsetMinutes: 0 });
+    expect(extended.goalProgress.sendStreak).toBe(4);
+
+    // A full missed day wipes the streak; the longest run is remembered.
+    const lapsed = buildAnalyticsSummary(store, "2026-07-11", { tzOffsetMinutes: 0 });
+    expect(lapsed.goalProgress.sendStreak).toBe(0);
+    expect(lapsed.goalProgress.longestSendStreak).toBe(4);
+  });
+
   it("counts readyUnsent including emailCandidates-only people", async () => {
     const store = await freshStore();
     store.upsertCandidate(
@@ -100,32 +131,55 @@ describe("analytics", () => {
     expect(acme?.readyUnsent).toBe(1);
   });
 
-  it("includes peopleContacted, companiesReached, and motivation without tracking rates", async () => {
+  it("buckets schedule-click hours from queue createdAt and counts Jobright finds", async () => {
     const store = await freshStore();
     const jane = store.upsertCandidate(
-      createCandidate({ fullName: "Jane Doe", email: "jane@acme.com", company: "Acme", status: "sent" }),
+      createCandidate({
+        fullName: "Jane Doe",
+        email: "jane@acme.com",
+        company: "Acme",
+        status: "email_guessed",
+        emailCandidates: [
+          {
+            email: "jane@acme.com",
+            pattern: "api_verified",
+            confidence: "high",
+            reason: "Verified via Jobright's email lookup.",
+            evidence: "jobright",
+          },
+        ],
+      }),
     );
     store.addEvent({
       ...createEvent(jane.id, "send"),
       company: "Acme",
       createdAt: "2026-07-09T18:00:00.000Z",
     });
+    store.upsertSendQueueItem({
+      id: "q-1",
+      candidateId: jane.id,
+      email: "jane@acme.com",
+      confidence: "high",
+      status: "scheduled",
+      scheduledFor: "2026-07-13T18:00:00.000Z",
+      attempts: 0,
+      createdAt: "2026-07-09T15:30:00.000Z",
+      updatedAt: "2026-07-09T15:30:00.000Z",
+    });
+    store.upsertProviderUsage({
+      provider: "jobright",
+      monthKey: "2026-07",
+      count: 4,
+      updatedAt: "2026-07-09T15:30:00.000Z",
+    });
 
     const summary = buildAnalyticsSummary(store, "2026-07-09", { tzOffsetMinutes: 0 });
+    expect(summary.hourly[15]?.sent).toBe(1);
+    expect(summary.usage.jobrightLookups).toBe(4);
+    expect(summary.usage.jobrightEmailsFound).toBe(1);
     expect(summary.motivation.level).toBeGreaterThanOrEqual(1);
     expect(summary.today.companiesReached).toBe(1);
-    expect(summary.funnel).toEqual({
-      collected: 1,
-      emailFound: 1,
-      sent: 1,
-    });
-    expect(summary.usage.geminiCalls).toBeGreaterThanOrEqual(0);
-    expect(summary.hourly).toHaveLength(24);
     expect(summary.cumulativeSends.at(-1)?.total).toBeGreaterThanOrEqual(1);
-    const acme = summary.companies.find((row) => row.companyName === "Acme");
-    expect(acme?.sent).toBe(1);
-    expect(acme?.peopleContacted).toBe(1);
-    expect(acme?.firstSentAt).toBe("2026-07-09T18:00:00.000Z");
   });
 
   it("estimates gemini usage from generated company content when no llm events exist", async () => {

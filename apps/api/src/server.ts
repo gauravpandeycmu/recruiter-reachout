@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { buildAnalyticsSummary, updateAnalyticsGoal } from "./analytics.js";
 import { getJobBacklogSummaries, getJobBacklogSummary } from "./backlog.js";
+import { getWeather, IpLocationUnavailableError } from "./weather.js";
 import { validateEnv } from "./env.js";
 import { buildRecruiterSearchUrls } from "./search.js";
 import {
@@ -143,6 +144,26 @@ const server = createServer(async (req, res) => {
         localDate?: string;
       };
       sendJson(res, 200, updateAnalyticsGoal(store, body));
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/weather") {
+      const latRaw = url.searchParams.get("lat");
+      const lonRaw = url.searchParams.get("lon");
+      const city = url.searchParams.get("city") ?? undefined;
+      const latitude = latRaw != null && latRaw !== "" ? Number(latRaw) : undefined;
+      const longitude = lonRaw != null && lonRaw !== "" ? Number(lonRaw) : undefined;
+      try {
+        sendJson(res, 200, await getWeather(store, { latitude, longitude, city }));
+      } catch (error) {
+        if (error instanceof IpLocationUnavailableError) {
+          // Distinct code so the UI can offer "use precise location instead?" -
+          // never a silent fallback to asking for browser permission.
+          sendJson(res, 503, { error: error.message, code: "IP_LOCATION_UNAVAILABLE" });
+          return;
+        }
+        throw error;
+      }
       return;
     }
 
