@@ -1046,13 +1046,26 @@ export interface SendJobPayloadInput {
 
 export function buildSendJobPayload(store: Store, input: SendJobPayloadInput): Omit<SendJob, "id" | "status" | "createdAt" | "updatedAt"> {
   const rendered = applyTestModeRecipientOverride(previewEmail(store, input.candidateId), store);
-  const content = resolveContentForCandidate(
-    store,
-    store.listCandidates().find((item) => item.id === input.candidateId)!,
-  );
-  const resume = resolveSelectedResume(store.getContent(), input.resumeId) ?? resolveSelectedResume(content, input.resumeId);
+  const candidate = store.listCandidates().find((item) => item.id === input.candidateId);
+  if (!candidate) {
+    throw new Error("Candidate not found.");
+  }
+  const content = resolveContentForCandidate(store, candidate);
+  const library = listResumeAssets(store.getContent());
+  let resume = input.resumeId
+    ? library.find((asset) => asset.id === input.resumeId)
+    : resolveSelectedResume(store.getContent());
+  if (!resume && input.resumeId) {
+    throw new Error("Selected resume was not found. Pick a resume on the Send tab and try again.");
+  }
+  if (!resume) {
+    resume = resolveSelectedResume(content);
+  }
   if (!rendered.to) {
     throw new Error("Candidate needs an email before sending.");
+  }
+  if (!resume?.path) {
+    throw new Error("No resume PDF selected. Upload or choose a resume before sending.");
   }
   return {
     candidateId: input.candidateId,
@@ -1063,9 +1076,9 @@ export function buildSendJobPayload(store: Store, input: SendJobPayloadInput): O
     subject: rendered.subject,
     textBody: rendered.textBody,
     htmlBody: rendered.htmlBody,
-    resumePath: resume?.path,
-    resumeFileName: resume?.fileName,
-    resumeMimeType: resume?.mimeType,
+    resumePath: resume.path,
+    resumeFileName: resume.fileName,
+    resumeMimeType: resume.mimeType,
   };
 }
 
@@ -1351,6 +1364,14 @@ export async function retryFailedSends(
   const filter = new Set(input.queueItemIds);
   let retried = 0;
   const now = new Date().toISOString();
+  const jobsByQueueId = new Map<string, ReturnType<Store["listSendJobs"]>[number]>();
+  for (const job of store.listSendJobs()) {
+    if (!job.queueItemId) continue;
+    const existing = jobsByQueueId.get(job.queueItemId);
+    if (!existing || job.updatedAt >= existing.updatedAt) {
+      jobsByQueueId.set(job.queueItemId, job);
+    }
+  }
 
   for (const item of store.listSendQueue()) {
     if (!filter.has(item.id) || item.status !== "failed") {
@@ -1366,12 +1387,19 @@ export async function retryFailedSends(
       failureReason: undefined,
       updatedAt: now,
     });
+    const previous = jobsByQueueId.get(item.id);
     const payload = buildSendJobPayload(store, {
       candidateId: item.candidateId,
       mode: "schedule",
       scheduledFor: item.scheduledFor,
       queueItemId: item.id,
     });
+    // Keep the resume that was queued originally, even if the default selection changed later.
+    if (previous?.resumePath) {
+      payload.resumePath = previous.resumePath;
+      payload.resumeFileName = previous.resumeFileName;
+      payload.resumeMimeType = previous.resumeMimeType;
+    }
     createSendJobFromQueueItem(store, item, payload);
     retried += 1;
   }
@@ -1425,6 +1453,7 @@ export interface UpcomingSendView {
   jobStatus?: string;
   subject: string;
   body: string;
+  resumeFileName?: string;
 }
 
 export function listUpcomingSends(store: Store): UpcomingSendView[] {
@@ -1456,6 +1485,7 @@ export function listUpcomingSends(store: Store): UpcomingSendView[] {
         jobStatus: job?.status,
         subject: job?.subject ?? person?.customSubject ?? "",
         body: job?.textBody ?? person?.customBody ?? "",
+        resumeFileName: job?.resumeFileName,
       };
     })
     .sort((a, b) => new Date(a.scheduledFor).getTime() - new Date(b.scheduledFor).getTime());

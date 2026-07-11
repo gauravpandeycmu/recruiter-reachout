@@ -38,6 +38,7 @@ export interface UpcomingSendView {
   jobStatus?: string;
   subject: string;
   body: string;
+  resumeFileName?: string;
 }
 
 export interface AppData {

@@ -9,6 +9,7 @@ import {
   scheduleSends,
   setOutreachContent,
   saveResume,
+  selectResume,
   updatePendingSendJobContent,
   updateScheduledCompanyBatch,
   retryFailedSends,
@@ -414,9 +415,19 @@ describe("schedule flow integration", () => {
     });
     expect(result.jobsUpdated).toBe(2);
 
+    const template = store.getCompanyContent("acme");
+    expect(template?.subject).toBe("Hello {firstName}");
+    expect(template?.body).toContain("Hi {firstName},");
+
     const upcoming = listUpcomingSends(store);
-    expect(upcoming.find((item) => item.candidateId === jane.id)?.body).toContain("Hi Jane,");
-    expect(upcoming.find((item) => item.candidateId === bob.id)?.body).toContain("Hi Bob,");
+    const janeJob = upcoming.find((item) => item.candidateId === jane.id);
+    const bobJob = upcoming.find((item) => item.candidateId === bob.id);
+    expect(janeJob?.subject).toContain("Hello Jane");
+    expect(janeJob?.body).toContain("Hi Jane,");
+    expect(bobJob?.subject).toContain("Hello Bob");
+    expect(bobJob?.body).toContain("Hi Bob,");
+    expect(janeJob?.body).not.toContain("{firstName}");
+    expect(bobJob?.body).not.toContain("{firstName}");
   });
 
   it("updates all pending jobs for a company when candidateIds is omitted", async () => {
@@ -487,5 +498,120 @@ describe("schedule flow integration", () => {
     const retried = await retryFailedSends(store, { queueItemIds: [queueId] });
     expect(retried.retried).toBe(1);
     expect(store.getSendQueueItem(queueId)?.status).toBe("scheduled");
+  });
+
+  it("attaches the explicitly selected resume even when another resume is the default", async () => {
+    const first = store.getContent()!;
+    const second = await saveResume(store, {
+      fileName: "swe-resume.pdf",
+      mimeType: "application/pdf",
+      nickname: "SWE",
+      dataBase64: Buffer.from("%PDF-1.4\nswe resume").toString("base64"),
+    });
+    const swe = second.resumes?.find((resume) => resume.nickname === "SWE");
+    const general = first.resumes?.[0] ?? second.resumes?.find((resume) => resume.id !== swe?.id);
+    expect(swe?.path).toBeTruthy();
+    expect(general?.path).toBeTruthy();
+    await selectResume(store, general!.id);
+
+    const jane = await seedReadyCandidate("Jane Recruiter", "Acme", "jane@acme.com");
+    const result = await scheduleSends(store, {
+      candidateIds: [jane.id],
+      startAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+      intervalMinutes: 12,
+      mode: "schedule",
+      resumeId: swe!.id,
+    });
+
+    expect(result.jobs).toHaveLength(1);
+    expect(result.jobs[0]?.resumePath).toBe(swe!.path);
+    expect(result.jobs[0]?.resumeFileName).toBe("swe-resume.pdf");
+    expect(result.jobs[0]?.resumePath).not.toBe(general!.path);
+  });
+
+  it("keeps the original resume when retrying a failed send after the default changes", async () => {
+    const firstContent = store.getContent()!;
+    const firstResume = firstContent.resumes?.[0];
+    expect(firstResume?.path).toBeTruthy();
+
+    const jane = await seedReadyCandidate("Jane Recruiter", "Acme", "jane@acme.com");
+    const scheduled = await scheduleSends(store, {
+      candidateIds: [jane.id],
+      startAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+      intervalMinutes: 12,
+      mode: "schedule",
+      resumeId: firstResume!.id,
+    });
+    const originalPath = scheduled.jobs[0]?.resumePath;
+    expect(originalPath).toBe(firstResume!.path);
+
+    const second = await saveResume(store, {
+      fileName: "new-default.pdf",
+      mimeType: "application/pdf",
+      nickname: "NewDefault",
+      dataBase64: Buffer.from("%PDF-1.4\nnew default").toString("base64"),
+    });
+    const newDefault = second.resumes?.find((resume) => resume.nickname === "NewDefault");
+    await selectResume(store, newDefault!.id);
+
+    const queueId = scheduled.queued[0]!.id;
+    const failedJob = scheduled.jobs[0]!;
+    store.upsertSendJob({
+      ...failedJob,
+      status: "failed",
+      failureReason: "Gmail timeout",
+      updatedAt: new Date().toISOString(),
+    });
+    store.upsertSendQueueItem({
+      ...store.getSendQueueItem(queueId)!,
+      status: "failed",
+      failureReason: "Gmail timeout",
+      updatedAt: new Date().toISOString(),
+    });
+
+    await retryFailedSends(store, { queueItemIds: [queueId] });
+    const retriedJob = store
+      .listSendJobs()
+      .filter((job) => job.queueItemId === queueId && job.status === "pending")
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+    expect(retriedJob?.resumePath).toBe(originalPath);
+    expect(retriedJob?.resumePath).not.toBe(newDefault!.path);
+  });
+
+  it("preserves resume attachment when editing a scheduled company batch email", async () => {
+    const resumePath = store.getContent()?.resumePath;
+    expect(resumePath).toBeTruthy();
+    const jane = await seedReadyCandidate("Jane Recruiter", "Acme", "jane@acme.com");
+    const scheduled = await scheduleSends(store, {
+      candidateIds: [jane.id],
+      startAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+      intervalMinutes: 12,
+      mode: "schedule",
+    });
+    expect(scheduled.jobs[0]?.resumePath).toBe(resumePath);
+
+    await updateScheduledCompanyBatch(store, {
+      company: "Acme",
+      subject: "Hello {firstName}",
+      body: "Hi {firstName}, still attaching the same resume.",
+      sourceCandidateId: jane.id,
+    });
+
+    const job = store.getSendJob(scheduled.jobs[0]!.id);
+    expect(job?.resumePath).toBe(resumePath);
+    expect(job?.textBody).toContain("Hi Jane,");
+  });
+
+  it("rejects scheduling when an unknown resumeId is requested", async () => {
+    const jane = await seedReadyCandidate("Jane Recruiter", "Acme", "jane@acme.com");
+    const result = await scheduleSends(store, {
+      candidateIds: [jane.id],
+      startAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+      intervalMinutes: 12,
+      mode: "schedule",
+      resumeId: "missing-resume-id",
+    });
+    expect(result.jobs).toHaveLength(0);
+    expect(result.jobFailures?.[0]?.reason).toMatch(/resume was not found/i);
   });
 });

@@ -1726,6 +1726,46 @@ function App() {
     }
   }
 
+  async function removeScheduledCompany(company: string, items: UpcomingSendView[]) {
+    const removable = items.filter((item) => item.jobStatus !== "in_progress");
+    const sending = items.length - removable.length;
+    if (removable.length === 0) {
+      setMessage(
+        sending > 0
+          ? `${company} has send(s) in progress — wait for them to finish before removing.`
+          : `Nothing to remove for ${company}.`,
+      );
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await cancelScheduledSends({
+        queueItemIds: removable.map((item) => item.queueItemId),
+        pendingOnly: true,
+      });
+      if (editingScheduledCompany === company) {
+        cancelScheduledCompanyEdit();
+      }
+      setExpandedScheduledCompanies((current) => {
+        const next = new Set(current);
+        next.delete(company);
+        return next;
+      });
+      const removed = result.queueCancelled;
+      const sendingNote = sending > 0 ? ` Left ${sending} in progress.` : "";
+      setMessage(
+        removed > 0
+          ? `Removed ${removed} scheduled send${removed === 1 ? "" : "s"} for ${company}.${sendingNote}`
+          : `${company} was already cleared or sent.`,
+      );
+      await refresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to remove scheduled company batch.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function runScheduleSends() {
     if (readyCandidates.length === 0) {
       setMessage("No ready recipients to schedule.");
@@ -2489,24 +2529,24 @@ function App() {
                   }}
                 />
               </label>
-              <label className="find-pages">
-                <span className="find-pages-label">
-                  Pages <strong>{capturePages}</strong>
+              <div className="find-pages">
+                <span className="find-pages-label" id="find-pages-label">
+                  Pages
                 </span>
-                <div className="pages-slider">
-                  <span aria-hidden="true">1</span>
-                  <input
-                    type="range"
-                    min={1}
-                    max={3}
-                    step={1}
-                    value={capturePages}
-                    onChange={(event) => setCapturePages(Number(event.target.value))}
-                    aria-label="LinkedIn search pages to scrape"
-                  />
-                  <span aria-hidden="true">3</span>
+                <div className="pages-toggle" role="group" aria-labelledby="find-pages-label">
+                  {([1, 2, 3] as const).map((pages) => (
+                    <button
+                      key={pages}
+                      type="button"
+                      className={`pages-toggle-option${capturePages === pages ? " active" : ""}`}
+                      aria-pressed={capturePages === pages}
+                      onClick={() => setCapturePages(pages)}
+                    >
+                      {pages}
+                    </button>
+                  ))}
                 </div>
-              </label>
+              </div>
               <button className="primary find-submit" disabled={busy} onClick={() => void planCompanySearch()}>
                 {busy && findProgress ? "Finding…" : busy ? "Working…" : "Find US recruiters"}
               </button>
@@ -2656,73 +2696,74 @@ function App() {
                       Remove all
                     </button>
                   </div>
-                  <div className="list">
-                    {pagedCandidates.map((candidate) => {
-                      const chip = candidateChip(candidate, activeLookupId);
-                      return (
-                        <div className={candidate.id === selected?.id ? "candidate active" : "candidate"} key={candidate.id}>
-                          <button
-                            className="candidate-select"
-                            onClick={() => setSelectedId(candidate.id)}
-                          >
-                            <span className="candidate-row">
-                              <PersonAvatar candidate={candidate} />
-                              <span>
-                                <strong>{candidate.fullName}</strong>
-                                {candidate.title && <small className="candidate-title">{candidate.title}</small>}
-                                <small>{candidate.email ?? candidate.company ?? "Waiting on discovery"}</small>
-                                {batchCompanies.length > 1 && candidate.company && (
-                                  <small className="candidate-company">{candidate.company}</small>
-                                )}
-                                {!candidate.email && candidate.lastError && (
-                                  <small className="candidate-error">{candidate.lastError}</small>
-                                )}
+                  <div className="recipients-pager">
+                    <div className="list recipients-list" style={{ ["--recipient-page-size" as string]: RECIPIENT_PAGE_SIZE }}>
+                      {pagedCandidates.map((candidate) => {
+                        const chip = candidateChip(candidate, activeLookupId);
+                        return (
+                          <div className={candidate.id === selected?.id ? "candidate active" : "candidate"} key={candidate.id}>
+                            <button
+                              className="candidate-select"
+                              onClick={() => setSelectedId(candidate.id)}
+                            >
+                              <span className="candidate-row">
+                                <PersonAvatar candidate={candidate} />
+                                <span className="candidate-copy">
+                                  <strong>{candidate.fullName}</strong>
+                                  {candidate.title && <small className="candidate-title">{candidate.title}</small>}
+                                  <small>{candidate.email ?? candidate.company ?? "Waiting on discovery"}</small>
+                                  {batchCompanies.length > 1 && candidate.company && (
+                                    <small className="candidate-company">{candidate.company}</small>
+                                  )}
+                                  {!candidate.email && candidate.lastError && (
+                                    <small className="candidate-error">{candidate.lastError}</small>
+                                  )}
+                                </span>
                               </span>
+                            </button>
+                            <span className="candidate-status">
+                              <span className={`chip ${chip.tone}`}>{chip.label}</span>
+                              {!candidate.email && (
+                                <button className="link-button" onClick={() => void runLookupNow(candidate)}>
+                                  Look up now
+                                </button>
+                              )}
                             </span>
-                          </button>
-                          <span className="candidate-status">
-                            <span className={`chip ${chip.tone}`}>{chip.label}</span>
-                            {!candidate.email && (
-                              <button className="link-button" onClick={() => void runLookupNow(candidate)}>
-                                Look up now
-                              </button>
-                            )}
-                          </span>
-                          <button
-                            className="icon-button danger"
-                            aria-label={`Remove ${candidate.fullName}`}
-                            onClick={() => void removeFromSendList(candidate)}
-                          >
-                            ×
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                  {candidates.length > RECIPIENT_PAGE_SIZE && (
-                    <div className="list-pagination">
-                      <button
-                        type="button"
-                        disabled={safeRecipientPage <= 0}
-                        onClick={() => setRecipientPage((page) => Math.max(0, page - 1))}
-                      >
-                        Previous
-                      </button>
-                      <span>
-                        {safeRecipientPage * RECIPIENT_PAGE_SIZE + 1}–
-                        {Math.min((safeRecipientPage + 1) * RECIPIENT_PAGE_SIZE, candidates.length)} of{" "}
-                        {candidates.length}
-                      </span>
-                      <button
-                        type="button"
-                        disabled={safeRecipientPage >= recipientPageCount - 1}
-                        onClick={() => setRecipientPage((page) => Math.min(recipientPageCount - 1, page + 1))}
-                      >
-                        Next
-                      </button>
+                            <button
+                              className="icon-button danger"
+                              aria-label={`Remove ${candidate.fullName}`}
+                              onClick={() => void removeFromSendList(candidate)}
+                            >
+                              ×
+                            </button>
+                          </div>
+                        );
+                      })}
                     </div>
-                  )}
-                  <div className="discovery-status">
+                    {candidates.length > RECIPIENT_PAGE_SIZE && (
+                      <div className="list-pagination">
+                        <button
+                          type="button"
+                          disabled={safeRecipientPage <= 0}
+                          onClick={() => setRecipientPage((page) => Math.max(0, page - 1))}
+                        >
+                          Previous
+                        </button>
+                        <span>
+                          {safeRecipientPage * RECIPIENT_PAGE_SIZE + 1}–
+                          {Math.min((safeRecipientPage + 1) * RECIPIENT_PAGE_SIZE, candidates.length)} of{" "}
+                          {candidates.length}
+                        </span>
+                        <button
+                          type="button"
+                          disabled={safeRecipientPage >= recipientPageCount - 1}
+                          onClick={() => setRecipientPage((page) => Math.min(recipientPageCount - 1, page + 1))}
+                        >
+                          Next
+                        </button>
+                      </div>
+                    )}
+                  </div>                  <div className="discovery-status">
                     <div className="discovery-progress-panel">
                       <div className="discovery-progress-meta">
                         <span className={`worker-dot ${workerStatus?.online ? "online" : "offline"}`} />
@@ -3339,22 +3380,44 @@ function App() {
               <div className="scheduled-groups">
                 {upcomingByCompany.map(([company, items]) => {
                   const expanded = expandedScheduledCompanies.has(company);
+                  const removableCount = items.filter((item) => item.jobStatus !== "in_progress").length;
+                  const attachedResume =
+                    items.find((item) => item.resumeFileName)?.resumeFileName ??
+                    resumes.find((resume) => resume.id === selectedResumeId)?.fileName;
                   return (
                     <div className={`scheduled-group ${expanded ? "expanded" : "collapsed"}`} key={company}>
-                      <button
-                        type="button"
-                        className="scheduled-group-toggle"
-                        aria-expanded={expanded}
-                        onClick={() => toggleScheduledCompany(company)}
-                      >
-                        <div className="scheduled-group-toggle-main">
-                          <h3>{company}</h3>
-                          <span>
-                            {items.length} send{items.length === 1 ? "" : "s"} · first {formatShortWhen(items[0]!.scheduledFor)}
-                          </span>
-                        </div>
-                        <span className="scheduled-group-chevron">{expanded ? "Hide" : "View"}</span>
-                      </button>
+                      <div className="scheduled-group-bar">
+                        <button
+                          type="button"
+                          className="scheduled-group-toggle"
+                          aria-expanded={expanded}
+                          onClick={() => toggleScheduledCompany(company)}
+                        >
+                          <div className="scheduled-group-toggle-main">
+                            <h3>{company}</h3>
+                            <span>
+                              {items.length} send{items.length === 1 ? "" : "s"} · first{" "}
+                              {formatShortWhen(items[0]!.scheduledFor)}
+                              {attachedResume ? ` · ${attachedResume}` : ""}
+                            </span>
+                          </div>
+                          <span className="scheduled-group-chevron">{expanded ? "Hide" : "View"}</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary subtle-danger scheduled-group-remove"
+                          disabled={busy || scheduledEditBusy || removableCount === 0}
+                          onClick={() => void removeScheduledCompany(company, items)}
+                          aria-label={`Remove all scheduled sends for ${company}`}
+                          title={
+                            removableCount === 0
+                              ? "Nothing removable right now"
+                              : `Remove all ${removableCount} scheduled send${removableCount === 1 ? "" : "s"}`
+                          }
+                        >
+                          Remove
+                        </button>
+                      </div>
                       {expanded && (
                         <div className="scheduled-group-body">
                           <div className="scheduled-batch-email">
@@ -3363,8 +3426,18 @@ function App() {
                                 <p className="eyebrow">Shared email</p>
                                 <p className="hint">
                                   One template for everyone in this batch.{" "}
-                                  <code>{"{firstName}"}</code> is filled in per person when each mail sends.
+                                  <code>{"{firstName}"}</code> is replaced with each person’s name in their queued
+                                  send (so Kate gets “Hi Kate”, Ziggy gets “Hi Ziggy”, etc.).
                                 </p>
+                                {items[0]?.firstName && items[0]?.body && !items[0].body.includes("{firstName}") && (
+                                  <p className="hint scheduled-personalize-example">
+                                    Queued example for {items[0].firstName}:{" "}
+                                    <em>
+                                      {(items[0].body.replace(/\s+/g, " ").trim().slice(0, 88) || "—") +
+                                        (items[0].body.replace(/\s+/g, " ").trim().length > 88 ? "…" : "")}
+                                    </em>
+                                  </p>
+                                )}
                               </div>
                             </div>
                             <div
