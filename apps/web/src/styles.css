@@ -359,6 +359,24 @@ h2 {
   display: inline-flex;
   gap: 4px;
   padding: 4px;
+  position: relative;
+}
+
+.tab-pill {
+  background: var(--panel-solid);
+  border: 1px solid rgba(215, 224, 236, 0.8);
+  border-radius: 10px;
+  bottom: 4px;
+  box-shadow: 0 3px 12px rgb(20 35 60 / 10%);
+  left: 0;
+  pointer-events: none;
+  position: absolute;
+  top: 4px;
+  transition:
+    transform 220ms var(--ease-out),
+    width 220ms var(--ease-out),
+    opacity 160ms var(--ease-out);
+  z-index: 0;
 }
 
 .tab {
@@ -370,27 +388,45 @@ h2 {
   padding: 8px 18px;
   position: relative;
   transition:
-    background var(--dur) var(--ease-out),
     color var(--dur) var(--ease-out),
-    transform var(--dur) var(--ease-spring),
-    box-shadow var(--dur) var(--ease-out),
-    border-color var(--dur) var(--ease-out);
+    transform var(--dur) var(--ease-spring);
+  z-index: 1;
 }
 
 .tab:hover {
-  background: rgba(216, 224, 238, 0.75);
+  color: var(--ink);
   transform: translateY(-1px);
 }
 
 .tab.active {
-  background: var(--panel-solid);
-  border: 1px solid rgba(215, 224, 236, 0.8);
-  box-shadow: 0 3px 12px rgb(20 35 60 / 10%);
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
   color: var(--accent);
 }
 
 .tab.active:hover {
-  background: var(--panel-solid);
+  background: transparent;
+  transform: none;
+}
+
+.tab-panel-live {
+  animation: tab-panel-in 240ms var(--ease-out) both;
+}
+
+.tab-panel-dormant {
+  display: none !important;
+}
+
+@keyframes tab-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 /* ---------- Layout ---------- */
@@ -3362,10 +3398,6 @@ th.sortable.active {
 .analytics-stack {
   display: grid;
   gap: 14px;
-}
-
-.tab-panel-dormant {
-  display: none !important;
 }
 
 .grove-canvas-skeleton {

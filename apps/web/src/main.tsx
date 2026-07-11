@@ -1,4 +1,4 @@
-import React, { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import React, { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   atLocalHour,
   nextMondayAt,
@@ -643,12 +643,14 @@ function App() {
   const [historyQuery, setHistoryQuery] = useState("");
   const [expandedCompanies, setExpandedCompanies] = useState<Set<string>>(new Set());
   const [analytics, setAnalytics] = useState<AnalyticsSummary>();
-  const [growMounted, setGrowMounted] = useState(() => readStoredTab() === "analytics");
+  const [visitedTabs, setVisitedTabs] = useState<Set<Tab>>(() => new Set([readStoredTab()]));
   const [goalDraft, setGoalDraft] = useState("20");
   const [showCatToast, setShowCatToast] = useState(false);
   const celebratedDateRef = useRef<string | null>(null);
   const footerReadyRef = useRef(false);
   const footerSaveTimerRef = useRef<number | null>(null);
+  const tabsNavRef = useRef<HTMLElement | null>(null);
+  const [tabPill, setTabPill] = useState({ left: 4, width: 0 });
   const [envStatus, setEnvStatus] = useState<EnvReport>();
   const [batchCompanyChoice, setBatchCompanyChoice] = useState(() => {
     try {
@@ -1298,17 +1300,38 @@ function App() {
     } catch {
       // ignore storage failures
     }
+    setVisitedTabs((prev) => {
+      if (prev.has(tab)) return prev;
+      const next = new Set(prev);
+      next.add(tab);
+      return next;
+    });
     if (tab === "setup") {
       void loadTestModeSettings();
     }
     if (tab === "analytics") {
-      setGrowMounted(true);
       void refreshAnalytics().catch((error: Error) => setMessage(error.message));
     }
     if (tab === "history") {
       void refreshHistory().catch((error: Error) => setMessage(error.message));
     }
   }, [tab]);
+
+  useLayoutEffect(() => {
+    const nav = tabsNavRef.current;
+    if (!nav) return;
+
+    const syncPill = () => {
+      const active = nav.querySelector<HTMLElement>(".tab.active");
+      if (!active) return;
+      setTabPill({ left: active.offsetLeft, width: active.offsetWidth });
+    };
+
+    syncPill();
+    const ro = new ResizeObserver(syncPill);
+    ro.observe(nav);
+    return () => ro.disconnect();
+  }, [tab, candidates.length, upcomingSends.length]);
 
   // Prefetch Grow chunk + analytics while idle so the tab opens without a cold start
   useEffect(() => {
@@ -2456,7 +2479,16 @@ function App() {
           <p className="eyebrow">Recruiter Reachout</p>
           <h1>Outreach dashboard</h1>
         </div>
-        <nav className="tabs" aria-label="Sections">
+        <nav className="tabs" aria-label="Sections" ref={tabsNavRef}>
+          <span
+            className="tab-pill"
+            aria-hidden="true"
+            style={{
+              width: tabPill.width || undefined,
+              transform: `translateX(${tabPill.left}px)`,
+              opacity: tabPill.width > 0 ? 1 : 0,
+            }}
+          />
           <button className={tab === "send" ? "tab active" : "tab"} onClick={() => setTab("send")}>
             Send{candidates.length > 0 ? ` (${candidates.length})` : ""}
           </button>
@@ -2489,8 +2521,13 @@ function App() {
 
       {message && <p className="message anim-banner" key={message}>{message}</p>}
 
-      {tab === "send" && (
-        <section className="send-page" key="send">
+      {visitedTabs.has("send") && (
+        <section
+          className={`send-page tab-panel${tab === "send" ? " tab-panel-live" : " tab-panel-dormant"}`}
+          key="send"
+          hidden={tab !== "send"}
+          aria-hidden={tab !== "send"}
+        >
           <div className="send-source-row">
             <section className="panel find-panel">
               <div className="find-panel-head">
@@ -3340,8 +3377,13 @@ function App() {
         </section>
       )}
 
-      {tab === "scheduled" && (
-        <section className="scheduled-page" key="scheduled">
+      {visitedTabs.has("scheduled") && (
+        <section
+          className={`scheduled-page tab-panel${tab === "scheduled" ? " tab-panel-live" : " tab-panel-dormant"}`}
+          key="scheduled"
+          hidden={tab !== "scheduled"}
+          aria-hidden={tab !== "scheduled"}
+        >
           <section className="panel">
             <div className="scheduled-head">
               <div>
@@ -3554,8 +3596,13 @@ function App() {
         </section>
       )}
 
-      {tab === "setup" && (
-        <section className="setup-grid" key="setup">
+      {visitedTabs.has("setup") && (
+        <section
+          className={`setup-grid tab-panel${tab === "setup" ? " tab-panel-live" : " tab-panel-dormant"}`}
+          key="setup"
+          hidden={tab !== "setup"}
+          aria-hidden={tab !== "setup"}
+        >
           <section className="panel setup-checklist">
             <div className="setup-section-head">
               <div>
@@ -3915,8 +3962,13 @@ function App() {
         </section>
       )}
 
-      {tab === "history" && (
-        <section className="history-stack" key="history">
+      {visitedTabs.has("history") && (
+        <section
+          className={`history-stack tab-panel${tab === "history" ? " tab-panel-live" : " tab-panel-dormant"}`}
+          key="history"
+          hidden={tab !== "history"}
+          aria-hidden={tab !== "history"}
+        >
           <section className="panel">
             <div className="setup-section-head">
               <div>
@@ -4203,9 +4255,9 @@ function App() {
         </section>
       )}
 
-      {growMounted && (
+      {visitedTabs.has("analytics") && (
         <section
-          className={`analytics-stack analytics-funland${tab === "analytics" ? "" : " tab-panel-dormant"}`}
+          className={`analytics-stack analytics-funland tab-panel${tab === "analytics" ? " tab-panel-live" : " tab-panel-dormant"}`}
           key="analytics"
           hidden={tab !== "analytics"}
           aria-hidden={tab !== "analytics"}
