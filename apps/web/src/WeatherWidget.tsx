@@ -1,26 +1,40 @@
-import { useEffect, useState } from "react";
-import { getWeather, WeatherIpLocationUnavailableError } from "./api";
+import { useEffect, useState, type FormEvent } from "react";
+import { getWeather, type WeatherCondition, WeatherIpLocationUnavailableError } from "./api";
+import { WeatherKindIcon } from "./WeatherKindIcon";
 import {
-  GeolocationPermissionDeniedError,
   formatWeatherTemp,
-  readPreciseLocationEnabled,
-  requestPreciseCoordinates,
+  type GroveWeatherKind,
+  readTempUnit,
+  readWeatherCity,
   shortLocationLabel,
-  writePreciseLocationEnabled,
+  type TempUnit,
+  writeTempUnit,
+  writeWeatherCity,
+  TEMP_UNIT_CHANGED_EVENT,
+  WEATHER_CITY_CHANGED_EVENT,
 } from "./weatherLocation";
 
 type LoadState = "loading" | "ready" | "error";
 
+function mapCondition(condition: WeatherCondition): GroveWeatherKind {
+  if (condition === "sunny") return "sunny";
+  if (condition === "snowy") return "snow";
+  if (condition === "rainy" || condition === "stormy") return "rain";
+  return "cloudy";
+}
+
 /**
- * Setup control for grove weather location.
- * Default: approximate city from server IP (no permission prompt).
- * Precise: only after the user flips this toggle and grants geolocation.
+ * Setup control for grove weather: optional city override + °F/°C.
+ * Empty city = approximate location from IP (no permission prompt).
  */
 export function PreciseLocationSetup() {
-  const [preciseEnabled, setPreciseEnabled] = useState(() => readPreciseLocationEnabled());
+  const [cityDraft, setCityDraft] = useState(() => readWeatherCity());
+  const [cityApplied, setCityApplied] = useState(() => readWeatherCity());
+  const [tempUnit, setTempUnit] = useState<TempUnit>(() => readTempUnit());
   const [state, setState] = useState<LoadState>("loading");
   const [place, setPlace] = useState<string | null>(null);
-  const [temp, setTemp] = useState<string | null>(null);
+  const [tempC, setTempC] = useState<number | null>(null);
+  const [kind, setKind] = useState<GroveWeatherKind>("sunny");
   const [source, setSource] = useState<"ip" | "precise" | "city" | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
 
@@ -31,25 +45,21 @@ export function PreciseLocationSetup() {
       setState("loading");
       setErrorMessage("");
       try {
-        const snapshot = preciseEnabled
-          ? await getWeather(await requestPreciseCoordinates())
+        const snapshot = cityApplied
+          ? await getWeather({ city: cityApplied })
           : await getWeather();
         if (cancelled) return;
         setPlace(shortLocationLabel(snapshot.locationLabel));
-        setTemp(formatWeatherTemp(snapshot.temperatureC, snapshot.locationLabel));
+        setTempC(snapshot.temperatureC);
+        setKind(mapCondition(snapshot.condition));
         setSource(snapshot.locationSource);
         setState("ready");
       } catch (error) {
         if (cancelled) return;
         if (error instanceof WeatherIpLocationUnavailableError) {
-          setErrorMessage("Approximate location is unavailable. Try Precise location.");
-        } else if (error instanceof GeolocationPermissionDeniedError) {
-          setErrorMessage("Location permission denied — using approximate location.");
-          setPreciseEnabled(false);
-          writePreciseLocationEnabled(false);
-          return;
+          setErrorMessage("Could not detect your city. Enter one below.");
         } else {
-          setErrorMessage(error instanceof Error ? error.message : "Could not load location.");
+          setErrorMessage(error instanceof Error ? error.message : "Could not load weather.");
         }
         setState("error");
       }
@@ -59,39 +69,98 @@ export function PreciseLocationSetup() {
     return () => {
       cancelled = true;
     };
-  }, [preciseEnabled]);
+  }, [cityApplied]);
 
-  function togglePrecise() {
-    const next = !preciseEnabled;
-    setPreciseEnabled(next);
-    writePreciseLocationEnabled(next);
+  useEffect(() => {
+    const onUnit = () => setTempUnit(readTempUnit());
+    const onCity = () => {
+      const next = readWeatherCity();
+      setCityDraft(next);
+      setCityApplied(next);
+    };
+    window.addEventListener(TEMP_UNIT_CHANGED_EVENT, onUnit);
+    window.addEventListener(WEATHER_CITY_CHANGED_EVENT, onCity);
+    return () => {
+      window.removeEventListener(TEMP_UNIT_CHANGED_EVENT, onUnit);
+      window.removeEventListener(WEATHER_CITY_CHANGED_EVENT, onCity);
+    };
+  }, []);
+
+  function setUnit(unit: TempUnit) {
+    setTempUnit(unit);
+    writeTempUnit(unit);
+  }
+
+  function applyCity(event: FormEvent) {
+    event.preventDefault();
+    const next = cityDraft.trim();
+    setCityDraft(next);
+    setCityApplied(next);
+    writeWeatherCity(next);
+  }
+
+  function clearCity() {
+    setCityDraft("");
+    setCityApplied("");
+    writeWeatherCity("");
   }
 
   return (
     <section className="panel">
       <div className="setup-section-head">
         <div>
-          <h2>Grove location</h2>
-          <p className="hint">City weather by default. Precise only if you want GPS accuracy.</p>
+          <h2>Grove weather</h2>
+          <p className="hint">Auto-detects your city. Override it below if you want — units apply on Grow.</p>
         </div>
-        <button
-          type="button"
-          className={`toggle-switch toggle-switch-accent ${preciseEnabled ? "on" : ""}`}
-          role="switch"
-          aria-checked={preciseEnabled}
-          aria-label="Toggle precise location for grove weather"
-          onClick={togglePrecise}
-        >
-          <span className="toggle-knob" />
-          <span className="toggle-label">Precise</span>
-        </button>
+        <div className="temp-unit-toggle" role="group" aria-label="Temperature unit">
+          <button
+            type="button"
+            className={tempUnit === "F" ? "active" : ""}
+            aria-pressed={tempUnit === "F"}
+            onClick={() => setUnit("F")}
+          >
+            °F
+          </button>
+          <button
+            type="button"
+            className={tempUnit === "C" ? "active" : ""}
+            aria-pressed={tempUnit === "C"}
+            onClick={() => setUnit("C")}
+          >
+            °C
+          </button>
+        </div>
       </div>
-      {state === "loading" && <p className="hint">Checking location…</p>}
-      {state === "ready" && (
-        <p className="ok">
-          {temp}
-          {place ? ` · ${place}` : ""}
-          {source === "precise" ? " · precise" : " · approximate"}
+
+      <form className="grove-city-row" onSubmit={applyCity}>
+        <label>
+          City
+          <input
+            value={cityDraft}
+            onChange={(event) => setCityDraft(event.target.value)}
+            placeholder="e.g. Pittsburgh, PA"
+            autoComplete="address-level2"
+          />
+        </label>
+        <button type="submit" className="primary">
+          Use city
+        </button>
+        {cityApplied ? (
+          <button type="button" onClick={clearCity}>
+            Use auto
+          </button>
+        ) : null}
+      </form>
+
+      {state === "loading" && <p className="hint">Checking weather…</p>}
+      {state === "ready" && tempC != null && (
+        <p className="ok grove-weather-preview">
+          <WeatherKindIcon kind={kind} className="grove-weather-preview-icon" title={kind} />
+          <span>
+            {formatWeatherTemp(tempC, tempUnit)}
+            {place ? ` · ${place}` : ""}
+            {source === "city" ? " · your city" : " · auto"}
+          </span>
         </p>
       )}
       {state === "error" && <p className="warning">{errorMessage}</p>}

@@ -4,12 +4,11 @@ import { getWeather, type WeatherCondition } from "./api";
 import { StreakGrove } from "./StreakGrove";
 import {
   formatWeatherTemp,
-  PRECISE_LOCATION_CHANGED_EVENT,
-  PRECISE_LOCATION_KEY,
-  readPreciseLocationEnabled,
-  requestPreciseCoordinates,
+  readTempUnit,
   shortLocationLabel,
+  type TempUnit,
 } from "./weatherLocation";
+import { WeatherKindIcon } from "./WeatherKindIcon";
 
 /**
  * Real-time WebGL Streak Grove (see apps/web/GROVE3D.md).
@@ -750,76 +749,159 @@ function makePineBillboardTexture(): THREE.CanvasTexture {
 
 const WATER_VERT = `
 varying vec2 vUv;
+varying vec3 vWorldPos;
 varying vec3 vViewDir;
+varying vec3 vNormalW;
 uniform float uTime;
+
+// Cheap layered swell — looks like wind chop without Gerstner cost
+float swell(vec2 p, float t) {
+  float w = 0.0;
+  w += sin(p.x * 2.4 + t * 0.85) * cos(p.y * 1.9 - t * 0.55) * 0.55;
+  w += sin(p.x * 4.1 - t * 1.1 + 1.3) * cos(p.y * 3.6 + t * 0.7) * 0.28;
+  w += sin((p.x + p.y) * 6.2 + t * 1.4) * 0.12;
+  return w;
+}
+
 void main() {
   vUv = uv;
+  // CircleGeometry lies in XY; we rotate -PI/2 so Z becomes up in local before model
   vec3 pos = position;
-  // Gentle living swell — visible motion without chop
-  pos.z += sin(pos.x * 3.0 + uTime * 0.7) * 0.006;
-  pos.z += cos(pos.y * 2.4 - uTime * 0.55) * 0.005;
-  pos.z += sin((pos.x + pos.y) * 1.6 + uTime * 0.4) * 0.003;
+  float h = swell(pos.xy * 1.15, uTime) * 0.045;
+  h += swell(pos.xy * 2.4 + 8.0, uTime * 1.15) * 0.018;
+  pos.z += h;
+
+  // Analytic normal from swell derivatives
+  float e = 0.08;
+  float hx = swell((pos.xy + vec2(e, 0.0)) * 1.15, uTime) * 0.045
+           + swell((pos.xy + vec2(e, 0.0)) * 2.4 + 8.0, uTime * 1.15) * 0.018;
+  float hz = swell((pos.xy + vec2(0.0, e)) * 1.15, uTime) * 0.045
+           + swell((pos.xy + vec2(0.0, e)) * 2.4 + 8.0, uTime * 1.15) * 0.018;
+  vec3 nLocal = normalize(vec3(-(hx - h) / e, -(hz - h) / e, 1.0));
+
   vec4 world = modelMatrix * vec4(pos, 1.0);
+  vWorldPos = world.xyz;
   vViewDir = cameraPosition - world.xyz;
+  vNormalW = normalize(mat3(modelMatrix) * nLocal);
   gl_Position = projectionMatrix * viewMatrix * world;
 }
 `;
 
 const WATER_FRAG = `
 varying vec2 vUv;
+varying vec3 vWorldPos;
 varying vec3 vViewDir;
+varying vec3 vNormalW;
 uniform float uTime;
 uniform vec3 uDeep;
 uniform vec3 uShallow;
 uniform vec3 uSunDir;
 uniform vec3 uSkyZenith;
 uniform vec3 uSkyHorizon;
+uniform vec3 uSkyGround;
+uniform float uWaveMul;
+uniform float uGlitter;
+
+// Value-noise-ish hash for soft caustic shimmer
+float hash21(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+float noise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  float a = hash21(i);
+  float b = hash21(i + vec2(1.0, 0.0));
+  float c = hash21(i + vec2(0.0, 1.0));
+  float d = hash21(i + vec2(1.0, 1.0));
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
 void main() {
   vec3 V = normalize(vViewDir);
-  // Soft traveling ripples — enough to feel alive, not zebra-striped
-  float w1 = sin(vUv.x * 18.0 + uTime * 0.75) * cos(vUv.y * 14.0 - uTime * 0.6);
-  float w2 = sin(vUv.x * 28.0 - uTime * 0.5 + 1.1) * cos(vUv.y * 24.0 + uTime * 0.55);
-  vec3 N = normalize(vec3(w1 * 0.055 + w2 * 0.03, 1.0, w2 * 0.045 - w1 * 0.025));
+  vec3 N = normalize(vNormalW);
+
+  // Fine wind ripples on top of vertex swell (detail normals)
+  float w1 = sin(vUv.x * 42.0 + uTime * 1.35) * cos(vUv.y * 34.0 - uTime * 1.05);
+  float w2 = sin(vUv.x * 68.0 - uTime * 1.7 + 1.7) * cos(vUv.y * 55.0 + uTime * 1.2);
+  float w3 = sin((vUv.x + vUv.y) * 90.0 + uTime * 2.1) * 0.55;
+  N = normalize(N + vec3(
+    (w1 * 0.09 + w2 * 0.05 + w3 * 0.03) * uWaveMul,
+    0.0,
+    (w2 * 0.08 - w1 * 0.04 + w3 * 0.025) * uWaveMul
+  ));
+
   float ndv = max(dot(N, V), 0.0);
-  float fresnel = pow(1.0 - ndv, 3.8);
+  // Schlick-ish fresnel — glancing edges mirror the sky hard
+  float fresnel = pow(1.0 - ndv, 4.2);
+  fresnel = mix(0.04, 1.0, fresnel);
 
   vec2 c = vUv - 0.5;
   float radial = length(c) * 2.0;
-  float depth = clamp(1.0 - radial * 0.75, 0.0, 1.0);
-  vec3 body = mix(uShallow, uDeep, depth * 0.8 + 0.12);
-  body = mix(body, vec3(0.28, 0.42, 0.4), (1.0 - depth) * 0.06);
+  // Depth: deeper in the middle basin, shallower toward shore
+  float depth = clamp(1.0 - pow(radial, 1.35) * 0.92, 0.0, 1.0);
 
-  vec3 R = normalize(reflect(-V, N) + vec3(0.0, 0.1, 0.0));
-  float skyT = smoothstep(-0.05, 0.65, R.y);
+  // Beer-law-ish body: teal shallows → ink deeps
+  vec3 body = mix(uShallow, uDeep, depth * 0.88 + 0.08);
+  // Slight murk / algae near shore
+  body = mix(body, vec3(0.32, 0.48, 0.42), (1.0 - depth) * 0.14);
+
+  // Soft caustic mottling in shallows
+  float caust = noise(vUv * 18.0 + vec2(uTime * 0.12, -uTime * 0.09));
+  caust += noise(vUv * 36.0 - vec2(uTime * 0.18, uTime * 0.11)) * 0.5;
+  body += vec3(0.12, 0.22, 0.2) * (caust - 0.75) * (1.0 - depth) * 0.18;
+
+  // Procedural sky reflection (no cube map — avoids zebra striping)
+  vec3 R = reflect(-V, N);
+  float skyT = smoothstep(-0.12, 0.72, R.y);
+  float groundT = smoothstep(0.08, -0.35, R.y);
   vec3 sky = mix(uSkyHorizon, uSkyZenith, skyT);
-  vec3 col = mix(body, sky, 0.12 + fresnel * 0.32);
+  sky = mix(sky, uSkyGround, groundT * 0.55);
+  // Stretch reflection a touch so distant mountains read in the water
+  sky = mix(sky, uSkyHorizon * 0.92, smoothstep(0.15, 0.55, length(R.xz)) * 0.2);
 
-  float spec = pow(max(dot(reflect(-normalize(uSunDir), N), V), 0.0), 160.0);
-  col += vec3(0.96, 0.95, 0.92) * spec * 0.22;
+  vec3 col = mix(body, sky, fresnel * (0.42 + depth * 0.28));
 
-  // Soft shimmer that drifts — subtle life, not glitter spam
-  float shimmer = sin(vUv.x * 20.0 + vUv.y * 16.0 + uTime * 0.85 + w1);
-  col += vec3(0.45, 0.62, 0.7) * max(shimmer, 0.0) * 0.028 * (0.5 + fresnel);
+  // Hot sun specular streak
+  vec3 L = normalize(uSunDir);
+  vec3 H = normalize(L + V);
+  float spec = pow(max(dot(N, H), 0.0), 220.0);
+  float wide = pow(max(dot(N, H), 0.0), 48.0);
+  col += vec3(1.0, 0.97, 0.9) * spec * 0.55 * uGlitter;
+  col += vec3(0.75, 0.88, 0.95) * wide * 0.08 * uGlitter;
 
-  float shore = smoothstep(0.8, 0.98, radial);
-  col = mix(col, body * 0.9, shore * 0.25);
+  // Drifting micro-glitter (sun on chop)
+  float glitter = noise(vUv * 55.0 + vec2(uTime * 0.35, uTime * 0.22));
+  glitter = smoothstep(0.82, 0.98, glitter);
+  col += vec3(0.9, 0.95, 1.0) * glitter * fresnel * 0.12 * uGlitter;
 
-  float alpha = 0.86 + fresnel * 0.08;
-  gl_FragColor = vec4(col, clamp(alpha, 0.84, 0.93));
+  // Shore foam / pale rim where water meets bank
+  float shore = smoothstep(0.72, 0.98, radial);
+  float foam = shore * (0.55 + 0.45 * noise(vUv * 40.0 + uTime * 0.4));
+  col = mix(col, vec3(0.86, 0.92, 0.94), foam * 0.55);
+  // Darken just inside the foam line so the edge reads wet
+  col = mix(col, body * 0.82, smoothstep(0.62, 0.82, radial) * (1.0 - shore) * 0.2);
+
+  float alpha = mix(0.78, 0.94, fresnel);
+  alpha = mix(alpha, 0.88, shore * 0.35);
+  gl_FragColor = vec4(col, clamp(alpha, 0.76, 0.96));
 }
 `;
 
-function makeWaterMaterial(_envMap?: THREE.Texture | null): THREE.ShaderMaterial {
+function makeWaterMaterial(): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
     transparent: true,
     depthWrite: false,
     uniforms: {
       uTime: { value: 0 },
-      uDeep: { value: new THREE.Color("#2a5060") },
-      uShallow: { value: new THREE.Color("#5a8a98") },
+      uDeep: { value: new THREE.Color("#1a3d4e") },
+      uShallow: { value: new THREE.Color("#4f8f9c") },
       uSunDir: { value: SUN_DIR.clone() },
       uSkyZenith: { value: new THREE.Color("#4a7ab8") },
       uSkyHorizon: { value: new THREE.Color("#c5d8ea") },
+      uSkyGround: { value: new THREE.Color("#6a7a58") },
+      uWaveMul: { value: 1 },
+      uGlitter: { value: 1 },
     },
     vertexShader: WATER_VERT,
     fragmentShader: WATER_FRAG,
@@ -1908,6 +1990,8 @@ function syncGrove(world: WorldRef, streak: number) {
 
 export function StreakGrove3D({
   active = true,
+  weatherCity = "",
+  tempUnit: tempUnitProp,
   streak,
   bestStreak,
   sentToday,
@@ -1916,6 +2000,9 @@ export function StreakGrove3D({
   goalMet,
 }: {
   active?: boolean;
+  /** Optional city override from Setup — empty means IP auto. */
+  weatherCity?: string;
+  tempUnit?: TempUnit;
   streak: number;
   bestStreak: number;
   sentToday: number;
@@ -1934,10 +2021,11 @@ export function StreakGrove3D({
   const streakAtRisk = streak > 0 && sentToday === 0;
   const overflow = Math.max(0, streak - MAX_TREES_3D);
 
-  // Live weather via /api/weather — IP by default; precise coords when Setup toggle is on
+  // Live weather via /api/weather — IP by default; optional city override from Setup
   const [autoWeather, setAutoWeather] = useState<WeatherKind>("sunny");
   const [weatherPlace, setWeatherPlace] = useState<string | null>(null);
-  const [weatherTemp, setWeatherTemp] = useState<string | null>(null);
+  const [weatherTempC, setWeatherTempC] = useState<number | null>(null);
+  const tempUnit = tempUnitProp ?? readTempUnit();
   const weatherRef = useRef<WeatherKind>(autoWeather);
   weatherRef.current = autoWeather;
 
@@ -1946,38 +2034,29 @@ export function StreakGrove3D({
 
     async function loadWeather() {
       try {
-        const snapshot = readPreciseLocationEnabled()
-          ? await getWeather(await requestPreciseCoordinates())
-          : await getWeather();
+        const city = weatherCity.trim();
+        const snapshot = city ? await getWeather({ city }) : await getWeather();
         if (cancelled) return;
         setAutoWeather(weatherFromApiCondition(snapshot.condition));
         setWeatherPlace(shortLocationLabel(snapshot.locationLabel));
-        setWeatherTemp(formatWeatherTemp(snapshot.temperatureC, snapshot.locationLabel));
-      } catch {
-        // Offline / denied / IP unavailable — keep last known or sunny default
+        setWeatherTempC(snapshot.temperatureC);
+      } catch (error) {
+        console.warn("[StreakGrove3D] weather refresh failed", error);
       }
     }
 
-    function onPreciseChange() {
-      void loadWeather();
-    }
-
     void loadWeather();
-    window.addEventListener(PRECISE_LOCATION_CHANGED_EVENT, onPreciseChange);
-    const onStorage = (event: StorageEvent) => {
-      if (event.key === PRECISE_LOCATION_KEY) onPreciseChange();
-    };
-    window.addEventListener("storage", onStorage);
     return () => {
       cancelled = true;
-      window.removeEventListener(PRECISE_LOCATION_CHANGED_EVENT, onPreciseChange);
-      window.removeEventListener("storage", onStorage);
     };
-  }, []);
+    // Re-fetch when Setup city changes, and again when Grow becomes visible
+  }, [weatherCity, active]);
 
   useEffect(() => {
     worldRef.current?.applyWeather(autoWeather);
   }, [autoWeather]);
+
+  const weatherTemp = weatherTempC != null ? formatWeatherTemp(weatherTempC, tempUnit) : null;
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -2079,12 +2158,13 @@ export function StreakGrove3D({
     const treeGroup = new THREE.Group();
     scene.add(treeGroup);
 
-    // Animated lake with fresnel + glitter (cheap custom shader, no Reflector)
+    // Animated lake — layered swell + fresnel sky reflection (procedural, no cube map)
     const waterMat = makeWaterMaterial();
-    const water = new THREE.Mesh(new THREE.CircleGeometry(1, 80), waterMat);
+    const water = new THREE.Mesh(new THREE.CircleGeometry(1, 128), waterMat);
     water.rotation.x = -Math.PI / 2;
     water.scale.set(LAKE.rx, LAKE.rz, 1);
     water.position.set(LAKE.x, WATER_Y, LAKE.z);
+    water.renderOrder = 1;
     scene.add(water);
 
     const lakeDucks = buildLakeDucks();
@@ -2245,6 +2325,31 @@ export function StreakGrove3D({
       sMat.opacity = p.sunSpriteOpacity;
       sunSprite.visible = p.sunSpriteOpacity > 0.01;
       sunSprite.scale.setScalar(p.sunSpriteScale);
+      // Keep the lake matched to sky / mood
+      (waterMat.uniforms.uSkyZenith!.value as THREE.Color).set(p.zenith);
+      (waterMat.uniforms.uSkyHorizon!.value as THREE.Color).set(p.horizon);
+      (waterMat.uniforms.uSkyGround!.value as THREE.Color).set(p.ground);
+      if (kind === "rain") {
+        (waterMat.uniforms.uDeep!.value as THREE.Color).set("#152836");
+        (waterMat.uniforms.uShallow!.value as THREE.Color).set("#3a6470");
+        waterMat.uniforms.uWaveMul!.value = 1.35;
+        waterMat.uniforms.uGlitter!.value = 0.35;
+      } else if (kind === "snow") {
+        (waterMat.uniforms.uDeep!.value as THREE.Color).set("#243848");
+        (waterMat.uniforms.uShallow!.value as THREE.Color).set("#6a8694");
+        waterMat.uniforms.uWaveMul!.value = 0.45;
+        waterMat.uniforms.uGlitter!.value = 0.55;
+      } else if (kind === "cloudy") {
+        (waterMat.uniforms.uDeep!.value as THREE.Color).set("#1c3848");
+        (waterMat.uniforms.uShallow!.value as THREE.Color).set("#4a7a88");
+        waterMat.uniforms.uWaveMul!.value = 0.85;
+        waterMat.uniforms.uGlitter!.value = 0.5;
+      } else {
+        (waterMat.uniforms.uDeep!.value as THREE.Color).set("#1a3d4e");
+        (waterMat.uniforms.uShallow!.value as THREE.Color).set("#4f8f9c");
+        waterMat.uniforms.uWaveMul!.value = 1;
+        waterMat.uniforms.uGlitter!.value = 1;
+      }
       for (let i = 0; i < cloudSprites.length; i += 1) {
         const L = cloudLayouts[i]!;
         const cMat = cloudSprites[i]!.material as THREE.SpriteMaterial;
@@ -2541,8 +2646,11 @@ export function StreakGrove3D({
       >
         {weatherLabel && (
           <div className="grove-weather-badge" aria-live="polite">
-            <strong>{weatherTemp ?? "—"}</strong>
-            {weatherPlace && <span>{weatherPlace}</span>}
+            <WeatherKindIcon kind={autoWeather} className="grove-weather-icon" title={autoWeather} />
+            <div className="grove-weather-copy">
+              <strong>{weatherTemp ?? "—"}</strong>
+              {weatherPlace && <span>{weatherPlace}</span>}
+            </div>
           </div>
         )}
         {streak === 0 && (

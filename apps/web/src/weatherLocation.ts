@@ -1,49 +1,54 @@
-/** Shared precise-location preference for Grow grove weather + Setup toggle. */
-export const PRECISE_LOCATION_KEY = "recruiter-reachout-precise-location";
-export const PRECISE_LOCATION_CHANGED_EVENT = "grove-precise-location";
+/** Shared grove weather prefs: optional city override + °F/°C. */
 
-export function readPreciseLocationEnabled(): boolean {
+export const WEATHER_CITY_KEY = "recruiter-reachout-weather-city";
+export const WEATHER_CITY_CHANGED_EVENT = "grove-weather-city";
+
+export const TEMP_UNIT_KEY = "recruiter-reachout-temp-unit";
+export const TEMP_UNIT_CHANGED_EVENT = "grove-temp-unit";
+
+export type TempUnit = "F" | "C";
+export type GroveWeatherKind = "sunny" | "cloudy" | "rain" | "snow";
+
+export function readWeatherCity(): string {
   try {
-    return localStorage.getItem(PRECISE_LOCATION_KEY) === "true";
+    return localStorage.getItem(WEATHER_CITY_KEY)?.trim() ?? "";
   } catch {
-    return false;
+    return "";
   }
 }
 
-export function writePreciseLocationEnabled(enabled: boolean): void {
+export function writeWeatherCity(city: string): void {
   try {
-    localStorage.setItem(PRECISE_LOCATION_KEY, String(enabled));
-    window.dispatchEvent(new CustomEvent(PRECISE_LOCATION_CHANGED_EVENT, { detail: { enabled } }));
+    const trimmed = city.trim();
+    if (trimmed) localStorage.setItem(WEATHER_CITY_KEY, trimmed);
+    else localStorage.removeItem(WEATHER_CITY_KEY);
+    window.dispatchEvent(new CustomEvent(WEATHER_CITY_CHANGED_EVENT, { detail: { city: trimmed } }));
   } catch {
     // ignore storage failures
   }
 }
 
-export class GeolocationPermissionDeniedError extends Error {
-  constructor(message = "Location permission denied.") {
-    super(message);
-    this.name = "GeolocationPermissionDeniedError";
+export function readTempUnit(): TempUnit {
+  try {
+    const stored = localStorage.getItem(TEMP_UNIT_KEY);
+    if (stored === "F" || stored === "C") return stored;
+  } catch {
+    // fall through
+  }
+  try {
+    return navigator.language?.toLowerCase().startsWith("en-us") ? "F" : "C";
+  } catch {
+    return "C";
   }
 }
 
-export function requestPreciseCoordinates(): Promise<{ latitude: number; longitude: number }> {
-  return new Promise((resolve, reject) => {
-    if (!("geolocation" in navigator)) {
-      reject(new Error("This browser does not support geolocation."));
-      return;
-    }
-    navigator.geolocation.getCurrentPosition(
-      (position) => resolve({ latitude: position.coords.latitude, longitude: position.coords.longitude }),
-      (error) => {
-        if (error.code === error.PERMISSION_DENIED) {
-          reject(new GeolocationPermissionDeniedError());
-        } else {
-          reject(new Error("Could not get your precise location."));
-        }
-      },
-      { timeout: 10_000, maximumAge: 5 * 60_000 },
-    );
-  });
+export function writeTempUnit(unit: TempUnit): void {
+  try {
+    localStorage.setItem(TEMP_UNIT_KEY, unit);
+    window.dispatchEvent(new CustomEvent(TEMP_UNIT_CHANGED_EVENT, { detail: { unit } }));
+  } catch {
+    // ignore storage failures
+  }
 }
 
 /** Shorten "San Francisco, California, United States" → "San Francisco, California". */
@@ -54,8 +59,7 @@ export function shortLocationLabel(label: string | undefined): string | null {
   return parts[0] ?? null;
 }
 
-export function formatWeatherTemp(celsius: number, locationLabel?: string): string {
-  const us = /United States|\bUSA\b|, US$/i.test(locationLabel ?? "");
-  if (us) return `${Math.round((celsius * 9) / 5 + 32)}°F`;
+export function formatWeatherTemp(celsius: number, unit: TempUnit = readTempUnit()): string {
+  if (unit === "F") return `${Math.round((celsius * 9) / 5 + 32)}°F`;
   return `${Math.round(celsius)}°C`;
 }

@@ -67,6 +67,15 @@ import {
   summarizeUpcomingSends,
 } from "./sendHelpers";
 import { PreciseLocationSetup } from "./WeatherWidget";
+import {
+  readTempUnit,
+  readWeatherCity,
+  TEMP_UNIT_CHANGED_EVENT,
+  TEMP_UNIT_KEY,
+  type TempUnit,
+  WEATHER_CITY_CHANGED_EVENT,
+  WEATHER_CITY_KEY,
+} from "./weatherLocation";
 import "./styles.css";
 
 const StreakGrove3D = lazy(() =>
@@ -644,6 +653,8 @@ function App() {
   const [expandedCompanies, setExpandedCompanies] = useState<Set<string>>(new Set());
   const [analytics, setAnalytics] = useState<AnalyticsSummary>();
   const [visitedTabs, setVisitedTabs] = useState<Set<Tab>>(() => new Set([readStoredTab()]));
+  const [groveWeatherCity, setGroveWeatherCity] = useState(() => readWeatherCity());
+  const [groveTempUnit, setGroveTempUnit] = useState<TempUnit>(() => readTempUnit());
   const [goalDraft, setGoalDraft] = useState("20");
   const [showCatToast, setShowCatToast] = useState(false);
   const celebratedDateRef = useRef<string | null>(null);
@@ -1332,6 +1343,24 @@ function App() {
     ro.observe(nav);
     return () => ro.disconnect();
   }, [tab, candidates.length, upcomingSends.length]);
+
+  // Grove weather prefs live in localStorage; keep App state in sync so Grow always re-renders
+  useEffect(() => {
+    const syncCity = () => setGroveWeatherCity(readWeatherCity());
+    const syncUnit = () => setGroveTempUnit(readTempUnit());
+    window.addEventListener(WEATHER_CITY_CHANGED_EVENT, syncCity);
+    window.addEventListener(TEMP_UNIT_CHANGED_EVENT, syncUnit);
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === WEATHER_CITY_KEY) syncCity();
+      if (event.key === TEMP_UNIT_KEY) syncUnit();
+    };
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener(WEATHER_CITY_CHANGED_EVENT, syncCity);
+      window.removeEventListener(TEMP_UNIT_CHANGED_EVENT, syncUnit);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, []);
 
   // Prefetch Grow chunk + analytics while idle so the tab opens without a cold start
   useEffect(() => {
@@ -4278,6 +4307,8 @@ function App() {
                 >
                   <StreakGrove3D
                     active={tab === "analytics"}
+                    weatherCity={groveWeatherCity}
+                    tempUnit={groveTempUnit}
                     streak={analytics.goalProgress.sendStreak}
                     bestStreak={analytics.goalProgress.longestSendStreak}
                     sentToday={analytics.goalProgress.sentToday}
