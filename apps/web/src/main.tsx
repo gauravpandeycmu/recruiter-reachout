@@ -71,7 +71,7 @@ import {
   stripTestModePrefix,
   summarizeUpcomingSends,
 } from "./sendHelpers";
-import { StreakGrove } from "./StreakGrove";
+import { StreakGrove3D } from "./StreakGrove3D";
 import { WeatherWidget } from "./WeatherWidget";
 import "./styles.css";
 
@@ -4248,7 +4248,7 @@ function App() {
           ) : (
             <>
               <section className="panel village-hero-panel">
-                <StreakGrove
+                <StreakGrove3D
                   streak={analytics.goalProgress.sendStreak}
                   bestStreak={analytics.goalProgress.longestSendStreak}
                   sentToday={analytics.goalProgress.sentToday}
