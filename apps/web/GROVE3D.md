@@ -24,16 +24,20 @@ WebGL fallback.
 - [x] Part 1 — scene shell (terrain, sky, fog, water, lights)
 - [x] Part 2 — depth (ridged mountains, grass albedo/normal maps, fog tuning)
 - [x] Part 3 — streak trees + growth stages
-- [x] Part 4 — environment realism pass (current):
-  - Atmospheric sky shader (zenith/horizon/ground + sun bloom)
-  - Higher-detail terrain with albedo + normal maps, mud/sand shore
-  - Foreground instanced grass blades (~1800)
-  - Foothill instanced pine forest with instance colors
-  - Shore rocks + wooden dock
-  - Soft cloud billboards + valley mist sheets
-  - Fireflies when streak > 0; empty/overflow HTML overlays
-  - Goal-met sun pulse
-  - Reflector water deferred (blanked some GPU contexts) — using PMREM metal water
+- [x] Part 4 — environment realism pass
+- [x] Part 5 — perf + capacity (current):
+  - Pixel ratio capped at 1.25, shadow map 1024, no preserveDrawingBuffer
+  - Grass 520 / foothill pines 110 without cast shadows
+  - Canopy blobs detail-1, no cast shadows (trunks still cast)
+  - Streak planting fixed for React Strict Mode (plant on scene init via streakRef)
+  - Slot map expanded to **105 trees** (~100-day grove) in camera meadow
+  - Fireflies/clouds/mist reduced; rim light removed
+- [x] Part 6 — backdrop quality (current):
+  - Distant pines → soft painted billboards (yaw toward camera)
+  - Lake → cheap fresnel/ripple shader with **procedural** sky reflection
+    (no PMREM cube sample — that zebra-striped)
+  - Ridged alpine height + denser terrain mesh; softer grass→scree→snow
+  - Noise-based cumulus sprites; milder sun bloom
 
 ## Known gaps vs AAA / Fable
 
@@ -45,6 +49,4 @@ WebGL fallback.
 ## Next session
 
 1. Optionally wire Fable-exported glTF trees into `buildTreeMesh`.
-2. Simple water vertex ripple shader.
-3. Perf: merge static foothill geometry if FPS dips on integrated GPUs.
-4. Commit when user is happy: `Streak Grove 3D: cinematic environment pass`.
+2. Commit when user is happy with the vista quality pass.
