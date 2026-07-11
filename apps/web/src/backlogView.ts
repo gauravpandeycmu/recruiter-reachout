@@ -26,15 +26,13 @@ export function summarizeCompanyHistory(companies: CompanyHistorySummary[]): {
   companies: number;
   recruiters: number;
   sent: number;
-  opened: number;
-  clicked: number;
+  withEmail: number;
 } {
   return {
     companies: companies.length,
     recruiters: companies.reduce((total, company) => total + company.recruiters.length, 0),
     sent: companies.reduce((total, company) => total + company.sent, 0),
-    opened: companies.reduce((total, company) => total + company.opened, 0),
-    clicked: companies.reduce((total, company) => total + company.clicked, 0),
+    withEmail: companies.reduce((total, company) => total + (company.withEmail ?? 0), 0),
   };
 }
 

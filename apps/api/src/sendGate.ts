@@ -25,8 +25,9 @@ export function assertCanSend(input: SendGateInput): void {
   if (!input.candidate.email) {
     throw new Error("Select a candidate email before sending.");
   }
-  const selectedGuess = input.candidate.emailCandidates.find((guess) => guess.email === input.candidate.email);
-  if (selectedGuess?.confidence !== "high") {
+  const selectedGuess = input.candidate.emailCandidates?.find((guess) => guess.email === input.candidate.email);
+  const confidence = selectedGuess?.confidence ?? (input.candidate.email ? "high" : "unknown");
+  if (confidence !== "high") {
     throw new Error("Only high-confidence verified emails can be sent directly.");
   }
   if (isSuppressed(input.candidate.email, input.suppressions)) {

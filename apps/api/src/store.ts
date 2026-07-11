@@ -25,6 +25,7 @@ import type {
   SendJob,
   LinkedInCaptureJob,
   AnalyticsGoalSettings,
+  LlmUsageEvent,
 } from "@recruiter/shared";
 import { resolveCandidateCompany, shouldRewriteCompanyFromEmail, dedupeRepeatedPersonName, extractFirstName, linkedInUrlsMatch, preferLinkedInUrl } from "@recruiter/shared";
 import { collectEmails, ContactIndex, normalizeLinkedInUrl } from "./contactIndex.js";
@@ -674,6 +675,15 @@ export class Store {
     return structuredClone(settings);
   }
 
+  addLlmUsageEvent(event: LlmUsageEvent): LlmUsageEvent {
+    this.putJson("llm_usage_events", event.id, event);
+    return structuredClone(event);
+  }
+
+  listLlmUsageEvents(): LlmUsageEvent[] {
+    return this.listJson<LlmUsageEvent>("llm_usage_events");
+  }
+
   async save(): Promise<void> {
     return Promise.resolve();
   }
@@ -712,6 +722,7 @@ export class Store {
       "linkedin_capture_jobs",
       "test_mode_settings",
       "analytics_goal_settings",
+      "llm_usage_events",
     ]) {
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS ${table} (

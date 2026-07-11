@@ -7,7 +7,7 @@ import "./popup.css";
 const apiBase = "http://localhost:4000";
 const savedCompanyKey = "recruiter-reachout-current-company";
 const dashboardChannel = "recruiter-reachout-saved";
-const extensionVersion = "0.1.3";
+const extensionVersion = "0.1.4";
 
 type PageMode = "profile" | "search" | "other";
 type CandidateResultStatus =
@@ -364,11 +364,10 @@ function Popup() {
         setStatus(
           `Save finished but the dashboard still shows 0 active recipients. Run npm run dev, click Refresh on the dashboard, then try again.${countNote}`,
         );
-        notifyDashboard();
-        return;
+      } else if (pageMode === "search") {
+        setStatus((prev) => `${prev} Open the dashboard when you're done with this page.`);
       }
       notifyDashboard();
-      void openDashboardTab();
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Failed to save profiles.");
     } finally {
@@ -527,15 +526,6 @@ function notifyDashboard(): void {
     channel.close();
   } catch {
     // Dashboard may not be open yet.
-  }
-}
-
-async function openDashboardTab(): Promise<void> {
-  const url = `http://localhost:3000/?saved=${Date.now()}#send`;
-  try {
-    await chrome.tabs.create({ url, active: true });
-  } catch {
-    window.open(url, "_blank", "noopener,noreferrer");
   }
 }
 

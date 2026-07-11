@@ -89,6 +89,16 @@ describe("assertWithinPacingCaps", () => {
     expect(() => assertWithinPacingCaps(events, [], "new@example.com", caps, now)).not.toThrow();
   });
 
+  it("uses calendar hour buckets when scheduling future sends", () => {
+    const events = [sendEvent("c1", "2026-05-13T11:30:00.000Z"), sendEvent("c2", "2026-05-13T11:45:00.000Z")];
+    const slot = new Date("2026-05-13T12:15:00.000Z");
+    const hourlyCaps = { dailySendCap: 10, hourlySendCap: 2, domainDailySendCap: 10 };
+    expect(() => assertWithinPacingCaps(events, [], "new@example.com", hourlyCaps, slot, "calendar")).not.toThrow();
+    expect(() => assertWithinPacingCaps(events, [], "new@example.com", hourlyCaps, slot, "rolling")).toThrow(
+      "Hourly send limit reached",
+    );
+  });
+
   it("blocks once the per-domain daily cap is reached", () => {
     const candidates: RecruiterCandidate[] = [
       {

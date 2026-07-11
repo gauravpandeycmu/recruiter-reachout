@@ -183,6 +183,8 @@ export interface TrackingEvent {
   id: string;
   candidateId: string;
   campaignId?: string;
+  /** Snapshot of company at event time (especially useful for sends). */
+  company?: string;
   type: "open" | "click" | "draft" | "send" | "bounce" | "reply";
   targetUrl?: string;
   userAgent?: string;
@@ -363,59 +365,93 @@ export interface AnalyticsGoalSettings {
 export interface AnalyticsDayBucket {
   date: string;
   sent: number;
-  opened: number;
-  clicked: number;
-  bounced: number;
   discovered: number;
+  /** Distinct companies that received at least one send that day. */
+  companiesReached: number;
 }
 
 export interface AnalyticsCompanyRow {
   companyName: string;
   sent: number;
-  opened: number;
-  openRate: number;
+  peopleContacted: number;
   readyUnsent: number;
   withEmail: number;
+  firstSentAt?: string;
+  lastSentAt?: string;
+}
+
+export interface AnalyticsMotivation {
+  level: number;
+  title: string;
+  blurb: string;
+  nextMilestone: number;
+  progressToNext: number;
+}
+
+export interface LlmUsageEvent {
+  id: string;
+  purpose: "email_draft" | "email_repair" | "job_extract";
+  model?: string;
+  promptChars: number;
+  responseChars: number;
+  company?: string;
+  createdAt: string;
+}
+
+export interface AnalyticsUsageFun {
+  geminiCalls: number;
+  /** True when calls were estimated from saved drafts (pre-tracking). */
+  geminiCallsEstimated: boolean;
+  charactersGenerated: number;
+  charactersPrompted: number;
+  wordsWrittenApprox: number;
+  companiesGenerated: number;
+  resumesUploaded: number;
+  profilesSaved: number;
+  linkedInCaptureSaves: number;
+  emailSamples: number;
+  draftsCreated: number;
+  activeDays: number;
+  avgSendsPerActiveDay: number;
+  longestStreak: number;
+}
+
+export interface AnalyticsHourBucket {
+  hour: number;
+  sent: number;
+}
+
+export interface AnalyticsQueueBreakdown {
+  scheduled: number;
+  sent: number;
+  failed: number;
+  paused: number;
+  other: number;
 }
 
 export interface AnalyticsSummary {
   today: {
     sent: number;
-    opened: number;
-    clicked: number;
-    bounced: number;
     discovered: number;
+    companiesReached: number;
     date: string;
   };
   week: {
     sent: number;
-    opened: number;
-    clicked: number;
-    bounced: number;
     discovered: number;
+    companiesReached: number;
   };
   allTime: {
     sent: number;
-    opened: number;
-    clicked: number;
-    bounced: number;
-    replies: number;
     discovered: number;
     collected: number;
     companiesTouched: number;
     recruitersContacted: number;
-    openRate: number;
-    clickRate: number;
-    bounceRate: number;
-    discoveryHitRate: number;
   };
   funnel: {
     collected: number;
     emailFound: number;
     sent: number;
-    opened: number;
-    clicked: number;
-    bounced: number;
   };
   activeBatch: {
     total: number;
@@ -425,7 +461,13 @@ export interface AnalyticsSummary {
   };
   providerUsage: Array<{ provider: string; monthKey: string; count: number }>;
   daily: AnalyticsDayBucket[];
+  /** Running total of sends across the daily window. */
+  cumulativeSends: Array<{ date: string; total: number }>;
+  hourly: AnalyticsHourBucket[];
+  queueBreakdown: AnalyticsQueueBreakdown;
+  usage: AnalyticsUsageFun;
   companies: AnalyticsCompanyRow[];
+  motivation: AnalyticsMotivation;
   health: string[];
   goal: AnalyticsGoalSettings;
   goalProgress: {

@@ -13,6 +13,7 @@ import type {
   ResumeUpload,
   SendJob,
   SendJobMode,
+  SendQueueItem,
   SetupLoginKind,
   SetupSessionStatus,
   TestModeSettings,
@@ -41,7 +42,7 @@ import { extractJobIds } from "@recruiter/shared";
 
 export type { GenerationProgressStep };
 import { isGmailReadyForSend, probeSetupSessions, spawnOpenLogin } from "./setup.js";
-import { claimNextSendJob, completeSendJob, createImmediateSendJob, createSendJobFromQueueItem } from "./sendJobs.js";
+import { claimNextSendJob, completeSendJob, createImmediateSendJob, createSendJobFromQueueItem, cancelScheduledSends } from "./sendJobs.js";
 
 export interface CandidateStatusCheck {
   key: string;
@@ -1068,12 +1069,17 @@ export function buildSendJobPayload(store: Store, input: SendJobPayloadInput): O
   };
 }
 
-async function validateSendCandidate(store: Store, candidateId: string, targetEmail: string, sessionStatus?: SetupSessionStatus) {
+async function validateSendCandidate(
+  store: Store,
+  candidateId: string,
+  targetEmail: string,
+  options?: { sessionStatus?: SetupSessionStatus; scheduledFor?: string },
+) {
   const candidateForGate = store.listCandidates().find((item) => item.id === candidateId);
   if (!candidateForGate) {
     throw new Error("Candidate not found.");
   }
-  const gmailReady = await resolveGmailReady(store, sessionStatus);
+  const gmailReady = await resolveGmailReady(store, options?.sessionStatus);
   assertCanSend({
     candidate: candidateForGate,
     content: store.getContent(),
@@ -1089,8 +1095,9 @@ async function validateSendCandidate(store: Store, candidateId: string, targetEm
       id: `queued-${job.id}`,
       candidateId: job.candidateId,
       type: "send" as const,
-      createdAt: job.createdAt,
+      createdAt: job.scheduledFor ?? job.createdAt,
     }));
+  const pacingAt = options?.scheduledFor ? new Date(options.scheduledFor) : new Date();
   assertWithinPacingCaps(
     [...store.listEvents(), ...queuedSendEvents],
     store.listCandidates(),
@@ -1100,6 +1107,8 @@ async function validateSendCandidate(store: Store, candidateId: string, targetEm
       hourlySendCap: Number(process.env.HOURLY_SEND_LIMIT ?? 5),
       domainDailySendCap: Number(process.env.DOMAIN_DAILY_SEND_LIMIT ?? 5),
     },
+    pacingAt,
+    options?.scheduledFor ? "calendar" : "rolling",
   );
 }
 export function previewEmail(store: Store, candidateId: string) {
@@ -1157,12 +1166,29 @@ export async function sendCandidate(store: Store, candidateId: string, resumeId?
   };
 }
 
+export interface ScheduleJobFailure {
+  candidateId: string;
+  queueItemId: string;
+  reason: string;
+}
+
 export async function scheduleSends(
   store: Store,
   input: ExplicitScheduleInput & { mode?: "send_now" | "schedule"; resumeId?: string },
 ) {
+  const rosterIds =
+    input.candidateIds?.length
+      ? input.candidateIds
+      : input.schedules?.length
+        ? input.schedules.map((entry) => entry.candidateId)
+        : undefined;
+  const roster = rosterIds?.length
+    ? rosterIds
+        .map((id) => store.listCandidates().find((candidate) => candidate.id === id))
+        .filter((candidate): candidate is RecruiterCandidate => Boolean(candidate))
+    : store.listActiveCandidates();
   const result = scheduleCandidatesExplicit(
-    store.listActiveCandidates(),
+    roster,
     input,
     {
       intakeCapPerDay: Number(process.env.DAILY_INTAKE_LIMIT ?? 300),
@@ -1176,15 +1202,31 @@ export async function scheduleSends(
 
   const mode: SendJobMode = input.mode === "send_now" ? "send_now" : "schedule";
   const jobs: SendJob[] = [];
+  const jobByQueueId = new Map<string, SendJob>();
+  const alreadyScheduled = new Set(
+    store
+      .listSendQueue()
+      .filter((item) => item.status === "scheduled" || item.status === "queued")
+      .map((item) => item.candidateId),
+  );
+  const duplicateRejected: Array<{ candidateId: string; reason: string }> = [];
+  const jobFailures: ScheduleJobFailure[] = [];
+  const actuallyQueued: SendQueueItem[] = [];
 
   for (const item of result.queued) {
-    store.upsertSendQueueItem(item);
-    const rendered = applyTestModeRecipientOverride(previewEmail(store, item.candidateId), store);
-    if (!rendered.to) {
+    if (alreadyScheduled.has(item.candidateId)) {
+      duplicateRejected.push({ candidateId: item.candidateId, reason: "Already scheduled." });
       continue;
     }
+    alreadyScheduled.add(item.candidateId);
+    actuallyQueued.push(item);
+    store.upsertSendQueueItem(item);
     try {
-      await validateSendCandidate(store, item.candidateId, rendered.to);
+      const rendered = applyTestModeRecipientOverride(previewEmail(store, item.candidateId), store);
+      if (!rendered.to) {
+        throw new Error("Candidate needs an email before sending.");
+      }
+      await validateSendCandidate(store, item.candidateId, rendered.to, { scheduledFor: item.scheduledFor });
       const payload = buildSendJobPayload(store, {
         candidateId: item.candidateId,
         mode,
@@ -1193,8 +1235,10 @@ export async function scheduleSends(
         resumeId: input.resumeId,
       });
       jobs.push(createSendJobFromQueueItem(store, item, payload));
+      jobByQueueId.set(item.id, jobs[jobs.length - 1]!);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
+      jobFailures.push({ candidateId: item.candidateId, queueItemId: item.id, reason });
       store.upsertSendQueueItem({
         ...item,
         status: "failed",
@@ -1204,8 +1248,27 @@ export async function scheduleSends(
     }
   }
 
+  const archived: RecruiterCandidate[] = [];
+  for (const item of actuallyQueued) {
+    if (!jobByQueueId.has(item.id)) {
+      continue;
+    }
+    const removed = store.archiveCandidate(item.candidateId);
+    if (removed) {
+      archived.push(removed);
+    }
+  }
+
   await store.save();
-  return { ...result, jobs };
+  const succeededQueued = actuallyQueued.filter((item) => jobByQueueId.has(item.id));
+  return {
+    ...result,
+    queued: succeededQueued,
+    rejected: [...result.rejected, ...duplicateRejected],
+    jobFailures,
+    jobs,
+    archived,
+  };
 }
 
 export function nextSendJob(store: Store) {
@@ -1223,6 +1286,179 @@ export async function reportSendResult(
   }
   await store.save();
   return job;
+}
+
+export async function cancelScheduledSendsForBatch(
+  store: Store,
+  input: { candidateIds?: string[]; queueItemIds?: string[]; pendingOnly?: boolean } = {},
+) {
+  const result = cancelScheduledSends(store, input);
+  await store.save();
+  return result;
+}
+
+export async function updateScheduledCompanyBatch(
+  store: Store,
+  input: {
+    company: string;
+    subject: string;
+    body: string;
+    sourceCandidateId: string;
+    candidateIds?: string[];
+  },
+) {
+  await applyBatchPreviewEdits(store, input);
+  const companyKey = normalizeCompanyKey(input.company);
+  if (!companyKey) {
+    throw new Error("Company is required.");
+  }
+
+  const candidateFilter = input.candidateIds?.length ? new Set(input.candidateIds) : null;
+  let jobsUpdated = 0;
+  for (const item of listUpcomingSends(store)) {
+    const matchesCompany = normalizeCompanyKey(item.company) === companyKey;
+    const matchesFilter = candidateFilter ? candidateFilter.has(item.candidateId) : matchesCompany;
+    if (!matchesFilter || !item.jobId) {
+      continue;
+    }
+    const job = store.getSendJob(item.jobId);
+    if (!job || job.status !== "pending") {
+      continue;
+    }
+    store.updateCandidate(item.candidateId, { customSubject: undefined, customBody: undefined });
+    const rendered = applyTestModeRecipientOverride(previewEmail(store, item.candidateId), store);
+    store.upsertSendJob({
+      ...job,
+      subject: rendered.subject,
+      textBody: rendered.textBody,
+      htmlBody: rendered.htmlBody,
+      updatedAt: new Date().toISOString(),
+    });
+    jobsUpdated += 1;
+  }
+
+  await store.save();
+  if (jobsUpdated === 0) {
+    throw new Error("No pending scheduled emails were updated for this company.");
+  }
+  return { jobsUpdated };
+}
+
+export async function retryFailedSends(
+  store: Store,
+  input: { queueItemIds: string[] },
+): Promise<{ retried: number }> {
+  const filter = new Set(input.queueItemIds);
+  let retried = 0;
+  const now = new Date().toISOString();
+
+  for (const item of store.listSendQueue()) {
+    if (!filter.has(item.id) || item.status !== "failed") {
+      continue;
+    }
+    const candidate = store.listCandidates().find((person) => person.id === item.candidateId);
+    if (!candidate?.email) {
+      continue;
+    }
+    store.upsertSendQueueItem({
+      ...item,
+      status: "scheduled",
+      failureReason: undefined,
+      updatedAt: now,
+    });
+    const payload = buildSendJobPayload(store, {
+      candidateId: item.candidateId,
+      mode: "schedule",
+      scheduledFor: item.scheduledFor,
+      queueItemId: item.id,
+    });
+    createSendJobFromQueueItem(store, item, payload);
+    retried += 1;
+  }
+
+  await store.save();
+  return { retried };
+}
+
+export async function updatePendingSendJobContent(
+  store: Store,
+  jobId: string,
+  input: { subject: string; body: string },
+) {
+  const job = store.getSendJob(jobId);
+  if (!job) {
+    throw new Error("Send job not found.");
+  }
+  if (job.status !== "pending") {
+    throw new Error("Only pending scheduled sends can be edited.");
+  }
+  const subject = input.subject.trim();
+  const body = input.body.trim();
+  if (!subject || !body) {
+    throw new Error("Subject and body are required.");
+  }
+
+  store.updateCandidate(job.candidateId, { customSubject: subject, customBody: body });
+  const rendered = applyTestModeRecipientOverride(previewEmail(store, job.candidateId), store);
+  const updated = store.upsertSendJob({
+    ...job,
+    subject: rendered.subject,
+    textBody: rendered.textBody,
+    htmlBody: rendered.htmlBody,
+    updatedAt: new Date().toISOString(),
+  });
+  await store.save();
+  return updated;
+}
+
+export interface UpcomingSendView {
+  queueItemId: string;
+  jobId?: string;
+  candidateId: string;
+  fullName: string;
+  firstName?: string;
+  company?: string;
+  email: string;
+  profilePhotoUrl?: string;
+  scheduledFor: string;
+  queueStatus: string;
+  jobStatus?: string;
+  subject: string;
+  body: string;
+}
+
+export function listUpcomingSends(store: Store): UpcomingSendView[] {
+  const people = new Map(store.listCandidates().map((candidate) => [candidate.id, candidate]));
+  const jobsByQueueId = new Map(
+    store
+      .listSendJobs()
+      .filter((job) => job.queueItemId && (job.status === "pending" || job.status === "in_progress"))
+      .map((job) => [job.queueItemId!, job] as const),
+  );
+
+  return store
+    .listSendQueue()
+    .filter((item) => item.status === "scheduled" || item.status === "queued")
+    .map((item) => {
+      const person = people.get(item.candidateId);
+      const job = jobsByQueueId.get(item.id);
+      return {
+        queueItemId: item.id,
+        jobId: job?.id,
+        candidateId: item.candidateId,
+        fullName: person?.fullName ?? item.email,
+        firstName: person?.firstName,
+        company: person?.company,
+        email: item.email,
+        profilePhotoUrl: person?.profilePhotoUrl,
+        scheduledFor: item.scheduledFor,
+        queueStatus: item.status,
+        jobStatus: job?.status,
+        subject: job?.subject ?? person?.customSubject ?? "",
+        body: job?.textBody ?? person?.customBody ?? "",
+      };
+    })
+    .sort((a, b) => new Date(a.scheduledFor).getTime() - new Date(b.scheduledFor).getTime());
 }
 
 export function createCampaign(input: Partial<Campaign>): Campaign {

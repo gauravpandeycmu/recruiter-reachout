@@ -293,6 +293,16 @@ describe("email samples and per-company personalization", () => {
     expect(resolveContentForCandidate(store, acmeCandidate)?.subject).toBe("Hi {firstName} from Acme");
     expect(resolveContentForCandidate(store, otherCandidate)?.subject).toBe("Global subject");
 
+    const customized = store.updateCandidate(acmeCandidate.id, {
+      customSubject: "Custom subject",
+      customBody: "Custom body for {firstName}",
+    })!;
+    expect(resolveContentForCandidate(store, customized)?.subject).toBe("Custom subject");
+    expect(resolveContentForCandidate(store, customized)?.body).toBe("Custom body for {firstName}");
+    expect(resolveContentForCandidate(store, store.updateCandidate(otherCandidate.id, { customSubject: "Only subject" })!)?.subject).toBe(
+      "Global subject",
+    );
+
     store.close();
     await rm(directory, { recursive: true, force: true });
   });
@@ -667,6 +677,49 @@ describe("discovery settings", () => {
 
     const disabled = await updateDiscoverySettings(store, { salesqlAutoFallback: false });
     expect(disabled.salesqlAutoFallback).toBe(false);
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+});
+
+describe("outreach footer", () => {
+  it("normalizes email footer fields and defaults primary color", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-footer-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const content = setOutreachContent(store, {
+      subject: "Hello {firstName}",
+      body: "Hi {firstName}",
+      footer: {
+        enabled: true,
+        closing: "  Best,  ",
+        name: "  Gaurav  ",
+        subtitle: " MS Student ",
+        organizationPrimary: " Carnegie Mellon ",
+        organizationSecondary: " SCS ",
+        organizationPrimaryColor: "",
+        location: " Pittsburgh ",
+        phone: " 555 ",
+        portfolioLabel: " Portfolio ",
+        portfolioUrl: " https://example.com ",
+      },
+    });
+
+    expect(content.footer).toEqual({
+      enabled: true,
+      closing: "Best,",
+      name: "Gaurav",
+      subtitle: "MS Student",
+      organizationPrimary: "Carnegie Mellon",
+      organizationSecondary: "SCS",
+      organizationPrimaryColor: "#C41230",
+      location: "Pittsburgh",
+      phone: "555",
+      portfolioLabel: "Portfolio",
+      portfolioUrl: "https://example.com",
+    });
 
     store.close();
     await rm(directory, { recursive: true, force: true });

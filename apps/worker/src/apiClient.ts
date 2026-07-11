@@ -45,6 +45,7 @@ export interface WorkerApiClient {
   reportWorkerStatus(update: WorkerStatusUpdate): Promise<WorkerStatus>;
   fetchDiscoverySettings(): Promise<DiscoverySettings>;
   fetchNextSendJob(): Promise<SendJob | undefined>;
+  fetchSendJob(jobId: string): Promise<SendJob | undefined>;
   reportSendResult(jobId: string, result: { success: boolean; failureReason?: string; scheduledInGmail?: boolean }): Promise<SendJob>;
   fetchNextLinkedInCaptureJob(): Promise<LinkedInCaptureJob | undefined>;
   reportLinkedInCaptureResult(
@@ -133,6 +134,17 @@ export function createApiClient(options: ApiClientOptions = {}): WorkerApiClient
       }
       if (!response.ok) {
         throw new Error(`Failed to fetch next send job (${response.status}): ${await response.text()}`);
+      }
+      return (await response.json()) as SendJob;
+    },
+
+    async fetchSendJob(jobId: string): Promise<SendJob | undefined> {
+      const response = await fetch(`${baseUrl}/api/automation/send-jobs/${jobId}`);
+      if (response.status === 404) {
+        return undefined;
+      }
+      if (!response.ok) {
+        throw new Error(`Failed to fetch send job (${response.status}): ${await response.text()}`);
       }
       return (await response.json()) as SendJob;
     },

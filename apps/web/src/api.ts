@@ -24,6 +24,22 @@ import type {
   AnalyticsGoalSettings,
 } from "@recruiter/shared";
 
+export interface UpcomingSendView {
+  queueItemId: string;
+  jobId?: string;
+  candidateId: string;
+  fullName: string;
+  firstName?: string;
+  company?: string;
+  email: string;
+  profilePhotoUrl?: string;
+  scheduledFor: string;
+  queueStatus: string;
+  jobStatus?: string;
+  subject: string;
+  body: string;
+}
+
 export interface AppData {
   candidates: RecruiterCandidate[];
   content?: OutreachContent;
@@ -31,6 +47,7 @@ export interface AppData {
   campaigns: Campaign[];
   jobs: JobTarget[];
   sendQueue: SendQueueItem[];
+  upcomingSends?: UpcomingSendView[];
   gmailAccount?: { id: string; email: string; scope: string; connectedAt: string; updatedAt: string };
   trackingLinks: TrackingLink[];
   companyEmailPatterns: CompanyEmailPattern[];
@@ -264,9 +281,53 @@ export function scheduleSends(input: ScheduleSendsInput): Promise<{
   queued: SendQueueItem[];
   rejected: Array<{ candidateId: string; reason: string }>;
   shifted: Array<{ candidateId: string; original: string; shiftedTo: string; reason: string }>;
+  jobFailures?: Array<{ candidateId: string; queueItemId: string; reason: string }>;
   jobs: unknown[];
+  archived?: RecruiterCandidate[];
 }> {
   return request("/api/send-queue/schedule", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function cancelScheduledSends(input: {
+  queueItemIds: string[];
+  pendingOnly?: boolean;
+}): Promise<{ jobsCancelled: number; queueCancelled: number }> {
+  return request("/api/send-queue/cancel", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateScheduledSendContent(
+  jobId: string,
+  input: { subject: string; body: string },
+): Promise<{ id: string; subject: string; textBody: string }> {
+  return request(`/api/send-jobs/${jobId}/content`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateScheduledCompanyBatch(input: {
+  company: string;
+  subject: string;
+  body: string;
+  sourceCandidateId: string;
+  candidateIds?: string[];
+}): Promise<{ jobsUpdated: number }> {
+  return request("/api/send-queue/update-company-batch", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function retryFailedSends(input: {
+  queueItemIds: string[];
+}): Promise<{ retried: number }> {
+  return request("/api/send-queue/retry-failed", {
     method: "POST",
     body: JSON.stringify(input),
   });

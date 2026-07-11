@@ -11,7 +11,7 @@ import {
   setOutreachContent,
   saveResume,
 } from "../src/services.js";
-import { claimNextSendJob } from "../src/sendJobs.js";
+import { claimNextSendJob, cancelScheduledSends, createSendJobFromQueueItem } from "../src/sendJobs.js";
 import { Store } from "../src/store.js";
 import * as setup from "../src/setup.js";
 
@@ -120,6 +120,87 @@ describe("send queue wiring", () => {
 
     delete process.env.TEST_MODE;
     delete process.env.TEST_MODE_RECIPIENT_EMAIL;
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("cancels pending scheduled sends and pauses queue items", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-send-queue-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const candidate = store.upsertCandidate(
+      createCandidate({
+        fullName: "Jane Doe",
+        email: "jane.doe@acme.com",
+      }),
+    );
+    const queueItem = store.upsertSendQueueItem({
+      id: "queue-1",
+      candidateId: candidate.id,
+      email: "jane.doe@acme.com",
+      confidence: "high",
+      status: "scheduled",
+      scheduledFor: new Date(Date.now() + 60_000).toISOString(),
+      attempts: 0,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    createSendJobFromQueueItem(store, queueItem, {
+      mode: "schedule",
+      scheduledFor: queueItem.scheduledFor,
+      to: "jane.doe@acme.com",
+      subject: "Hi",
+      textBody: "Hello",
+      htmlBody: "<p>Hello</p>",
+    });
+
+    const result = cancelScheduledSends(store, { queueItemIds: [queueItem.id] });
+    expect(result.jobsCancelled).toBe(1);
+    expect(result.queueCancelled).toBe(1);
+    expect(claimNextSendJob(store)).toBeUndefined();
+    expect(store.getSendQueueItem(queueItem.id)?.status).toBe("paused");
+
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("skips in_progress jobs when pendingOnly is true", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-send-queue-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const candidate = store.upsertCandidate(
+      createCandidate({
+        fullName: "Jane Doe",
+        email: "jane.doe@acme.com",
+      }),
+    );
+    const queueItem = store.upsertSendQueueItem({
+      id: "queue-in-progress",
+      candidateId: candidate.id,
+      email: "jane.doe@acme.com",
+      confidence: "high",
+      status: "scheduled",
+      scheduledFor: new Date(Date.now() + 60_000).toISOString(),
+      attempts: 0,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const job = createSendJobFromQueueItem(store, queueItem, {
+      mode: "schedule",
+      scheduledFor: queueItem.scheduledFor,
+      to: "jane.doe@acme.com",
+      subject: "Hi",
+      textBody: "Hello",
+      htmlBody: "<p>Hello</p>",
+    });
+    store.upsertSendJob({ ...job, status: "in_progress", updatedAt: new Date().toISOString() });
+
+    const result = cancelScheduledSends(store, { queueItemIds: [queueItem.id], pendingOnly: true });
+    expect(result.jobsCancelled).toBe(0);
+    expect(result.queueCancelled).toBe(0);
+    expect(store.getSendJob(job.id)?.status).toBe("in_progress");
+    expect(store.getSendQueueItem(queueItem.id)?.status).toBe("scheduled");
+
     await rm(directory, { recursive: true, force: true });
   });
 });

@@ -20,6 +20,18 @@ export async function runSendPass(input: {
   }
 
   input.log(`Processing send job ${job.id} for candidate ${job.candidateId} (${job.mode})`);
+
+  const latest = await input.apiClient.fetchSendJob(job.id).catch(() => undefined);
+  if (latest?.status === "failed" && latest.failureReason?.toLowerCase().includes("cancelled")) {
+    input.log(`Send job ${job.id} was cancelled — skipping.`);
+    await input.apiClient.reportWorkerStatus({
+      phase: "idle",
+      message: "Scheduled send was cancelled.",
+      candidateId: job.candidateId,
+    });
+    return { result: "idle" };
+  }
+
   await input.apiClient.reportWorkerStatus({
     phase: "sending",
     message: `Sending email to ${job.to}…`,

@@ -2,6 +2,7 @@ import type { EmailSample } from "@recruiter/shared";
 import { extractJobIdFromUrl, extractJobIds, stripBareJobUrls } from "@recruiter/shared";
 import { extractGeminiResponseText, extractJsonObjectText, type GeminiResponse } from "./geminiResponse.js";
 import type { GenerationProgressStep } from "./jobPosting.js";
+import { recordLlmUsage } from "./llmUsage.js";
 
 export type { GenerationProgressStep };
 export { extractGeminiResponseText, extractJsonObjectText } from "./geminiResponse.js";
@@ -186,7 +187,7 @@ export async function generateCompanyEmailContent(
   onProgress?.("voice");
   onProgress?.("draft");
   const draft = sanitizeGeneratedEmail(
-    parseGeneratedContent(await callGemini(buildPersonalizationPrompt(input), apiKey, model)),
+    parseGeneratedContent(await callGemini(buildPersonalizationPrompt(input), apiKey, model, "email_draft")),
     input.jobUrl,
   );
   onProgress?.("review");
@@ -198,7 +199,9 @@ export async function generateCompanyEmailContent(
 
   onProgress?.("polish");
   const repaired = sanitizeGeneratedEmail(
-    parseGeneratedContent(await callGemini(buildRepairPrompt(draft, issues, input.company, input.passionate), apiKey, model)),
+    parseGeneratedContent(
+      await callGemini(buildRepairPrompt(draft, issues, input.company, input.passionate), apiKey, model, "email_repair"),
+    ),
     input.jobUrl,
   );
   const remaining = validateGeneratedEmail(repaired, input.samples, input);
@@ -224,7 +227,7 @@ function sanitizeGeneratedEmail(
   };
 }
 
-async function callGemini(prompt: string, apiKey: string, model: string): Promise<string> {
+async function callGemini(prompt: string, apiKey: string, model: string, purpose: "email_draft" | "email_repair" = "email_draft"): Promise<string> {
   const response = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
     {
@@ -242,7 +245,14 @@ async function callGemini(prompt: string, apiKey: string, model: string): Promis
   }
 
   const payload = (await response.json()) as GeminiResponse;
-  return extractGeminiResponseText(payload);
+  const text = extractGeminiResponseText(payload);
+  recordLlmUsage({
+    purpose,
+    model,
+    promptChars: prompt.length,
+    responseChars: text.length,
+  });
+  return text;
 }
 
 function buildAudienceSection(audience: RecipientAudience, titles: string[]): string[] {

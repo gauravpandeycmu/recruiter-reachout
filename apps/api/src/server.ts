@@ -45,6 +45,11 @@ import {
   scheduleSends,
   nextSendJob,
   reportSendResult,
+  cancelScheduledSendsForBatch,
+  listUpcomingSends,
+  updatePendingSendJobContent,
+  updateScheduledCompanyBatch,
+  retryFailedSends,
   getSetupSessionStatus,
   openSetupLogin,
   getTestModeSettingsView,
@@ -63,11 +68,13 @@ import { syncRelayEvents } from "./tracking.js";
 import { handleCors, readJson, sendJson, beginNdjson, writeNdjson, endNdjson, sendPixel, sendRedirect } from "./http.js";
 import { Store } from "./store.js";
 import { ensureWorkerRunning, getWorkerStatusEnsured } from "./workerSupervisor.js";
+import { bindLlmUsageToStore } from "./llmUsage.js";
 
 const port = Number(process.env.PORT ?? 4000);
 const store = new Store();
 
 await store.load();
+bindLlmUsageToStore(store);
 
 // Keep LinkedIn capture / email lookup / Gmail send running without a separate manual start.
 void ensureWorkerRunning(store).catch(() => undefined);
@@ -94,7 +101,10 @@ const server = createServer(async (req, res) => {
     }
 
     if (req.method === "GET" && url.pathname === "/api/state") {
-      sendJson(res, 200, store.active());
+      sendJson(res, 200, {
+        ...store.active(),
+        upcomingSends: listUpcomingSends(store),
+      });
       return;
     }
 
@@ -458,6 +468,69 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/api/send-queue/cancel") {
+      const body = (await readJson(req)) as {
+        candidateIds?: string[];
+        queueItemIds?: string[];
+        pendingOnly?: boolean;
+      };
+      sendJson(res, 200, await cancelScheduledSendsForBatch(store, body));
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/send-queue/retry-failed") {
+      const body = (await readJson(req)) as { queueItemIds?: string[] };
+      sendJson(res, 200, await retryFailedSends(store, { queueItemIds: body.queueItemIds ?? [] }));
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/send-queue/update-company-batch") {
+      const body = (await readJson(req)) as {
+        company?: string;
+        subject?: string;
+        body?: string;
+        sourceCandidateId?: string;
+        candidateIds?: string[];
+      };
+      sendJson(
+        res,
+        200,
+        await updateScheduledCompanyBatch(store, {
+          company: body.company ?? "",
+          subject: body.subject ?? "",
+          body: body.body ?? "",
+          sourceCandidateId: body.sourceCandidateId ?? "",
+          candidateIds: body.candidateIds,
+        }),
+      );
+      return;
+    }
+
+    if (req.method === "PATCH" && url.pathname.match(/^\/api\/send-jobs\/[^/]+\/content$/)) {
+      const jobId = url.pathname.split("/")[3] ?? "";
+      const body = (await readJson(req)) as { subject?: string; body?: string };
+      sendJson(
+        res,
+        200,
+        await updatePendingSendJobContent(store, jobId, {
+          subject: body.subject ?? "",
+          body: body.body ?? "",
+        }),
+      );
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname.match(/^\/api\/automation\/send-jobs\/[^/]+$/)) {
+      const jobId = url.pathname.split("/")[4] ?? "";
+      const job = store.getSendJob(jobId);
+      if (!job) {
+        sendJson(res, 404, { error: "Send job not found." });
+        return;
+      }
+      sendJson(res, 200, job);
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/api/automation/discovery-settings") {
       sendJson(res, 200, getDiscoverySettings(store));
       return;
@@ -700,6 +773,9 @@ const server = createServer(async (req, res) => {
 
     sendJson(res, 404, { error: "Route not found." });
   } catch (error) {
+    if (process.env.NODE_ENV !== "production") {
+      console.error(error);
+    }
     sendJson(res, 400, { error: error instanceof Error ? error.message : "Unknown error." });
   }
 });

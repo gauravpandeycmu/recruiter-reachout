@@ -22,9 +22,7 @@ describe("analytics", () => {
   }
 
   it("maps ISO timestamps with a fixed UTC offset", () => {
-    // 2026-07-10T02:30Z is still Jul 9 in UTC-7 (offset -420)
     expect(toOffsetYmd("2026-07-10T02:30:00.000Z", -420)).toBe("2026-07-09");
-    // Same instant is Jul 10 in UTC+0
     expect(toOffsetYmd("2026-07-10T02:30:00.000Z", 0)).toBe("2026-07-10");
   });
 
@@ -100,5 +98,204 @@ describe("analytics", () => {
     const acme = summary.companies.find((row) => row.companyName === "Acme");
     expect(acme?.withEmail).toBe(2);
     expect(acme?.readyUnsent).toBe(1);
+  });
+
+  it("includes peopleContacted, companiesReached, and motivation without tracking rates", async () => {
+    const store = await freshStore();
+    const jane = store.upsertCandidate(
+      createCandidate({ fullName: "Jane Doe", email: "jane@acme.com", company: "Acme", status: "sent" }),
+    );
+    store.addEvent({
+      ...createEvent(jane.id, "send"),
+      company: "Acme",
+      createdAt: "2026-07-09T18:00:00.000Z",
+    });
+
+    const summary = buildAnalyticsSummary(store, "2026-07-09", { tzOffsetMinutes: 0 });
+    expect(summary.motivation.level).toBeGreaterThanOrEqual(1);
+    expect(summary.today.companiesReached).toBe(1);
+    expect(summary.funnel).toEqual({
+      collected: 1,
+      emailFound: 1,
+      sent: 1,
+    });
+    expect(summary.usage.geminiCalls).toBeGreaterThanOrEqual(0);
+    expect(summary.hourly).toHaveLength(24);
+    expect(summary.cumulativeSends.at(-1)?.total).toBeGreaterThanOrEqual(1);
+    const acme = summary.companies.find((row) => row.companyName === "Acme");
+    expect(acme?.sent).toBe(1);
+    expect(acme?.peopleContacted).toBe(1);
+    expect(acme?.firstSentAt).toBe("2026-07-09T18:00:00.000Z");
+  });
+
+  it("estimates gemini usage from generated company content when no llm events exist", async () => {
+    const store = await freshStore();
+    store.upsertCompanyContent({
+      id: "cc-1",
+      company: "acme",
+      companyDisplayName: "Acme",
+      subject: "Hello there",
+      body: "This is a longer body with several words for counting.",
+      source: "generated",
+      model: "gemma-test",
+      createdAt: "2026-07-09T18:00:00.000Z",
+      updatedAt: "2026-07-09T18:00:00.000Z",
+    });
+    const summary = buildAnalyticsSummary(store, "2026-07-09", { tzOffsetMinutes: 0 });
+    expect(summary.usage.geminiCallsEstimated).toBe(true);
+    expect(summary.usage.geminiCalls).toBe(1);
+    expect(summary.usage.charactersGenerated).toBeGreaterThan(20);
+    expect(summary.usage.companiesGenerated).toBe(1);
+  });
+
+  it("prefers real llm usage events over company-content estimates", async () => {
+    const store = await freshStore();
+    store.upsertCompanyContent({
+      id: "cc-1",
+      company: "acme",
+      companyDisplayName: "Acme",
+      subject: "Hello there",
+      body: "Generated body that should be ignored for gemini call counts.",
+      source: "generated",
+      model: "gemma-test",
+      createdAt: "2026-07-09T18:00:00.000Z",
+      updatedAt: "2026-07-09T18:00:00.000Z",
+    });
+    store.addLlmUsageEvent({
+      id: "llm-1",
+      purpose: "email_draft",
+      promptChars: 100,
+      responseChars: 40,
+      company: "Acme",
+      createdAt: "2026-07-09T18:00:00.000Z",
+    });
+    store.addLlmUsageEvent({
+      id: "llm-2",
+      purpose: "job_extract",
+      promptChars: 50,
+      responseChars: 10,
+      createdAt: "2026-07-09T19:00:00.000Z",
+    });
+
+    const summary = buildAnalyticsSummary(store, "2026-07-09", { tzOffsetMinutes: 0 });
+    expect(summary.usage.geminiCallsEstimated).toBe(false);
+    expect(summary.usage.geminiCalls).toBe(2);
+    expect(summary.usage.charactersPrompted).toBe(150);
+    expect(summary.usage.charactersGenerated).toBe(50);
+  });
+
+  it("uses event.company override for companiesReached", async () => {
+    const store = await freshStore();
+    const jane = store.upsertCandidate(
+      createCandidate({ fullName: "Jane Doe", email: "jane@acme.com", company: "Acme", status: "sent" }),
+    );
+    store.addEvent({
+      ...createEvent(jane.id, "send"),
+      company: "Override Co",
+      createdAt: "2026-07-09T18:00:00.000Z",
+    });
+
+    const summary = buildAnalyticsSummary(store, "2026-07-09", { tzOffsetMinutes: 0 });
+    expect(summary.today.companiesReached).toBe(1);
+    const todayRow = summary.daily.find((row) => row.date === "2026-07-09");
+    expect(todayRow?.companiesReached).toBe(1);
+    // Leaderboard still keys off candidate company; override only affects reach counts.
+    expect(summary.companies.some((row) => row.companyName === "Acme")).toBe(true);
+  });
+
+  it("builds health warnings, queue breakdown, and clamps goals", async () => {
+    const store = await freshStore();
+    store.setAnalyticsGoalSettings({
+      dailySendGoal: 3,
+      goalMetDates: ["2026-07-07", "2026-07-08"],
+      updatedAt: new Date().toISOString(),
+    });
+    for (let index = 0; index < 5; index += 1) {
+      store.upsertCandidate(
+        createCandidate({
+          fullName: `Ready ${index}`,
+          email: `ready${index}@acme.com`,
+          company: "Acme",
+          status: "email_guessed",
+        }),
+      );
+    }
+    const now = "2026-07-09T12:00:00.000Z";
+    store.upsertSendQueueItem({
+      id: "q-scheduled",
+      candidateId: "c1",
+      email: "a@acme.com",
+      confidence: "high",
+      status: "scheduled",
+      scheduledFor: now,
+      attempts: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+    store.upsertSendQueueItem({
+      id: "q-sent",
+      candidateId: "c2",
+      email: "b@acme.com",
+      confidence: "high",
+      status: "sent",
+      scheduledFor: now,
+      attempts: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+    store.upsertSendQueueItem({
+      id: "q-failed",
+      candidateId: "c3",
+      email: "c@acme.com",
+      confidence: "high",
+      status: "failed",
+      scheduledFor: now,
+      attempts: 1,
+      createdAt: now,
+      updatedAt: now,
+    });
+    store.upsertSendQueueItem({
+      id: "q-paused",
+      candidateId: "c4",
+      email: "d@acme.com",
+      confidence: "high",
+      status: "paused",
+      scheduledFor: now,
+      attempts: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const summary = buildAnalyticsSummary(store, "2026-07-09", { tzOffsetMinutes: 0, localHour: 15 });
+    expect(summary.health.some((warning) => warning.includes("No sends yet today"))).toBe(true);
+    expect(summary.health.some((warning) => warning.includes("ready recruiters are waiting"))).toBe(true);
+    expect(summary.health.some((warning) => warning.includes("No companies reached this week"))).toBe(true);
+    expect(summary.queueBreakdown).toEqual({
+      scheduled: 1,
+      sent: 1,
+      failed: 1,
+      paused: 1,
+      other: 0,
+    });
+    expect(summary.activeBatch.readyToSend).toBe(5);
+    expect(summary.usage.longestStreak).toBeGreaterThanOrEqual(2);
+
+    const clampedLow = updateAnalyticsGoal(store, { dailySendGoal: 0, localDate: "2026-07-09" });
+    expect(clampedLow.dailySendGoal).toBe(1);
+    const clampedHigh = updateAnalyticsGoal(store, { dailySendGoal: 999, localDate: "2026-07-09" });
+    expect(clampedHigh.dailySendGoal).toBe(500);
+  });
+
+  it("omits legacy open/click rate fields from the summary shape", async () => {
+    const store = await freshStore();
+    const summary = buildAnalyticsSummary(store, "2026-07-09", { tzOffsetMinutes: 0 });
+    expect(summary).not.toHaveProperty("openRate");
+    expect(summary).not.toHaveProperty("clickRate");
+    expect(summary).not.toHaveProperty("bounceRate");
+    expect(summary.funnel).toEqual({
+      collected: 0,
+      emailFound: 0,
+      sent: 0,
+    });
   });
 });

@@ -54,8 +54,8 @@ export function scheduleCandidates(
   const domainCounts = new Map<string, number>();
 
   for (const candidate of ranked) {
-    const email = candidate.email ?? candidate.emailCandidates[0]?.email;
-    const confidence = candidate.emailCandidates.find((guess) => guess.email === email)?.confidence ?? "unknown";
+    const email = candidate.email ?? candidate.emailCandidates?.[0]?.email;
+    const confidence = email ? resolveEmailConfidence(candidate, email) : "unknown";
     if (!email || confidence !== "high" || isSuppressed(email, suppressions)) {
       suppressed.push(createQueueItem(candidate, email ?? "", confidence, "suppressed", settings.startDate));
       continue;
@@ -96,6 +96,7 @@ export function assertWithinPacingCaps(
   targetEmail: string,
   caps: PacingCaps,
   now: Date = new Date(),
+  hourBucketMode: "rolling" | "calendar" = "rolling",
 ): void {
   const sendEvents = events.filter((event) => event.type === "send");
   const todayPrefix = now.toISOString().slice(0, 10);
@@ -104,8 +105,13 @@ export function assertWithinPacingCaps(
     throw new Error(`Daily send limit reached (${caps.dailySendCap}/day).`);
   }
 
-  const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
-  const sentLastHour = sendEvents.filter((event) => new Date(event.createdAt).getTime() >= oneHourAgo.getTime());
+  const sentLastHour =
+    hourBucketMode === "calendar"
+      ? sendEvents.filter((event) => event.createdAt.slice(0, 13) === now.toISOString().slice(0, 13))
+      : sendEvents.filter((event) => {
+          const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+          return new Date(event.createdAt).getTime() >= oneHourAgo.getTime();
+        });
   if (sentLastHour.length >= caps.hourlySendCap) {
     throw new Error(`Hourly send limit reached (${caps.hourlySendCap}/hour).`);
   }
@@ -174,6 +180,17 @@ function createQueueItem(
   };
 }
 
+function resolveEmailConfidence(candidate: RecruiterCandidate, email: string): VerificationStatus {
+  const fromGuesses = candidate.emailCandidates?.find((guess) => guess.email === email)?.confidence;
+  if (fromGuesses) {
+    return fromGuesses;
+  }
+  if (candidate.email && candidate.email === email) {
+    return "high";
+  }
+  return "unknown";
+}
+
 function confidenceRank(confidence: VerificationStatus): number {
   switch (confidence) {
     case "high":
@@ -226,8 +243,8 @@ export function scheduleCandidatesExplicit(
 ): ExplicitScheduleResult {
   const settings = { ...defaultConfig(), ...config };
   const eligible = dedupeCandidates(candidates).filter((candidate) => {
-    const email = candidate.email ?? candidate.emailCandidates[0]?.email;
-    const confidence = candidate.emailCandidates.find((guess) => guess.email === email)?.confidence ?? "unknown";
+    const email = candidate.email ?? candidate.emailCandidates?.[0]?.email;
+    const confidence = email ? resolveEmailConfidence(candidate, email) : "unknown";
     return email && confidence === "high" && !isSuppressed(email, suppressions);
   });
 
@@ -254,8 +271,8 @@ export function scheduleCandidatesExplicit(
 
   let autoIndex = 0;
   for (const candidate of filtered) {
-    const email = candidate.email ?? candidate.emailCandidates[0]?.email ?? "";
-    const confidence = candidate.emailCandidates.find((guess) => guess.email === email)?.confidence ?? "unknown";
+    const email = candidate.email ?? candidate.emailCandidates?.[0]?.email ?? "";
+    const confidence = email ? resolveEmailConfidence(candidate, email) : "unknown";
     const hasOverride = perCandidateSchedule.has(candidate.id);
     let scheduledFor = hasOverride
       ? perCandidateSchedule.get(candidate.id)!

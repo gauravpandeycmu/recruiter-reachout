@@ -65,6 +65,28 @@ describe("scheduleCandidatesExplicit", () => {
     ]);
   });
 
+  it("does not throw when emailCandidates is null but email is set", () => {
+    const extensionStyle: RecruiterCandidate = {
+      id: "extension-1",
+      fullName: "Extension Recruiter",
+      firstName: "Extension",
+      company: "Acme",
+      email: "recruiter@acme.com",
+      emailCandidates: undefined as unknown as RecruiterCandidate["emailCandidates"],
+      status: "email_guessed",
+      isActive: true,
+      createdAt: "now",
+      updatedAt: "now",
+    };
+    expect(() =>
+      scheduleCandidatesExplicit(
+        [extensionStyle],
+        { startAt: "2026-05-13T10:00:00.000Z", intervalMinutes: 12, jitterSeconds: 0 },
+        { startDate: new Date("2026-05-13T10:00:00.000Z") },
+      ),
+    ).not.toThrow();
+  });
+
   it("rejects candidates when daily cap is reached", () => {
     const many = Array.from({ length: 3 }, (_, index) => candidate(index));
     const result = scheduleCandidatesExplicit(
@@ -79,5 +101,23 @@ describe("scheduleCandidatesExplicit", () => {
 
     expect(result.queued).toHaveLength(2);
     expect(result.rejected).toHaveLength(1);
+  });
+
+  it("shifts later candidates when the hourly cap is hit", () => {
+    const many = Array.from({ length: 3 }, (_, index) => candidate(index, `Co${index}`));
+    const result = scheduleCandidatesExplicit(
+      many,
+      { startAt: "2026-05-13T10:00:00.000Z", intervalMinutes: 1, jitterSeconds: 0 },
+      {
+        sendCapPerDay: 10,
+        perDomainCap: 10,
+        perHourCap: 2,
+      },
+    );
+
+    expect(result.queued).toHaveLength(3);
+    expect(result.shifted).toHaveLength(1);
+    expect(result.shifted[0]?.reason).toBe("Hourly cap — shifted one hour later.");
+    expect(result.queued[2]?.scheduledFor.startsWith("2026-05-13T11:")).toBe(true);
   });
 });

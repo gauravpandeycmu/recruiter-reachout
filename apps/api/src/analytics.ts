@@ -1,5 +1,6 @@
 import type {
   AnalyticsGoalSettings,
+  AnalyticsMotivation,
   AnalyticsSummary,
   RecruiterCandidate,
   TrackingEvent,
@@ -8,6 +9,18 @@ import { resolveCandidateCompany } from "@recruiter/shared";
 import type { Store } from "./store.js";
 
 const SETTLED = new Set(["sent", "opened", "clicked", "bounced", "do_not_contact"]);
+
+const MILESTONES: Array<{ at: number; title: string; blurb: string }> = [
+  { at: 0, title: "Getting started", blurb: "Send your first outreach email to unlock your streak." },
+  { at: 1, title: "First send", blurb: "Nice — you’re in motion. Keep a steady daily rhythm." },
+  { at: 5, title: "Warming up", blurb: "Five sends down. Consistency beats volume." },
+  { at: 15, title: "On a roll", blurb: "Fifteen outreaches. Expand to a new company this week." },
+  { at: 30, title: "Pipeline builder", blurb: "Thirty sends. You’re building real coverage." },
+  { at: 50, title: "Serious hunter", blurb: "Fifty outreaches. Protect your streak and widen companies." },
+  { at: 100, title: "Century club", blurb: "One hundred sends. You’re playing the long game." },
+  { at: 250, title: "Outreach pro", blurb: "Two hundred fifty. Keep quality high as you scale." },
+  { at: 500, title: "Legend", blurb: "Five hundred outreaches. You’re in rare company." },
+];
 
 export function buildAnalyticsSummary(
   store: Store,
@@ -19,28 +32,32 @@ export function buildAnalyticsSummary(
   const active = store.listActiveCandidates();
   const goal = store.getAnalyticsGoalSettings();
   const tzOffsetMinutes = options.tzOffsetMinutes ?? -new Date().getTimezoneOffset();
-  const daily = buildDailyBuckets(candidates, events, 14, localDate, tzOffsetMinutes);
+  const candidateById = new Map(candidates.map((candidate) => [candidate.id, candidate] as const));
+  const daily = buildDailyBuckets(candidates, events, candidateById, 14, localDate, tzOffsetMinutes);
 
   const todayBucket = daily.find((d) => d.date === localDate) ?? emptyDay(localDate);
   const weekDates = lastNDates(7, localDate);
+  const weekCompanies = new Set<string>();
   const week = weekDates.reduce(
     (acc, date) => {
       const bucket = daily.find((d) => d.date === date) ?? emptyDay(date);
       acc.sent += bucket.sent;
-      acc.opened += bucket.opened;
-      acc.clicked += bucket.clicked;
-      acc.bounced += bucket.bounced;
       acc.discovered += bucket.discovered;
       return acc;
     },
-    { sent: 0, opened: 0, clicked: 0, bounced: 0, discovered: 0 },
+    { sent: 0, discovered: 0, companiesReached: 0 },
   );
+  for (const event of events) {
+    if (event.type !== "send") continue;
+    const date = toOffsetYmd(event.createdAt, tzOffsetMinutes);
+    if (!weekDates.includes(date)) continue;
+    const company = resolveEventCompany(event, candidateById);
+    if (company) weekCompanies.add(company.toLowerCase());
+  }
+  week.companiesReached = weekCompanies.size;
 
-  const sent = countEvents(events, "send");
-  const opened = countEvents(events, "open");
-  const clicked = countEvents(events, "click");
-  const bounced = countEvents(events, "bounce");
-  const replies = countEvents(events, "reply");
+  const sendEvents = events.filter((event) => event.type === "send");
+  const sent = sendEvents.length;
   const emailFound = candidates.filter((c) => Boolean(c.email?.includes("@"))).length;
   const discovered = emailFound;
   const companiesTouched = new Set(
@@ -48,68 +65,47 @@ export function buildAnalyticsSummary(
       .filter((c) => c.email || SETTLED.has(c.status) || (c.emailCandidates?.length ?? 0) > 0)
       .map((c) => resolveCandidateCompany(c).toLowerCase()),
   ).size;
-  const recruitersContacted = new Set(
-    events.filter((e) => e.type === "send").map((e) => e.candidateId),
-  ).size;
-
-  const discoveryAttempted = candidates.filter(
-    (c) => Boolean(c.lastDiscoveryAttemptAt) || c.status === "email_guessed" || c.status === "email_not_found" || Boolean(c.email),
-  ).length;
-  const discoveryFound = candidates.filter((c) => Boolean(c.email?.includes("@"))).length;
-
-  const funnel = {
-    collected: candidates.length,
-    emailFound,
-    sent,
-    opened,
-    clicked,
-    bounced,
-  };
+  const recruitersContacted = new Set(sendEvents.map((e) => e.candidateId)).size;
 
   const companies = buildCompanyLeaderboard(candidates, events);
   const health = buildHealthWarnings({
-    sent,
-    opened,
-    bounced,
-    discoveryAttempted,
-    discoveryFound,
     sentToday: todayBucket.sent,
     goal: goal.dailySendGoal,
-    localDate,
     localHour: options.localHour ?? new Date().getHours(),
+    readyToSend: active.filter((c) => c.email && !SETTLED.has(c.status)).length,
+    companiesThisWeek: week.companiesReached,
   });
 
   const sentToday = todayBucket.sent;
   const met = sentToday >= goal.dailySendGoal && goal.dailySendGoal > 0;
   const streak = computeStreak(goal.goalMetDates, localDate, met);
   const shouldCelebrate = met && goal.lastGoalCelebratedOn !== localDate;
+  const longestStreak = computeLongestStreak(goal.goalMetDates, localDate, met);
+  const usage = buildUsageFun(store, events, candidates, longestStreak);
+  const hourly = buildHourlyBuckets(sendEvents, tzOffsetMinutes);
+  const cumulativeSends = buildCumulativeSends(daily);
+  const queueBreakdown = buildQueueBreakdown(store);
 
   return {
     today: {
       sent: todayBucket.sent,
-      opened: todayBucket.opened,
-      clicked: todayBucket.clicked,
-      bounced: todayBucket.bounced,
       discovered: todayBucket.discovered,
+      companiesReached: todayBucket.companiesReached,
       date: localDate,
     },
     week,
     allTime: {
       sent,
-      opened,
-      clicked,
-      bounced,
-      replies,
       discovered,
       collected: candidates.length,
       companiesTouched,
       recruitersContacted,
-      openRate: rate(opened, sent),
-      clickRate: rate(clicked, sent),
-      bounceRate: rate(bounced, sent),
-      discoveryHitRate: rate(discoveryFound, discoveryAttempted),
     },
-    funnel,
+    funnel: {
+      collected: candidates.length,
+      emailFound,
+      sent,
+    },
     activeBatch: {
       total: active.length,
       readyToSend: active.filter((c) => c.email && !SETTLED.has(c.status)).length,
@@ -122,7 +118,12 @@ export function buildAnalyticsSummary(
       count: u.count,
     })),
     daily,
+    cumulativeSends,
+    hourly,
+    queueBreakdown,
+    usage,
     companies,
+    motivation: buildMotivation(sent, companiesTouched, streak),
     health,
     goal,
     goalProgress: {
@@ -172,24 +173,173 @@ export function updateAnalyticsGoal(
   return store.setAnalyticsGoalSettings(next);
 }
 
+function buildMotivation(sent: number, companiesTouched: number, streak: number): AnalyticsMotivation {
+  let current = MILESTONES[0]!;
+  let next = MILESTONES[1] ?? MILESTONES[0]!;
+  for (let index = 0; index < MILESTONES.length; index += 1) {
+    const milestone = MILESTONES[index]!;
+    if (sent >= milestone.at) {
+      current = milestone;
+      next = MILESTONES[index + 1] ?? {
+        at: milestone.at + 100,
+        title: milestone.title,
+        blurb: "Keep the streak alive and open a new company.",
+      };
+    }
+  }
+  const span = Math.max(1, next.at - current.at);
+  const progressToNext = Math.min(1, Math.max(0, (sent - current.at) / span));
+  const companyNudge =
+    companiesTouched > 0
+      ? ` ${companiesTouched} compan${companiesTouched === 1 ? "y" : "ies"} in your map.`
+      : "";
+  const streakNudge = streak > 1 ? ` ${streak}-day streak.` : "";
+  return {
+    level: Math.max(1, MILESTONES.findIndex((item) => item.at === current.at) + 1),
+    title: current.title,
+    blurb: `${current.blurb}${companyNudge}${streakNudge}`,
+    nextMilestone: next.at,
+    progressToNext,
+  };
+}
+
+function buildUsageFun(
+  store: Store,
+  events: TrackingEvent[],
+  candidates: RecruiterCandidate[],
+  longestStreak: number,
+): AnalyticsSummary["usage"] {
+  const llmEvents = store.listLlmUsageEvents();
+  const companyContent = store.listCompanyContent().filter((item) => item.source === "generated");
+  let geminiCalls = llmEvents.length;
+  let charactersGenerated = llmEvents.reduce((sum, event) => sum + event.responseChars, 0);
+  let charactersPrompted = llmEvents.reduce((sum, event) => sum + event.promptChars, 0);
+  let geminiCallsEstimated = false;
+
+  if (geminiCalls === 0 && companyContent.length > 0) {
+    geminiCallsEstimated = true;
+    geminiCalls = companyContent.length;
+    for (const item of companyContent) {
+      charactersGenerated += item.subject.length + item.body.length;
+      // Rough prompt size: samples + job context aren't stored; use ~4× output as a stand-in.
+      charactersPrompted += Math.round((item.subject.length + item.body.length) * 4);
+    }
+  }
+
+  const wordsWrittenApprox = Math.round(
+    companyContent.reduce((sum, item) => sum + item.subject.split(/\s+/).filter(Boolean).length + item.body.split(/\s+/).filter(Boolean).length, 0),
+  );
+  const sendDays = new Set(
+    events.filter((event) => event.type === "send").map((event) => event.createdAt.slice(0, 10)),
+  );
+  const activeDays = sendDays.size;
+  const sent = events.filter((event) => event.type === "send").length;
+  const content = store.getContent();
+  const linkedInCaptureSaves = store
+    .listLinkedInCaptureJobs()
+    .reduce((sum, job) => sum + (job.savedCount ?? 0), 0);
+
+  return {
+    geminiCalls,
+    geminiCallsEstimated,
+    charactersGenerated,
+    charactersPrompted,
+    wordsWrittenApprox,
+    companiesGenerated: companyContent.length,
+    resumesUploaded: content?.resumes?.length ?? 0,
+    profilesSaved: candidates.length,
+    linkedInCaptureSaves,
+    emailSamples: store.listEmailSamples().length,
+    draftsCreated: events.filter((event) => event.type === "draft").length,
+    activeDays,
+    avgSendsPerActiveDay: activeDays > 0 ? Number((sent / activeDays).toFixed(1)) : 0,
+    longestStreak,
+  };
+}
+
+function buildHourlyBuckets(
+  sendEvents: TrackingEvent[],
+  tzOffsetMinutes: number,
+): AnalyticsSummary["hourly"] {
+  const counts = Array.from({ length: 24 }, () => 0);
+  for (const event of sendEvents) {
+    const date = new Date(event.createdAt);
+    if (Number.isNaN(date.getTime())) continue;
+    const shifted = new Date(date.getTime() + tzOffsetMinutes * 60_000);
+    const hour = shifted.getUTCHours();
+    counts[hour] = (counts[hour] ?? 0) + 1;
+  }
+  return counts.map((sent, hour) => ({ hour, sent }));
+}
+
+function buildCumulativeSends(daily: AnalyticsSummary["daily"]): AnalyticsSummary["cumulativeSends"] {
+  let total = 0;
+  return daily.map((day) => {
+    total += day.sent;
+    return { date: day.date, total };
+  });
+}
+
+function buildQueueBreakdown(store: Store): AnalyticsSummary["queueBreakdown"] {
+  const breakdown = { scheduled: 0, sent: 0, failed: 0, paused: 0, other: 0 };
+  for (const item of store.listSendQueue()) {
+    if (item.status === "scheduled" || item.status === "queued") {
+      breakdown.scheduled += 1;
+    } else if (item.status === "sent") {
+      breakdown.sent += 1;
+    } else if (item.status === "failed") {
+      breakdown.failed += 1;
+    } else if (item.status === "paused") {
+      breakdown.paused += 1;
+    } else {
+      breakdown.other += 1;
+    }
+  }
+  return breakdown;
+}
+
+function computeLongestStreak(goalMetDates: string[], localDate: string, metToday: boolean): number {
+  const set = new Set(goalMetDates);
+  if (metToday) set.add(localDate);
+  if (set.size === 0) return 0;
+  const sorted = [...set].sort();
+  let best = 1;
+  let run = 1;
+  for (let index = 1; index < sorted.length; index += 1) {
+    const prev = sorted[index - 1]!;
+    const curr = sorted[index]!;
+    if (shiftDate(prev, 1) === curr) {
+      run += 1;
+      best = Math.max(best, run);
+    } else {
+      run = 1;
+    }
+  }
+  return best;
+}
+
 function buildDailyBuckets(
   candidates: RecruiterCandidate[],
   events: TrackingEvent[],
+  candidateById: Map<string, RecruiterCandidate>,
   days: number,
   localDate: string,
   tzOffsetMinutes: number,
 ): AnalyticsSummary["daily"] {
   const dates = lastNDates(days, localDate);
   const buckets = new Map(dates.map((date) => [date, emptyDay(date)]));
+  const companiesByDay = new Map(dates.map((date) => [date, new Set<string>()] as const));
 
   for (const event of events) {
+    if (event.type !== "send") continue;
     const date = toOffsetYmd(event.createdAt, tzOffsetMinutes);
     const bucket = buckets.get(date);
     if (!bucket) continue;
-    if (event.type === "send") bucket.sent += 1;
-    if (event.type === "open") bucket.opened += 1;
-    if (event.type === "click") bucket.clicked += 1;
-    if (event.type === "bounce") bucket.bounced += 1;
+    bucket.sent += 1;
+    const company = resolveEventCompany(event, candidateById);
+    if (company) {
+      companiesByDay.get(date)?.add(company.toLowerCase());
+    }
   }
 
   for (const candidate of candidates) {
@@ -202,7 +352,13 @@ function buildDailyBuckets(
     }
   }
 
-  return dates.map((date) => buckets.get(date) ?? emptyDay(date));
+  return dates.map((date) => {
+    const bucket = buckets.get(date) ?? emptyDay(date);
+    return {
+      ...bucket,
+      companiesReached: companiesByDay.get(date)?.size ?? 0,
+    };
+  });
 }
 
 function buildCompanyLeaderboard(
@@ -216,9 +372,11 @@ function buildCompanyLeaderboard(
   }
   const rows = [...byCompany.entries()].map(([companyName, recruiters]) => {
     const ids = new Set(recruiters.map((r) => r.id));
-    const companyEvents = events.filter((e) => ids.has(e.candidateId));
-    const sent = countEvents(companyEvents, "send");
-    const opened = countEvents(companyEvents, "open");
+    const sendEvents = events
+      .filter((e) => e.type === "send" && ids.has(e.candidateId))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const sent = sendEvents.length;
+    const peopleContacted = new Set(sendEvents.map((e) => e.candidateId)).size;
     const withEmail = recruiters.filter((r) => r.email?.includes("@") || (r.emailCandidates?.length ?? 0) > 0).length;
     const readyUnsent = recruiters.filter((r) => {
       const hasEmail = Boolean(r.email?.includes("@")) || (r.emailCandidates?.some((g) => g.email?.includes("@")) ?? false);
@@ -227,41 +385,46 @@ function buildCompanyLeaderboard(
     return {
       companyName,
       sent,
-      opened,
-      openRate: rate(opened, sent),
+      peopleContacted,
       readyUnsent,
       withEmail,
+      firstSentAt: sendEvents[0]?.createdAt,
+      lastSentAt: sendEvents.at(-1)?.createdAt,
     };
   });
   return rows
     .filter((row) => row.sent > 0 || row.withEmail > 0)
-    .sort((a, b) => b.sent - a.sent || b.withEmail - a.withEmail)
-    .slice(0, 15);
+    .sort((a, b) => b.sent - a.sent || b.peopleContacted - a.peopleContacted || b.withEmail - a.withEmail)
+    .slice(0, 20);
+}
+
+function resolveEventCompany(
+  event: TrackingEvent,
+  candidateById: Map<string, RecruiterCandidate>,
+): string | undefined {
+  if (event.company?.trim()) {
+    return event.company.trim();
+  }
+  const candidate = candidateById.get(event.candidateId);
+  return candidate ? resolveCandidateCompany(candidate) : undefined;
 }
 
 function buildHealthWarnings(input: {
-  sent: number;
-  opened: number;
-  bounced: number;
-  discoveryAttempted: number;
-  discoveryFound: number;
   sentToday: number;
   goal: number;
-  localDate: string;
   localHour: number;
+  readyToSend: number;
+  companiesThisWeek: number;
 }): string[] {
   const warnings: string[] = [];
-  if (input.sent >= 5 && rate(input.bounced, input.sent) > 0.05) {
-    warnings.push(`Bounce rate is ${(rate(input.bounced, input.sent) * 100).toFixed(0)}% — check domains and suppression.`);
-  }
-  if (input.sent >= 10 && rate(input.opened, input.sent) < 0.2) {
-    warnings.push(`Open rate is ${(rate(input.opened, input.sent) * 100).toFixed(0)}% on ${input.sent} sends — subject lines may need work.`);
-  }
-  if (input.discoveryAttempted >= 10 && rate(input.discoveryFound, input.discoveryAttempted) < 0.25) {
-    warnings.push(`Discovery hit rate is ${(rate(input.discoveryFound, input.discoveryAttempted) * 100).toFixed(0)}% — consider SalesQL for misses.`);
-  }
   if (input.localHour >= 12 && input.sentToday === 0 && input.goal > 0) {
     warnings.push(`No sends yet today — daily goal is ${input.goal}.`);
+  }
+  if (input.readyToSend >= 5 && input.sentToday === 0) {
+    warnings.push(`${input.readyToSend} ready recruiters are waiting in today’s batch.`);
+  }
+  if (input.companiesThisWeek === 0 && input.localHour >= 15) {
+    warnings.push("No companies reached this week yet — schedule a small batch.");
   }
   return warnings;
 }
@@ -273,7 +436,6 @@ function computeStreak(goalMetDates: string[], localDate: string, metToday: bool
   }
   let streak = 0;
   let cursor = localDate;
-  // If today not met, streak counts consecutive days ending yesterday
   if (!set.has(localDate)) {
     cursor = shiftDate(localDate, -1);
   }
@@ -284,17 +446,8 @@ function computeStreak(goalMetDates: string[], localDate: string, metToday: bool
   return streak;
 }
 
-function countEvents(events: TrackingEvent[], type: TrackingEvent["type"]): number {
-  return events.filter((event) => event.type === type).length;
-}
-
-function rate(numerator: number, denominator: number): number {
-  if (denominator <= 0) return 0;
-  return numerator / denominator;
-}
-
 function emptyDay(date: string) {
-  return { date, sent: 0, opened: 0, clicked: 0, bounced: 0, discovered: 0 };
+  return { date, sent: 0, discovered: 0, companiesReached: 0 };
 }
 
 export function localYmd(date = new Date()): string {
@@ -317,21 +470,16 @@ export function toOffsetYmd(iso: string, tzOffsetMinutes: number): string {
   return `${y}-${m}-${d}`;
 }
 
-function toLocalYmd(iso: string): string {
-  return toOffsetYmd(iso, -new Date().getTimezoneOffset());
-}
-
-function lastNDates(n: number, endDate: string): string[] {
-  const dates: string[] = [];
-  for (let i = n - 1; i >= 0; i -= 1) {
-    dates.push(shiftDate(endDate, -i));
-  }
-  return dates;
+function lastNDates(days: number, endDate: string): string[] {
+  return Array.from({ length: days }, (_, index) => shiftDate(endDate, -(days - 1 - index)));
 }
 
 function shiftDate(ymd: string, deltaDays: number): string {
   const [y, m, d] = ymd.split("-").map(Number);
-  const date = new Date(y!, (m ?? 1) - 1, d ?? 1);
-  date.setDate(date.getDate() + deltaDays);
-  return localYmd(date);
+  const date = new Date(Date.UTC(y!, (m ?? 1) - 1, d ?? 1));
+  date.setUTCDate(date.getUTCDate() + deltaDays);
+  const yy = date.getUTCFullYear();
+  const mm = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(date.getUTCDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
 }

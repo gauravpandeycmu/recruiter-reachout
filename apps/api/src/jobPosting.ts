@@ -1,4 +1,5 @@
 import { extractGeminiResponseText, extractJsonObjectText, type GeminiResponse } from "./geminiResponse.js";
+import { recordLlmUsage } from "./llmUsage.js";
 
 /**
  * Fetch a public job posting URL and extract a concise job description.
@@ -701,7 +702,14 @@ async function callGemini(prompt: string, apiKey: string, model: string): Promis
 
     if (response.ok) {
       const payload = (await response.json()) as GeminiResponse;
-      return extractGeminiResponseText(payload);
+      const text = extractGeminiResponseText(payload);
+      recordLlmUsage({
+        purpose: "job_extract",
+        model,
+        promptChars: prompt.length,
+        responseChars: text.length,
+      });
+      return text;
     }
 
     const body = await response.text();

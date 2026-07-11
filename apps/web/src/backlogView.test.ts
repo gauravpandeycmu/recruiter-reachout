@@ -97,8 +97,7 @@ describe("backlog dashboard view helpers", () => {
       companies: 1,
       recruiters: 1,
       sent: 1,
-      opened: 1,
-      clicked: 0,
+      withEmail: 1,
     });
   });
 });
