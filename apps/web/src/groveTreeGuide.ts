@@ -107,7 +107,7 @@ export const GROVE_TREE_GUIDE: GroveTreeGuideEntry[] = [
     id: "candyfloss",
     name: "Candyfloss",
     colors: ["#ff7eb9", "#c5a3ff"],
-    fact: "Pastel cloud on a stick. Scientifically questionable. Emotionally correct. Soft bob included.",
+    fact: "Pastel cloud on an actual candy-stripe stick, dusted with sugar sparkle. Scientifically questionable, emotionally correct.",
   },
   {
     id: "stormtree",

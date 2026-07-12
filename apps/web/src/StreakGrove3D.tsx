@@ -2595,8 +2595,28 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     // Frost shimmer drifting up through the shards
     g.add(makeRisingParticles("#d8f6ff", 8, 0.9, 1.6, 4.1, 0.06, seed + 17));
   } else if (species === "candyfloss") {
-    // Pastel cotton-candy clouds on a thin stick
-    g.add(makeTrunk(0.05, 0.1, 2.2, birchTrunkMat));
+    // Pastel cotton-candy clouds on a literal candy-stripe stick
+    const stripeH = 2.2 / 6;
+    for (let i = 0; i < 6; i += 1) {
+      const stripe = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.05 + (5 - i) * 0.008, 0.05 + (6 - i) * 0.008, stripeH, 8),
+        new THREE.MeshStandardMaterial({
+          color: new THREE.Color(i % 2 === 0 ? "#ffffff" : "#ff5a7a"),
+          roughness: 0.35,
+        }),
+      );
+      stripe.position.y = stripeH / 2 + i * stripeH;
+      stripe.castShadow = true;
+      g.add(stripe);
+    }
+    const sugarGlow = makeGlow("#ffb8d9", 2.9, 0.24);
+    sugarGlow.position.set(0, 3.1, 0);
+    g.add(sugarGlow);
+    for (let i = 0; i < 3; i += 1) {
+      const sparkle = makeGlow("#ffffff", 0.4, 0.85);
+      sparkle.position.set((rand() - 0.5) * 2.0, 2.6 + rand() * 1.2, (rand() - 0.5) * 1.6);
+      g.add(sparkle);
+    }
     const puff = (r: number, y: number, x: number, z: number, seedN: number) => {
       const cloud = makeBlob(r, species, seedN, 0.55);
       cloud.position.set(x, y, z);
