@@ -2401,8 +2401,20 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
       culm.rotation.z = (rand() - 0.5) * 0.08;
       culm.castShadow = true;
       g.add(culm);
+      // Node rings — the thing that makes bamboo read as bamboo
+      const nodeMat = new THREE.MeshStandardMaterial({ color: new THREE.Color("#4a7a2e"), roughness: 0.8 });
+      for (let n = 0; n < 4; n += 1) {
+        const node = new THREE.Mesh(new THREE.CylinderGeometry(0.062, 0.062, 0.035, 6), nodeMat);
+        node.position.set(culm.position.x, 0.5 + n * 0.8 + rand() * 0.15, culm.position.z);
+        node.rotation.z = culm.rotation.z;
+        node.castShadow = false;
+        g.add(node);
+      }
       const tip = makeBlob(0.28 + rand() * 0.12, species, seed + i, 1.3);
       tip.position.set(culm.position.x, 3.4 + rand() * 0.5, culm.position.z);
+      tip.userData.animate = "bob";
+      tip.userData.phase = rand() * Math.PI * 2;
+      tip.userData.baseY = tip.position.y;
       g.add(tip);
     }
   } else if (species === "jacaranda") {
@@ -3131,6 +3143,16 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     g.add(mist);
   } else if (species === "birch") {
     g.add(makeTrunk(0.06, 0.12, 3.0, birchTrunkMat));
+    // Signature black bark bands
+    const bandMat = new THREE.MeshStandardMaterial({ color: new THREE.Color("#2e2a24"), roughness: 0.9 });
+    for (let i = 0; i < 4; i += 1) {
+      const yb = 0.5 + i * 0.62 + rand() * 0.15;
+      const rb = lerp(0.12, 0.06, yb / 3.0) + 0.006;
+      const band = new THREE.Mesh(new THREE.CylinderGeometry(rb, rb, 0.07 + rand() * 0.05, 8), bandMat);
+      band.position.y = yb;
+      band.castShadow = false;
+      g.add(band);
+    }
     const b1 = makeBlob(0.95, species, seed + 1);
     b1.position.set(0.3, 3.25, 0.1);
     const b2 = makeBlob(0.78, species, seed + 2);
