@@ -2371,6 +2371,15 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     );
     crown.position.y = 3.45;
     g.add(crown);
+    // Coconut cluster tucked under the fronds
+    const cocoMat = new THREE.MeshStandardMaterial({ color: new THREE.Color("#6a4a26"), roughness: 0.85 });
+    for (let i = 0; i < 3; i += 1) {
+      const coco = new THREE.Mesh(new THREE.SphereGeometry(0.13, 7, 7), cocoMat);
+      const a = rand() * Math.PI * 2;
+      coco.position.set(Math.cos(a) * 0.28, 3.28 - rand() * 0.1, Math.sin(a) * 0.28);
+      coco.castShadow = false;
+      g.add(coco);
+    }
   } else if (species === "baobab") {
     // Massive bottle trunk + sparse high canopy
     const bole = new THREE.Mesh(
@@ -3186,15 +3195,29 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     const s2 = makeBlob(0.7, species, seed + 3);
     s2.position.set(-0.8, 2.0, -0.2);
     g.add(main, s1, s2);
-    // Tiny fruit dots
+    // Ripe apples with a highlight, plus white blossom clusters
     for (let i = 0; i < 6; i += 1) {
       const fruit = new THREE.Mesh(
-        new THREE.SphereGeometry(0.07, 5, 5),
-        new THREE.MeshStandardMaterial({ color: new THREE.Color("#c23a2e"), roughness: 0.7 }),
+        new THREE.SphereGeometry(0.095, 7, 7),
+        new THREE.MeshStandardMaterial({
+          color: new THREE.Color("#d63a2a"),
+          roughness: 0.35,
+          emissive: new THREE.Color("#5a0d08"),
+          emissiveIntensity: 0.25,
+        }),
       );
       fruit.position.set((rand() - 0.5) * 2.0, 1.7 + rand() * 1.1, (rand() - 0.5) * 2.0);
       fruit.castShadow = false;
       g.add(fruit);
+    }
+    for (let i = 0; i < 5; i += 1) {
+      const blossom = new THREE.Mesh(
+        new THREE.SphereGeometry(0.055, 5, 5),
+        new THREE.MeshStandardMaterial({ color: new THREE.Color("#fff4f8"), roughness: 0.6 }),
+      );
+      blossom.position.set((rand() - 0.5) * 2.2, 2.0 + rand() * 1.0, (rand() - 0.5) * 2.2);
+      blossom.castShadow = false;
+      g.add(blossom);
     }
   } else if (species === "dogwood") {
     g.add(makeTrunk(0.08, 0.18, 1.45, trunkMat));
