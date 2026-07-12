@@ -143,7 +143,7 @@ export const GROVE_TREE_GUIDE: GroveTreeGuideEntry[] = [
     id: "bubbletree",
     name: "Bubble Tree",
     colors: ["#7ad7ff", "#d6f4ff"],
-    fact: "Produces bubbles instead of leaves. Childhood energy with a productivity podcast playing nearby.",
+    fact: "Produces actual soap bubbles — the big ones shimmer with rainbow film before they drift off. Childhood energy, physically based.",
   },
   {
     id: "moontree",

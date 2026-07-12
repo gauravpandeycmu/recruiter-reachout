@@ -2777,18 +2777,37 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     }
   } else if (species === "bubbletree") {
     g.add(makeTrunk(0.06, 0.12, 1.7, trunkMat));
+    const aquaGlow = makeGlow("#7ad7ff", 2.6, 0.24);
+    aquaGlow.position.set(0, 2.6, 0);
+    g.add(aquaGlow);
     for (let i = 0; i < 12; i += 1) {
+      const r = 0.14 + rand() * 0.18;
+      // Larger bubbles get real soap-film iridescence
       const bubble = new THREE.Mesh(
-        new THREE.SphereGeometry(0.14 + rand() * 0.18, 8, 8),
-        new THREE.MeshStandardMaterial({
-          color: new THREE.Color("#b8ecff"),
-          emissive: new THREE.Color("#4ec8ff"),
-          emissiveIntensity: 0.25,
-          transparent: true,
-          opacity: 0.55,
-          roughness: 0.15,
-          metalness: 0.1,
-        }),
+        new THREE.SphereGeometry(r, 10, 10),
+        r > 0.22
+          ? new THREE.MeshPhysicalMaterial({
+              color: new THREE.Color("#dff6ff"),
+              transparent: true,
+              opacity: 0.5,
+              roughness: 0.05,
+              metalness: 0,
+              transmission: 0.55,
+              thickness: 0.1,
+              ior: 1.1,
+              iridescence: 1,
+              iridescenceIOR: 1.33,
+              iridescenceThicknessRange: [120, 480],
+            })
+          : new THREE.MeshStandardMaterial({
+              color: new THREE.Color("#b8ecff"),
+              emissive: new THREE.Color("#4ec8ff"),
+              emissiveIntensity: 0.25,
+              transparent: true,
+              opacity: 0.55,
+              roughness: 0.15,
+              metalness: 0.1,
+            }),
       );
       bubble.position.set((rand() - 0.5) * 1.6, 1.4 + rand() * 2.2, (rand() - 0.5) * 1.6);
       bubble.castShadow = false;
