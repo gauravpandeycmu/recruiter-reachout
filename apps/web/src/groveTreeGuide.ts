@@ -113,7 +113,7 @@ export const GROVE_TREE_GUIDE: GroveTreeGuideEntry[] = [
     id: "stormtree",
     name: "Storm Tree",
     colors: ["#1a1a2e", "#7ec8ff"],
-    fact: "Keeps a weather app in its canopy. Lightning bolts for personality. Do not stand under it in loafers.",
+    fact: "Personal thunderhead with zigzag lightning and its own drizzle radius. Do not stand under it in loafers.",
   },
   {
     id: "heartwood",

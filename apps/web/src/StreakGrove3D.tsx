@@ -1895,6 +1895,7 @@ function animateTreeParts(root: THREE.Object3D, elapsed: number, delta: number) 
       for (let i = 0; i < attr.count; i += 1) {
         let y = attr.getY(i) + delta * speeds[i]!;
         if (y > topY) y = botY;
+        if (y < botY) y = topY;
         attr.setXYZ(
           i,
           attr.getX(i) + Math.sin(elapsed * 2.4 + seeds[i]! * 7) * delta * 0.22,
@@ -2250,6 +2251,7 @@ function makeRisingParticles(
   topY: number,
   size: number,
   seed: number,
+  fall = false,
 ): THREE.Points {
   const rand = mulberry32(seed);
   const pos = new Float32Array(count * 3);
@@ -2261,7 +2263,7 @@ function makeRisingParticles(
     pos[i * 3] = Math.cos(a) * r;
     pos[i * 3 + 1] = botY + rand() * (topY - botY);
     pos[i * 3 + 2] = Math.sin(a) * r;
-    speeds[i] = 0.35 + rand() * 0.55;
+    speeds[i] = (0.35 + rand() * 0.55) * (fall ? -2.6 : 1);
     seeds[i] = rand() * Math.PI * 2;
   }
   const geo = new THREE.BufferGeometry();
@@ -2604,28 +2606,50 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
       puff(0.7, 2.6, 0.35, 0.55, seed + 5),
     );
   } else if (species === "stormtree") {
-    // Dark canopy + flickering lightning bolts
+    // Brooding thunderhead — stacked storm cloud, zigzag bolts, its own drizzle
     g.add(makeTrunk(0.1, 0.22, 2.1, trunkMat));
     const cloud = makeBlob(1.5, species, seed + 1, 0.55);
     cloud.position.set(0, 2.9, 0);
-    g.add(cloud);
-    for (let i = 0; i < 5; i += 1) {
-      const bolt = new THREE.Mesh(
-        new THREE.BoxGeometry(0.06, 1.1 + rand() * 0.6, 0.06),
-        new THREE.MeshStandardMaterial({
-          color: new THREE.Color("#e8f4ff"),
-          emissive: new THREE.Color("#7ec8ff"),
-          emissiveIntensity: 1.8,
-          roughness: 0.2,
-        }),
-      );
-      bolt.position.set((rand() - 0.5) * 1.6, 1.6 + rand() * 0.8, (rand() - 0.5) * 1.6);
-      bolt.rotation.z = (rand() - 0.5) * 0.5;
-      bolt.castShadow = false;
-      bolt.userData.animate = "lightning";
-      bolt.userData.phase = rand() * Math.PI * 2;
+    const cloud2 = makeBlob(1.0, species, seed + 5, 0.5);
+    cloud2.position.set(0.55, 3.35, 0.2);
+    const cloud3 = makeBlob(0.85, species, seed + 6, 0.5);
+    cloud3.position.set(-0.6, 3.25, -0.2);
+    g.add(cloud, cloud2, cloud3);
+    // Zigzag bolts (three offset segments per bolt) that flash in sync
+    const boltMat = () =>
+      new THREE.MeshStandardMaterial({
+        color: new THREE.Color("#e8f4ff"),
+        emissive: new THREE.Color("#7ec8ff"),
+        emissiveIntensity: 1.8,
+        roughness: 0.2,
+      });
+    for (let i = 0; i < 4; i += 1) {
+      const bolt = new THREE.Group();
+      const phase = rand() * Math.PI * 2;
+      const mat = boltMat();
+      let y = 0;
+      let x = 0;
+      for (let s = 0; s < 3; s += 1) {
+        const segLen = 0.4 + rand() * 0.25;
+        const seg = new THREE.Mesh(new THREE.BoxGeometry(0.055, segLen, 0.055), mat);
+        const tilt = (s % 2 === 0 ? 1 : -1) * (0.35 + rand() * 0.2);
+        seg.position.set(x, y - segLen / 2, 0);
+        seg.rotation.z = tilt;
+        seg.castShadow = false;
+        seg.userData.animate = "lightning";
+        seg.userData.phase = phase; // same phase -> whole bolt flashes together
+        bolt.add(seg);
+        y -= Math.cos(tilt) * segLen;
+        x += Math.sin(tilt) * segLen * -1;
+      }
+      bolt.position.set((rand() - 0.5) * 1.7, 2.55 + rand() * 0.3, (rand() - 0.5) * 1.7);
       g.add(bolt);
     }
+    // Storm glow under the cloud + local drizzle
+    const stormGlow = makeGlow("#7ec8ff", 2.7, 0.28);
+    stormGlow.position.set(0, 2.7, 0);
+    g.add(stormGlow);
+    g.add(makeRisingParticles("#9cc4e4", 16, 1.2, 0.4, 2.3, 0.05, seed + 23, true));
   } else if (species === "heartwood") {
     g.add(makeTrunk(0.08, 0.16, 1.8, trunkMat));
     for (let i = 0; i < 10; i += 1) {
