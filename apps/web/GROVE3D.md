@@ -128,3 +128,32 @@ after the user reported "cloudy at night is not really visible". Findings + fixe
 - Async JS loops that outlive a timed-out tool call keep mutating
   `__groveHourOverride` — keep audit calls atomic (one self-contained IIFE).
 - Another agent's HMR edits reload the page constantly; reinstall helpers per call.
+
+## Species graphics pass — COMPLETE (2026-07-12 session)
+
+All 32 species upgraded (scene meshes + field-guide copy), one commit per tree/group,
+verified via field-guide thumbnail montages + a streak-100 scene stress test (no new
+console errors; pre-existing createRoot HMR noise only).
+
+Shared FX infra (commit "Tree FX infra"): `makeGlow` (cached additive halo sprites),
+`makeRisingParticles` (rising OR falling columns — embers/spores/petals/drizzle),
+animate kinds `glowpulse` / `rising` / `firelight` / `heartbeat`, sprite-safe
+`disposeTreeObject` (sprites share one global geometry — never dispose it).
+
+Highlights: Flame Tree (embers, molten trunk cracks, smoke, seed-gated flickering
+PointLight `seed % 5 < 2`), Crystal (transmissive glass, rotating crown), Storm
+(zigzag synced bolts, local drizzle), Moon (crescents + halos), Void Gate (accretion
+ring, infalling motes), Heartwood (sculpted hearts, heartbeat), Bubble (iridescent
+soap film), naturals (falling-leaf carpets on maple/redmaple/ginkgo/jacaranda/redbud,
+birch bands, bamboo nodes, coconuts, blossoms, seed pods, root flares, pinecones).
+
+Catalog: thumbnails render the REAL mesh, so they auto-update; `fact` copy rewritten
+for every changed species; bump `renderSpeciesThumbnail` cacheKey (`@fx2`) when looks
+change again.
+
+### If perf ever degrades at huge streaks
+- PointLights: only flame trees with `seed % 5 < 2` carry one — tighten the gate first.
+- Particle columns are 7-16 points each; `rising` updates positions per frame — could
+  skip to every 2nd frame like the weather particles if needed.
+- Transmission (crystal/bubble) forces a transparent pre-pass — cap or swap to
+  MeshStandardMaterial if a grove full of them ever chugs.
