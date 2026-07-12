@@ -161,7 +161,7 @@ export const GROVE_TREE_GUIDE: GroveTreeGuideEntry[] = [
     id: "voidgate",
     name: "Void Gate",
     colors: ["#0a0618", "#6b4dff"],
-    fact: "A doorway the forest shouldn’t have. Violet rim, star sparks, soft gravitational gossip.",
+    fact: "A doorway the forest shouldn’t have. Counter-spinning accretion ring, breathing event horizon, and motes that fall in — nothing comes back out.",
   },
   {
     id: "soulbloom",

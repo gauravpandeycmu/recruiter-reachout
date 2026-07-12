@@ -2846,7 +2846,36 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
       }),
     );
     disc.rotation.x = -Math.PI / 2;
+    disc.userData.animate = "voidspark"; // slow event-horizon emissive breathing
+    disc.userData.phase = 1.7;
+    disc.userData.baseY = disc.position.y;
     gate.add(disc);
+    // Counter-rotating accretion ring, tilted off the gate plane
+    const accretion = new THREE.Group();
+    accretion.position.y = 0.12;
+    accretion.rotation.x = 0.18;
+    accretion.userData.animate = "spin";
+    const thinRing = new THREE.Mesh(
+      new THREE.TorusGeometry(1.28, 0.035, 6, 32),
+      new THREE.MeshStandardMaterial({
+        color: new THREE.Color("#b39dff"),
+        emissive: new THREE.Color("#8b5cff"),
+        emissiveIntensity: 1.1,
+        roughness: 0.25,
+        transparent: true,
+        opacity: 0.75,
+      }),
+    );
+    thinRing.rotation.x = Math.PI / 2;
+    accretion.add(thinRing);
+    gate.add(accretion);
+    // Violet halo behind the portal + motes being pulled DOWN into it
+    const voidGlow = makeGlow("#8b5cff", 3.4, 0.38);
+    voidGlow.position.y = 0;
+    gate.add(voidGlow);
+    const motes = makeRisingParticles("#c9b8ff", 10, 0.55, 0.1, 1.9, 0.06, seed + 41, true);
+    motes.position.y = 2.55;
+    g.add(motes);
     for (let i = 0; i < 10; i += 1) {
       const spark = new THREE.Mesh(
         new THREE.SphereGeometry(0.05 + rand() * 0.04, 5, 5),
