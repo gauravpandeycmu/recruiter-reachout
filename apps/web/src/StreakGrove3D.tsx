@@ -3169,10 +3169,11 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     g.add(main, s1, s2);
   } else {
     // oak / maple / redmaple — rounded broad canopies
-    const h = species === "maple" || species === "redmaple" ? 2.0 : 2.15;
+    const isMaple = species === "maple" || species === "redmaple";
+    const h = isMaple ? 2.0 : 2.15;
     g.add(makeTrunk(0.11, 0.28, h, trunkMat));
-    const spread = species === "maple" || species === "redmaple" ? 1.45 : 1.55;
-    const flat = species === "maple" || species === "redmaple" ? 0.82 : 0.9;
+    const spread = isMaple ? 1.45 : 1.55;
+    const flat = isMaple ? 0.82 : 0.9;
     const main = makeBlob(spread, species, seed + 1, flat);
     main.position.set(0, h + spread * 0.65, 0);
     const s1 = makeBlob(spread * 0.58, species, seed + 2);
@@ -3182,6 +3183,38 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     const s3 = makeBlob(spread * 0.4, species, seed + 4);
     s3.position.set(0.08, h + spread * 0.95, -0.12);
     g.add(main, s1, s2, s3);
+    if (isMaple) {
+      // Autumn is always shedding: leaves drift down around the crown
+      const leafHex = species === "redmaple" ? "#e03a24" : "#e8873a";
+      const leaves = makeRisingParticles(leafHex, 9, 1.6, 0.25, h + spread, 0.085, seed + 61, true);
+      (leaves.material as THREE.PointsMaterial).blending = THREE.NormalBlending;
+      g.add(leaves);
+      // A ring of fallen color at the roots
+      const litter = new THREE.Mesh(
+        new THREE.CircleGeometry(1.15, 14),
+        new THREE.MeshStandardMaterial({
+          color: new THREE.Color(leafHex).lerp(new THREE.Color("#5a4025"), 0.45),
+          roughness: 1,
+          transparent: true,
+          opacity: 0.45,
+        }),
+      );
+      litter.rotation.x = -Math.PI / 2;
+      litter.position.y = 0.02;
+      litter.receiveShadow = true;
+      g.add(litter);
+    } else {
+      // Oak: a scatter of acorns tucked under the canopy
+      for (let i = 0; i < 4; i += 1) {
+        const acorn = new THREE.Mesh(
+          new THREE.SphereGeometry(0.06, 6, 6),
+          new THREE.MeshStandardMaterial({ color: new THREE.Color("#8a5a2a"), roughness: 0.7 }),
+        );
+        acorn.position.set((rand() - 0.5) * 1.9, h + rand() * 0.9 - 0.2, (rand() - 0.5) * 1.9);
+        acorn.castShadow = false;
+        g.add(acorn);
+      }
+    }
   }
   g.rotation.y = rand() * Math.PI * 2;
   return g;
