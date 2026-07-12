@@ -83,7 +83,7 @@ export const GROVE_TREE_GUIDE: GroveTreeGuideEntry[] = [
     id: "flametree",
     name: "Flame Tree",
     colors: ["#ff2a00", "#ffcc33"],
-    fact: "Literally 🔥. Flickers, pulses, refuses to be a metaphor. Charred trunk optional, chaos required.",
+    fact: "Literally 🔥. Spits embers, smokes politely, and lights the lawn at night. Charred trunk with molten cracks — chaos, but cozy.",
   },
   {
     id: "jacaranda",

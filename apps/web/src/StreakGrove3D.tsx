@@ -2484,6 +2484,65 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     core.userData.phase = 0;
     core.userData.baseY = 2.15;
     g.add(core);
+    // Glowing cracks snaking up the charred trunk
+    for (let i = 0; i < 4; i += 1) {
+      const crack = new THREE.Mesh(
+        new THREE.BoxGeometry(0.035, 0.5 + rand() * 0.45, 0.035),
+        new THREE.MeshStandardMaterial({
+          color: new THREE.Color("#ff6a00"),
+          emissive: new THREE.Color("#ff8c1a"),
+          emissiveIntensity: 1.6,
+          roughness: 0.4,
+        }),
+      );
+      const a = rand() * Math.PI * 2;
+      const r = 0.13 + rand() * 0.05;
+      crack.position.set(Math.cos(a) * r, 0.5 + rand() * 0.8, Math.sin(a) * r);
+      crack.rotation.z = (rand() - 0.5) * 0.35;
+      crack.rotation.y = a;
+      crack.castShadow = false;
+      crack.userData.animate = "voidspark"; // gentle emissive shimmer
+      crack.userData.phase = rand() * Math.PI * 2;
+      crack.userData.baseY = crack.position.y;
+      g.add(crack);
+    }
+    // Fire halo + hot core glow
+    const halo = makeGlow("#ff7a1a", 3.6, 0.42);
+    halo.position.set(0, 2.5, 0);
+    g.add(halo);
+    const hotGlow = makeGlow("#ffd966", 1.9, 0.6);
+    hotGlow.position.set(0, 2.2, 0);
+    g.add(hotGlow);
+    // Rising embers
+    g.add(makeRisingParticles("#ffb347", 14, 0.75, 1.6, 4.8, 0.09, seed + 31));
+    // Lazy smoke puffs above the blaze
+    for (let i = 0; i < 2; i += 1) {
+      const smoke = new THREE.Sprite(
+        new THREE.SpriteMaterial({
+          map: glowTexture("#3a3a3a"),
+          transparent: true,
+          opacity: 0.2 - i * 0.06,
+          depthWrite: false,
+        }),
+      );
+      smoke.scale.setScalar(1.1 + i * 0.7);
+      smoke.position.set((rand() - 0.5) * 0.5, 4.1 + i * 0.9, (rand() - 0.5) * 0.5);
+      smoke.userData.animate = "bob";
+      smoke.userData.phase = rand() * Math.PI * 2;
+      smoke.userData.baseY = smoke.position.y;
+      g.add(smoke);
+    }
+    // A real light for some flame trees so the lawn glows at night (seed-gated
+    // so a big grove doesn't accumulate dozens of point lights)
+    if (seed % 5 < 2) {
+      const fire = new THREE.PointLight(new THREE.Color("#ff7a29"), 1.5, 9, 2);
+      fire.position.set(0, 2.4, 0);
+      fire.castShadow = false;
+      fire.userData.animate = "firelight";
+      fire.userData.phase = rand() * Math.PI * 2;
+      fire.userData.baseIntensity = 1.5;
+      g.add(fire);
+    }
   } else if (species === "crystal") {
     // Icy shard canopy — geometric, not blobby
     const iceTrunk = new THREE.MeshStandardMaterial({ color: new THREE.Color("#c8d8e8"), roughness: 0.4 });
