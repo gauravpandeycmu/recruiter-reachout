@@ -2752,16 +2752,24 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     }
   } else if (species === "spiraltree") {
     g.add(makeTrunk(0.09, 0.2, 1.9, trunkMat));
+    // A genuine helix: lobes climb and tighten as they rise, whole thing spins
     const swirl = new THREE.Group();
-    swirl.position.y = 2.5;
+    swirl.position.y = 2.15;
     swirl.userData.animate = "spin";
-    for (let i = 0; i < 8; i += 1) {
-      const lobe = makeBlob(0.7, species, seed + i, 0.7);
-      const a = (i / 8) * Math.PI * 2;
-      lobe.position.set(Math.cos(a) * 1.0, Math.sin(i * 0.4) * 0.35, Math.sin(a) * 1.0);
+    for (let i = 0; i < 10; i += 1) {
+      const t = i / 9;
+      const lobe = makeBlob(0.62 - t * 0.3, species, seed + i, 0.75);
+      const a = t * Math.PI * 3.2;
+      const r = 1.05 - t * 0.75;
+      lobe.position.set(Math.cos(a) * r, t * 1.9, Math.sin(a) * r);
       swirl.add(lobe);
     }
     g.add(swirl);
+    // Glowing tip where the spiral resolves
+    const tip = makeGlow("#ffe066", 1.1, 0.7);
+    tip.position.set(0, 4.25, 0);
+    g.add(tip);
+    g.add(makeRisingParticles("#ffd27a", 7, 0.7, 2.0, 4.4, 0.05, seed + 53));
   } else if (species === "ghosttree") {
     // See-through trunk — the whole tree is only half here
     const ghostTrunkMat = new THREE.MeshStandardMaterial({

@@ -131,7 +131,7 @@ export const GROVE_TREE_GUIDE: GroveTreeGuideEntry[] = [
     id: "spiraltree",
     name: "Spiral Tree",
     colors: ["#ff6b00", "#ffe066"],
-    fact: "Canopy on a lazy Susan. Spins because standing still felt too corporate.",
+    fact: "A real helix now — the canopy corkscrews up to a glowing tip while the whole thing slowly rotates. Standing still felt too corporate.",
   },
   {
     id: "ghosttree",
