@@ -2934,6 +2934,26 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
       petal.userData.baseY = petal.position.y;
       g.add(petal);
     }
+    // Spirit halo + soul-light rising through the petals
+    const soulGlow = makeGlow("#b388ff", 3.0, 0.34);
+    soulGlow.position.set(0, 2.6, 0);
+    g.add(soulGlow);
+    g.add(makeRisingParticles("#e4d4ff", 10, 0.8, 1.2, 4.4, 0.06, seed + 43));
+    // Pale mist pooling at the roots
+    const mist = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: glowTexture("#cbb8f0"),
+        transparent: true,
+        opacity: 0.16,
+        depthWrite: false,
+      }),
+    );
+    mist.scale.set(2.6, 0.9, 1);
+    mist.position.set(0, 0.25, 0);
+    mist.userData.animate = "glowpulse";
+    mist.userData.phase = rand() * Math.PI * 2;
+    mist.userData.baseOpacity = 0.16;
+    g.add(mist);
   } else if (species === "birch") {
     g.add(makeTrunk(0.06, 0.12, 3.0, birchTrunkMat));
     const b1 = makeBlob(0.95, species, seed + 1);

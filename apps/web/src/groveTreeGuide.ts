@@ -167,7 +167,7 @@ export const GROVE_TREE_GUIDE: GroveTreeGuideEntry[] = [
     id: "soulbloom",
     name: "Soulbloom",
     colors: ["#b388ff", "#e8d5ff"],
-    fact: "Petals that rise like unanswered prayers. If the meadow had a hush, this would be the hush’s favorite plant.",
+    fact: "Petals rise through a violet halo while mist pools at its roots. The hush of the meadow, now with mood lighting.",
   },
   {
     id: "palm",
