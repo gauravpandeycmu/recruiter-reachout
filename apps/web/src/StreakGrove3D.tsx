@@ -2355,6 +2355,21 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     const rim2 = makeBlob(0.9, species, seed + 3, 0.38);
     rim2.position.set(-0.9, 2.72, -0.15);
     g.add(crown, rim1, rim2);
+    // Seed pods swinging under the flat crown
+    const podMat = new THREE.MeshStandardMaterial({ color: new THREE.Color("#7a5a2e"), roughness: 0.85 });
+    for (let i = 0; i < 4; i += 1) {
+      const pod = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.3, 0.09), podMat);
+      const a = rand() * Math.PI * 2;
+      const r = 0.5 + rand() * 0.9;
+      pod.position.set(Math.cos(a) * r, 2.5 - rand() * 0.15, Math.sin(a) * r);
+      pod.rotation.y = rand() * Math.PI;
+      pod.rotation.z = (rand() - 0.5) * 0.2;
+      pod.castShadow = false;
+      pod.userData.animate = "bob";
+      pod.userData.phase = rand() * Math.PI * 2;
+      pod.userData.baseY = pod.position.y;
+      g.add(pod);
+    }
   } else if (species === "palm") {
     // Tall trunk + long arched fronds (not pancake blobs)
     g.add(makeTrunk(0.09, 0.16, 3.4, cedarTrunkMat));
@@ -2410,6 +2425,26 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     const c3 = makeBlob(0.55, species, seed + 3, 0.7);
     c3.position.set(0.1, 3.95, -0.15);
     g.add(c1, c2, c3);
+    // Root flare hugging the ground + waxy white baobab flowers
+    const flare = new THREE.Mesh(
+      new THREE.TorusGeometry(0.66, 0.16, 6, 12),
+      cedarTrunkMat,
+    );
+    flare.rotation.x = Math.PI / 2;
+    flare.position.y = 0.1;
+    flare.scale.y = 0.6;
+    flare.castShadow = false;
+    flare.receiveShadow = true;
+    g.add(flare);
+    for (let i = 0; i < 4; i += 1) {
+      const flower = new THREE.Mesh(
+        new THREE.SphereGeometry(0.07, 6, 6),
+        new THREE.MeshStandardMaterial({ color: new THREE.Color("#fdf8ec"), roughness: 0.5 }),
+      );
+      flower.position.set((rand() - 0.5) * 1.7, 3.4 + rand() * 0.75, (rand() - 0.5) * 1.5);
+      flower.castShadow = false;
+      g.add(flower);
+    }
   } else if (species === "bamboo") {
     // Cluster of tall thin culms
     for (let i = 0; i < 5; i += 1) {
@@ -2485,6 +2520,14 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
       disc.receiveShadow = true;
       g.add(disc);
     }
+    // Crowning spike — the classic araucaria silhouette finisher
+    const spike = new THREE.Mesh(
+      new THREE.ConeGeometry(0.28, 0.7, 7),
+      new THREE.MeshStandardMaterial({ color: new THREE.Color(CANOPY_COLORS.araucaria[0]), roughness: 0.9 }),
+    );
+    spike.position.y = 4.6;
+    spike.castShadow = false;
+    g.add(spike);
   } else if (species === "redbud") {
     // Fancy early hook — magenta bloom cloud + dense flower flecks
     g.add(makeTrunk(0.09, 0.2, 1.85, trunkMat));
@@ -2513,6 +2556,23 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
       bloom.castShadow = false;
       g.add(bloom);
     }
+    // Magenta petals sift down onto a bloom carpet
+    const rbPetals = makeRisingParticles("#f06292", 8, 1.4, 0.2, 3.2, 0.075, seed + 73, true);
+    (rbPetals.material as THREE.PointsMaterial).blending = THREE.NormalBlending;
+    g.add(rbPetals);
+    const rbCarpet = new THREE.Mesh(
+      new THREE.CircleGeometry(1.1, 14),
+      new THREE.MeshStandardMaterial({
+        color: new THREE.Color("#a83a68"),
+        roughness: 1,
+        transparent: true,
+        opacity: 0.38,
+      }),
+    );
+    rbCarpet.rotation.x = -Math.PI / 2;
+    rbCarpet.position.y = 0.02;
+    rbCarpet.receiveShadow = true;
+    g.add(rbCarpet);
   } else if (species === "flametree") {
     // 🔥 emoji energy — layered teardrop flames, white-hot core, flicker via userData
     const charTrunk = new THREE.MeshStandardMaterial({ color: new THREE.Color("#141010"), roughness: 0.98 });
