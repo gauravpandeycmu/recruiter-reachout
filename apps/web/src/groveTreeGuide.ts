@@ -137,7 +137,7 @@ export const GROVE_TREE_GUIDE: GroveTreeGuideEntry[] = [
     id: "ghosttree",
     name: "Ghost Tree",
     colors: ["#e8eef8", "#ffffff"],
-    fact: "Half here, half vibes. Fades in and out like it forgot whether it’s on the calendar invite.",
+    fact: "Half here, half vibes — even the trunk is translucent now. Stray spirit orbs wander the crown; fog pools below.",
   },
   {
     id: "bubbletree",

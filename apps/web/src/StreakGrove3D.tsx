@@ -2723,7 +2723,41 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     }
     g.add(swirl);
   } else if (species === "ghosttree") {
-    g.add(makeTrunk(0.07, 0.14, 2.0, birchTrunkMat));
+    // See-through trunk — the whole tree is only half here
+    const ghostTrunkMat = new THREE.MeshStandardMaterial({
+      color: new THREE.Color("#dfe8f8"),
+      transparent: true,
+      opacity: 0.55,
+      roughness: 0.5,
+    });
+    g.add(makeTrunk(0.07, 0.14, 2.0, ghostTrunkMat));
+    const spectral = makeGlow("#dce8ff", 2.9, 0.3);
+    spectral.position.set(0, 2.9, 0);
+    g.add(spectral);
+    // Two stray spirit orbs drifting around the crown
+    for (let i = 0; i < 2; i += 1) {
+      const orb = makeGlow("#f4f8ff", 0.7, 0.75);
+      orb.position.set((rand() - 0.5) * 1.8, 2.2 + rand() * 1.4, (rand() - 0.5) * 1.8);
+      orb.userData.animate = "bob";
+      orb.userData.phase = rand() * Math.PI * 2;
+      orb.userData.baseY = orb.position.y;
+      g.add(orb);
+    }
+    // Cold fog pooling at the roots
+    const fog = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: glowTexture("#c6d4ec"),
+        transparent: true,
+        opacity: 0.14,
+        depthWrite: false,
+      }),
+    );
+    fog.scale.set(2.8, 0.8, 1);
+    fog.position.set(0, 0.22, 0);
+    fog.userData.animate = "glowpulse";
+    fog.userData.phase = rand() * Math.PI * 2;
+    fog.userData.baseOpacity = 0.14;
+    g.add(fog);
     for (let i = 0; i < 5; i += 1) {
       const wisp = makeBlob(0.85 - i * 0.08, species, seed + i, 0.9);
       wisp.position.set((rand() - 0.5) * 0.9, 2.3 + i * 0.35, (rand() - 0.5) * 0.9);
