@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Recruiter Reachout",
-  "version": "0.1.4",
+  "version": "2.0.0",
   "description": "Collect recruiter candidates from visible pages and send them to the local outreach dashboard.",
   "action": {
     "default_popup": "popup.html",

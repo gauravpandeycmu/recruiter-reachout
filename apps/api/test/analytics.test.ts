@@ -50,7 +50,7 @@ describe("analytics", () => {
     expect(utc.today.discovered).toBe(0);
   });
 
-  it("celebrates when daily send goal is met and not yet celebrated", async () => {
+  it("celebrates when daily company schedule goal is met and not yet celebrated", async () => {
     const store = await freshStore();
     store.setAnalyticsGoalSettings({
       dailySendGoal: 1,
@@ -60,12 +60,20 @@ describe("analytics", () => {
     const candidate = store.upsertCandidate(
       createCandidate({ fullName: "Jane Doe", email: "jane@acme.com", company: "Acme" }),
     );
-    store.addEvent({
-      ...createEvent(candidate.id, "send"),
+    store.upsertSendQueueItem({
+      id: "q-goal",
+      candidateId: candidate.id,
+      email: "jane@acme.com",
+      confidence: "high",
+      status: "scheduled",
+      scheduledFor: "2026-07-09T20:00:00.000Z",
       createdAt: "2026-07-09T18:00:00.000Z",
+      updatedAt: "2026-07-09T18:00:00.000Z",
+      attempts: 0,
     });
 
     const before = buildAnalyticsSummary(store, "2026-07-09", { tzOffsetMinutes: 0 });
+    expect(before.goalProgress.sentToday).toBe(1);
     expect(before.goalProgress.met).toBe(true);
     expect(before.goalProgress.shouldCelebrate).toBe(true);
 
@@ -91,6 +99,7 @@ describe("analytics", () => {
     const pending = buildAnalyticsSummary(store, "2026-07-09", { tzOffsetMinutes: 0 });
     expect(pending.goalProgress.sendStreak).toBe(3);
     expect(pending.goalProgress.longestSendStreak).toBe(3);
+    expect(pending.goalProgress.activityToday).toBe(false);
 
     // Sending today extends the run.
     store.addEvent({
@@ -99,11 +108,84 @@ describe("analytics", () => {
     });
     const extended = buildAnalyticsSummary(store, "2026-07-09", { tzOffsetMinutes: 0 });
     expect(extended.goalProgress.sendStreak).toBe(4);
+    expect(extended.goalProgress.activityToday).toBe(true);
 
     // A full missed day wipes the streak; the longest run is remembered.
     const lapsed = buildAnalyticsSummary(store, "2026-07-11", { tzOffsetMinutes: 0 });
     expect(lapsed.goalProgress.sendStreak).toBe(0);
     expect(lapsed.goalProgress.longestSendStreak).toBe(4);
+  });
+
+  it("counts scheduling for later as streak activity on the click day", async () => {
+    const store = await freshStore();
+    const candidate = store.upsertCandidate(
+      createCandidate({ fullName: "Jane Doe", email: "jane@acme.com", company: "Acme" }),
+    );
+    store.addEvent({
+      ...createEvent(candidate.id, "send"),
+      createdAt: "2026-07-10T22:00:00.000Z",
+    });
+    store.upsertSendQueueItem({
+      id: "q-1",
+      candidateId: candidate.id,
+      email: "jane@acme.com",
+      confidence: "high",
+      status: "scheduled",
+      scheduledFor: "2026-07-13T18:00:00.000Z",
+      createdAt: "2026-07-11T21:00:00.000Z",
+      updatedAt: "2026-07-11T21:00:00.000Z",
+      attempts: 0,
+    });
+
+    // PDT: send on Jul 10 local, schedule click on Jul 11 local → streak 2.
+    // Daily goal counts distinct companies scheduled today (Acme = 1).
+    const summary = buildAnalyticsSummary(store, "2026-07-11", { tzOffsetMinutes: -420 });
+    expect(summary.goalProgress.sentToday).toBe(1);
+    expect(summary.today.sent).toBe(0);
+    expect(summary.goalProgress.activityToday).toBe(true);
+    expect(summary.goalProgress.sendStreak).toBe(2);
+    expect(summary.goalProgress.longestSendStreak).toBe(2);
+  });
+
+  it("counts one company batch toward the daily goal even with many recipients", async () => {
+    const store = await freshStore();
+    store.setAnalyticsGoalSettings({
+      dailySendGoal: 5,
+      goalMetDates: [],
+      updatedAt: new Date().toISOString(),
+    });
+    const acmeA = store.upsertCandidate(
+      createCandidate({ fullName: "Ada Acme", email: "a@acme.com", company: "Acme" }),
+    );
+    const acmeB = store.upsertCandidate(
+      createCandidate({ fullName: "Ben Acme", email: "b@acme.com", company: "Acme" }),
+    );
+    const beta = store.upsertCandidate(
+      createCandidate({ fullName: "Cara Beta", email: "c@beta.com", company: "Beta" }),
+    );
+    for (const [id, candidateId, email] of [
+      ["q-a", acmeA.id, "a@acme.com"],
+      ["q-b", acmeB.id, "b@acme.com"],
+      ["q-c", beta.id, "c@beta.com"],
+    ] as const) {
+      store.upsertSendQueueItem({
+        id,
+        candidateId,
+        email,
+        confidence: "high",
+        status: "scheduled",
+        scheduledFor: "2026-07-11T20:00:00.000Z",
+        createdAt: "2026-07-11T12:00:00.000Z",
+        updatedAt: "2026-07-11T12:00:00.000Z",
+        attempts: 0,
+      });
+    }
+
+    const summary = buildAnalyticsSummary(store, "2026-07-11", { tzOffsetMinutes: 0 });
+    expect(summary.goalProgress.sentToday).toBe(2);
+    expect(summary.goalProgress.met).toBe(false);
+    expect(summary.daily.find((day) => day.date === "2026-07-11")?.scheduledCompanies).toBe(2);
+    expect(summary.cumulativeSends.at(-1)?.total).toBe(2);
   });
 
   it("counts readyUnsent including emailCandidates-only people", async () => {
@@ -275,16 +357,17 @@ describe("analytics", () => {
       );
     }
     const now = "2026-07-09T12:00:00.000Z";
+    const earlier = "2026-07-08T12:00:00.000Z";
     store.upsertSendQueueItem({
       id: "q-scheduled",
       candidateId: "c1",
       email: "a@acme.com",
       confidence: "high",
       status: "scheduled",
-      scheduledFor: now,
+      scheduledFor: earlier,
       attempts: 0,
-      createdAt: now,
-      updatedAt: now,
+      createdAt: earlier,
+      updatedAt: earlier,
     });
     store.upsertSendQueueItem({
       id: "q-sent",
@@ -292,10 +375,10 @@ describe("analytics", () => {
       email: "b@acme.com",
       confidence: "high",
       status: "sent",
-      scheduledFor: now,
+      scheduledFor: earlier,
       attempts: 0,
-      createdAt: now,
-      updatedAt: now,
+      createdAt: earlier,
+      updatedAt: earlier,
     });
     store.upsertSendQueueItem({
       id: "q-failed",
@@ -321,7 +404,8 @@ describe("analytics", () => {
     });
 
     const summary = buildAnalyticsSummary(store, "2026-07-09", { tzOffsetMinutes: 0, localHour: 15 });
-    expect(summary.health.some((warning) => warning.includes("No sends yet today"))).toBe(true);
+    expect(summary.goalProgress.sentToday).toBe(0);
+    expect(summary.health.some((warning) => warning.includes("No companies scheduled yet today"))).toBe(true);
     expect(summary.health.some((warning) => warning.includes("ready recruiters are waiting"))).toBe(true);
     expect(summary.health.some((warning) => warning.includes("No companies reached this week"))).toBe(true);
     expect(summary.queueBreakdown).toEqual({

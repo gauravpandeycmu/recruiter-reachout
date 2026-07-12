@@ -672,7 +672,7 @@ export class Store {
   getAnalyticsGoalSettings(): AnalyticsGoalSettings {
     return (
       this.getJson<AnalyticsGoalSettings>("analytics_goal_settings", "current") ?? {
-        dailySendGoal: 20,
+        dailySendGoal: 5,
         goalMetDates: [],
         updatedAt: new Date(0).toISOString(),
       }

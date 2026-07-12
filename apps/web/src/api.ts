@@ -40,6 +40,7 @@ export interface UpcomingSendView {
   scheduledFor: string;
   queueStatus: string;
   jobStatus?: string;
+  jobMode?: "send_now" | "schedule";
   subject: string;
   body: string;
   resumeFileName?: string;
@@ -131,9 +132,12 @@ export function getCompanyHistory(query?: string): Promise<CompanyHistoryRespons
 }
 
 export function getAnalytics(localDate?: string): Promise<AnalyticsSummary> {
-  const date = localDate ?? new Date().toISOString().slice(0, 10);
-  const tzOffset = -new Date().getTimezoneOffset();
-  const localHour = new Date().getHours();
+  const now = new Date();
+  const date =
+    localDate ??
+    `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  const tzOffset = -now.getTimezoneOffset();
+  const localHour = now.getHours();
   const q = `?date=${encodeURIComponent(date)}&tzOffset=${tzOffset}&localHour=${localHour}`;
   return request<AnalyticsSummary>(`/api/analytics${q}`);
 }
@@ -338,6 +342,17 @@ export function cancelScheduledSends(input: {
   pendingOnly?: boolean;
 }): Promise<{ jobsCancelled: number; queueCancelled: number }> {
   return request("/api/send-queue/cancel", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function rescheduleQueuedSend(input: {
+  queueItemId: string;
+  scheduledFor?: string;
+  sendNow?: boolean;
+}): Promise<UpcomingSendView | undefined> {
+  return request("/api/send-queue/reschedule", {
     method: "POST",
     body: JSON.stringify(input),
   });

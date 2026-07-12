@@ -97,7 +97,7 @@ describe("POST /api/send-queue/schedule HTTP integration", () => {
     expect(payload.jobs.length).toBe(1);
   });
 
-  it("returns jobs and jobFailures for a batch schedule response", async () => {
+  it("schedules overlapping slots without rejecting on hourly caps", async () => {
     process.env.HOURLY_SEND_LIMIT = "1";
     const first = store.upsertCandidate(
       createCandidate({
@@ -146,8 +146,8 @@ describe("POST /api/send-queue/schedule HTTP integration", () => {
       jobs: unknown[];
       jobFailures?: Array<{ candidateId: string; reason: string }>;
     };
-    expect(payload.jobs).toHaveLength(0);
-    expect(payload.queued).toHaveLength(0);
-    expect(payload.jobFailures).toHaveLength(1);
+    expect(payload.jobs).toHaveLength(1);
+    expect(payload.queued).toHaveLength(1);
+    expect(payload.jobFailures ?? []).toHaveLength(0);
   });
 });

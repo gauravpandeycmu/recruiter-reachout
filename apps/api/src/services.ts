@@ -1093,7 +1093,13 @@ async function validateSendCandidate(
   store: Store,
   candidateId: string,
   targetEmail: string,
-  options?: { sessionStatus?: SetupSessionStatus; scheduledFor?: string },
+  options?: {
+    sessionStatus?: SetupSessionStatus;
+    scheduledFor?: string;
+    excludeJobId?: string;
+    /** Explicit schedules honor the user's times — skip app-side volume caps. */
+    skipPacing?: boolean;
+  },
 ) {
   const candidateForGate = store.listCandidates().find((item) => item.id === candidateId);
   if (!candidateForGate) {
@@ -1108,9 +1114,13 @@ async function validateSendCandidate(
     allCandidates: store.listCandidates(),
     gmailReady,
   });
+  if (options?.skipPacing) {
+    return;
+  }
   const queuedSendEvents: TrackingEvent[] = store
     .listSendJobs()
     .filter((job) => job.status === "pending" || job.status === "in_progress")
+    .filter((job) => !options?.excludeJobId || job.id !== options.excludeJobId)
     .map((job) => ({
       id: `queued-${job.id}`,
       candidateId: job.candidateId,
@@ -1246,7 +1256,10 @@ export async function scheduleSends(
       if (!rendered.to) {
         throw new Error("Candidate needs an email before sending.");
       }
-      await validateSendCandidate(store, item.candidateId, rendered.to, { scheduledFor: item.scheduledFor });
+      await validateSendCandidate(store, item.candidateId, rendered.to, {
+        scheduledFor: item.scheduledFor,
+        skipPacing: mode === "schedule",
+      });
       const payload = buildSendJobPayload(store, {
         candidateId: item.candidateId,
         mode,
@@ -1315,6 +1328,88 @@ export async function cancelScheduledSendsForBatch(
   const result = cancelScheduledSends(store, input);
   await store.save();
   return result;
+}
+
+/** Gap between Send-now bumps so Gmail pacing stays comfortable. */
+const SEND_NOW_GAP_MS = 4 * 60 * 1000;
+
+function nextSendNowAt(store: Store, excludeJobId?: string, now = new Date()): Date {
+  let slot = now.getTime();
+  for (const job of store.listSendJobs()) {
+    if (excludeJobId && job.id === excludeJobId) continue;
+    if (job.status !== "pending" && job.status !== "in_progress") continue;
+    if (job.mode !== "send_now") continue;
+    const when = new Date(job.scheduledFor ?? job.updatedAt ?? job.createdAt).getTime();
+    if (Number.isNaN(when)) continue;
+    slot = Math.max(slot, when + SEND_NOW_GAP_MS);
+  }
+  return new Date(slot);
+}
+
+/** Move one queued send to a new time, or bump it into the send-now pipeline. */
+export async function rescheduleQueuedSend(
+  store: Store,
+  input: { queueItemId: string; scheduledFor?: string; sendNow?: boolean },
+) {
+  const item = store.getSendQueueItem(input.queueItemId);
+  if (!item || (item.status !== "scheduled" && item.status !== "queued")) {
+    throw new Error("Scheduled send not found.");
+  }
+  let job = store
+    .listSendJobs()
+    .find(
+      (entry) =>
+        entry.queueItemId === item.id && (entry.status === "pending" || entry.status === "in_progress"),
+    );
+  if (job?.status === "in_progress") {
+    throw new Error("That send is already in progress — wait for it to finish.");
+  }
+
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const sendNow = Boolean(input.sendNow);
+  const nextAt = sendNow ? nextSendNowAt(store, job?.id, now) : new Date(input.scheduledFor ?? "");
+  if (Number.isNaN(nextAt.getTime())) {
+    throw new Error("Pick a valid date and time.");
+  }
+  if (!sendNow && nextAt.getTime() < now.getTime() - 60_000) {
+    throw new Error("That time is in the past.");
+  }
+
+  await validateSendCandidate(store, item.candidateId, item.email, {
+    scheduledFor: nextAt.toISOString(),
+    excludeJobId: job?.id,
+    skipPacing: !sendNow,
+  });
+
+  const scheduledFor = nextAt.toISOString();
+  store.upsertSendQueueItem({
+    ...item,
+    status: "scheduled",
+    scheduledFor,
+    failureReason: undefined,
+    updatedAt: nowIso,
+  });
+  if (job) {
+    store.upsertSendJob({
+      ...job,
+      mode: sendNow ? "send_now" : "schedule",
+      scheduledFor,
+      status: "pending",
+      failureReason: undefined,
+      updatedAt: nowIso,
+    });
+  } else {
+    const payload = buildSendJobPayload(store, {
+      candidateId: item.candidateId,
+      mode: sendNow ? "send_now" : "schedule",
+      scheduledFor,
+      queueItemId: item.id,
+    });
+    createSendJobFromQueueItem(store, item, payload);
+  }
+  await store.save();
+  return listUpcomingSends(store).find((entry) => entry.queueItemId === item.id);
 }
 
 export async function updateScheduledCompanyBatch(
@@ -1458,6 +1553,8 @@ export interface UpcomingSendView {
   scheduledFor: string;
   queueStatus: string;
   jobStatus?: string;
+  /** pending job mode — send_now items leave the Scheduled tab for the Send progress bar */
+  jobMode?: "send_now" | "schedule";
   subject: string;
   body: string;
   resumeFileName?: string;
@@ -1490,6 +1587,7 @@ export function listUpcomingSends(store: Store): UpcomingSendView[] {
         scheduledFor: item.scheduledFor,
         queueStatus: item.status,
         jobStatus: job?.status,
+        jobMode: job?.mode,
         subject: job?.subject ?? person?.customSubject ?? "",
         body: job?.textBody ?? person?.customBody ?? "",
         resumeFileName: job?.resumeFileName,

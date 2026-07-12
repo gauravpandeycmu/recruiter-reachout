@@ -37,6 +37,7 @@ import {
   updateAnalyticsGoal,
   scheduleSends,
   cancelScheduledSends,
+  rescheduleQueuedSend,
   updateScheduledCompanyBatch,
   retryFailedSends,
   nextDiscoveryCandidate,
@@ -106,7 +107,8 @@ const DISCOVERY_POLL_MS = 2500;
 const IDLE_POLL_MS = 3000;
 const FOCUS_REFRESH_DEBOUNCE_MS = 400;
 const RECIPIENT_PAGE_SIZE = 5;
-const HISTORY_PEOPLE_PAGE_SIZE = 9;
+const HISTORY_PEOPLE_PAGE_SIZE = 12;
+const SCHEDULED_PEOPLE_PAGE_SIZE = 5;
 const TAB_STORAGE_KEY = "recruiter-reachout.active-tab";
 const SAVE_CHANNEL = "recruiter-reachout-saved";
 const SESSION_STATUS_STORAGE_KEY = "recruiter-reachout.setup-session-status";
@@ -553,13 +555,13 @@ function CumulativeSendsChart({ points }: { points: Array<{ date: string; total:
   const area = `${pad},${height - pad} ${line} ${width - pad},${height - pad}`;
   return (
     <div className="svg-chart-wrap">
-      <svg viewBox={`0 0 ${width} ${height}`} className="svg-chart" role="img" aria-label="Cumulative sends">
+      <svg viewBox={`0 0 ${width} ${height}`} className="svg-chart" role="img" aria-label="Cumulative companies scheduled">
         <polygon points={area} className="svg-area" />
         <polyline points={line} className="svg-line" fill="none" />
       </svg>
       <div className="svg-chart-meta">
         <strong>{points.at(-1)?.total ?? 0}</strong>
-        <span>total in window</span>
+        <span>companies scheduled</span>
       </div>
     </div>
   );
@@ -619,6 +621,88 @@ function DonutChart({
               {slice.label} · {slice.value}
             </span>
           ))}
+      </div>
+    </div>
+  );
+}
+
+/** Radial streak dial — current run vs personal best (not a bar chart). */
+function StreakRingGraphic({
+  current,
+  best,
+  activityToday,
+}: {
+  current: number;
+  best: number;
+  activityToday: boolean;
+}) {
+  const size = 168;
+  const cx = size / 2;
+  const cy = size / 2;
+  const trackR = 64;
+  const bestR = 52;
+  const stroke = 11;
+  const trackC = 2 * Math.PI * trackR;
+  const bestC = 2 * Math.PI * bestR;
+  const ceiling = Math.max(best, current, 5);
+  const currentFrac = Math.min(1, current / ceiling);
+  const bestFrac = Math.min(1, best / ceiling);
+  const currentDash = currentFrac * trackC;
+  const bestDash = bestFrac * bestC;
+  const toBeat = Math.max(0, best - current);
+  const isPersonalBest = current > 0 && current >= best;
+
+  return (
+    <div className="streak-ring-graphic">
+      <svg
+        viewBox={`0 0 ${size} ${size}`}
+        className="streak-ring-svg"
+        role="img"
+        aria-label={`${current}-day streak, best ${best}`}
+      >
+        <circle className="streak-ring-track" cx={cx} cy={cy} r={trackR} />
+        <circle className="streak-ring-track inner" cx={cx} cy={cy} r={bestR} />
+        <circle
+          className="streak-ring-arc best"
+          cx={cx}
+          cy={cy}
+          r={bestR}
+          strokeDasharray={`${bestDash} ${bestC}`}
+          transform={`rotate(-90 ${cx} ${cy})`}
+        />
+        <circle
+          className={`streak-ring-arc current${activityToday ? " live" : ""}${isPersonalBest ? " peak" : ""}`}
+          cx={cx}
+          cy={cy}
+          r={trackR}
+          strokeDasharray={`${currentDash} ${trackC}`}
+          transform={`rotate(-90 ${cx} ${cy})`}
+        />
+        <text className="streak-ring-value" x={cx} y={cy - 4} textAnchor="middle">
+          {current}
+        </text>
+        <text className="streak-ring-unit" x={cx} y={cy + 16} textAnchor="middle">
+          day{current === 1 ? "" : "s"}
+        </text>
+      </svg>
+      <div className="streak-ring-meta">
+        <div className="streak-ring-stat">
+          <strong>{best}</strong>
+          <span>Best streak</span>
+        </div>
+        <div className="streak-ring-stat">
+          <strong>{activityToday ? "Secured" : current > 0 ? "At risk" : "Idle"}</strong>
+          <span>Today</span>
+        </div>
+        <p className="hint">
+          {current === 0
+            ? "Schedule a company batch to plant day one."
+            : isPersonalBest
+              ? "Personal best — keep scheduling to push further."
+              : toBeat === 1
+                ? "One more day to match your best."
+                : `${toBeat} more days to match your best of ${best}.`}
+        </p>
       </div>
     </div>
   );
@@ -735,10 +819,15 @@ function App() {
   const [trackedSendQueueIds, setTrackedSendQueueIds] = useState<string[]>(() => readTrackedSendQueueIds());
   const [trackedSendMode, setTrackedSendMode] = useState<"now" | "later" | null>(() => readTrackedSendMode());
   const [expandedScheduledCompanies, setExpandedScheduledCompanies] = useState<Set<string>>(new Set());
+  const [leavingScheduledCompanies, setLeavingScheduledCompanies] = useState<Set<string>>(new Set());
+  const [scheduledPeoplePageByCompany, setScheduledPeoplePageByCompany] = useState<Record<string, number>>({});
   const [editingScheduledCompany, setEditingScheduledCompany] = useState<string | null>(null);
   const [scheduledEditSubject, setScheduledEditSubject] = useState("");
   const [scheduledEditBody, setScheduledEditBody] = useState("");
   const [scheduledEditBusy, setScheduledEditBusy] = useState(false);
+  const [rescheduleCompany, setRescheduleCompany] = useState<string | null>(null);
+  const [rescheduleAt, setRescheduleAt] = useState("");
+  const [rescheduleBusy, setRescheduleBusy] = useState(false);
 
   const candidates = state?.candidates ?? [];
 
@@ -1018,8 +1107,13 @@ function App() {
 
   const scheduledSendCount = batchSendQueue.filter((item) => item.status === "scheduled").length;
   const upcomingSends = state?.upcomingSends ?? [];
-  const upcomingSummary = useMemo(() => summarizeUpcomingSends(upcomingSends), [upcomingSends]);
-  const upcomingByCompany = useMemo(() => groupUpcomingByCompany(upcomingSends), [upcomingSends]);
+  /** Later-dated schedule queue — send-now bumps move to the Send progress bar instead. */
+  const scheduledLaterSends = useMemo(
+    () => upcomingSends.filter((item) => item.jobMode !== "send_now"),
+    [upcomingSends],
+  );
+  const upcomingSummary = useMemo(() => summarizeUpcomingSends(scheduledLaterSends), [scheduledLaterSends]);
+  const upcomingByCompany = useMemo(() => groupUpcomingByCompany(scheduledLaterSends), [scheduledLaterSends]);
   const isSendingPhase =
     workerStatus?.online === true &&
     (workerStatus.status?.phase === "sending" ||
@@ -1804,6 +1898,9 @@ function App() {
       if (editingScheduledCompany && (item.company?.trim() || "Unknown company") === editingScheduledCompany) {
         cancelScheduledCompanyEdit();
       }
+      if (rescheduleCompany && (item.company?.trim() || "Unknown company") === rescheduleCompany) {
+        setRescheduleCompany(null);
+      }
       setMessage(
         result.queueCancelled > 0
           ? `Removed ${item.fullName} from the schedule.`
@@ -1814,6 +1911,104 @@ function App() {
       setMessage(error instanceof Error ? error.message : "Failed to remove scheduled send.");
     } finally {
       setBusy(false);
+    }
+  }
+
+  function openCompanyReschedulePanel(company: string, items: UpcomingSendView[]) {
+    const actionable = items.filter((item) => item.jobStatus !== "in_progress");
+    if (actionable.length === 0) {
+      setMessage(`${company} has send(s) in progress — wait for them to finish.`);
+      return;
+    }
+    if (rescheduleCompany === company) {
+      setRescheduleCompany(null);
+      return;
+    }
+    setRescheduleCompany(company);
+    setRescheduleAt(toDatetimeLocalValue(new Date(actionable[0]!.scheduledFor)));
+  }
+
+  async function saveCompanyReschedule(company: string, items: UpcomingSendView[]) {
+    if (!rescheduleAt.trim()) {
+      setMessage("Pick a date and time.");
+      return;
+    }
+    const actionable = items.filter((item) => item.jobStatus !== "in_progress");
+    if (actionable.length === 0) {
+      setMessage(`Nothing to reschedule for ${company}.`);
+      return;
+    }
+    const newStart = new Date(rescheduleAt);
+    if (Number.isNaN(newStart.getTime())) {
+      setMessage("Pick a valid date and time.");
+      return;
+    }
+    const oldStart = new Date(actionable[0]!.scheduledFor).getTime();
+    const deltaMs = newStart.getTime() - oldStart;
+    setRescheduleBusy(true);
+    try {
+      for (const item of actionable) {
+        const nextAt = new Date(new Date(item.scheduledFor).getTime() + deltaMs);
+        await rescheduleQueuedSend({
+          queueItemId: item.queueItemId,
+          scheduledFor: nextAt.toISOString(),
+        });
+      }
+      setRescheduleCompany(null);
+      setMessage(
+        actionable.length === 1
+          ? `Updated send time for ${company}.`
+          : `Updated ${actionable.length} send times for ${company}.`,
+      );
+      await refresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to reschedule.");
+    } finally {
+      setRescheduleBusy(false);
+    }
+  }
+
+  async function sendCompanyScheduledNow(company: string, items: UpcomingSendView[]) {
+    const actionable = items.filter((item) => item.jobStatus !== "in_progress");
+    if (actionable.length === 0) {
+      setMessage(
+        items.some((item) => item.jobStatus === "in_progress")
+          ? `${company} has send(s) already in progress.`
+          : `Nothing to send for ${company}.`,
+      );
+      return;
+    }
+    setRescheduleBusy(true);
+    try {
+      const queuedIds: string[] = [];
+      for (const item of actionable) {
+        await rescheduleQueuedSend({
+          queueItemId: item.queueItemId,
+          sendNow: true,
+        });
+        queuedIds.push(item.queueItemId);
+      }
+      setRescheduleCompany(null);
+      setTrackedSendMode("now");
+      writeTrackedSendMode("now");
+      setTrackedSendQueueIds((prev) => {
+        const merged = new Set([...prev, ...queuedIds]);
+        return [...merged];
+      });
+      setTab("send");
+      setMessage(
+        queuedIds.length === 1
+          ? `Sending ${company} now — watch progress below.`
+          : `Sending ${queuedIds.length} from ${company} now — watch progress below.`,
+      );
+      await refresh();
+      await refreshAnalytics().catch(() => {
+        /* optional */
+      });
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to send now.");
+    } finally {
+      setRescheduleBusy(false);
     }
   }
 
@@ -1828,6 +2023,10 @@ function App() {
       );
       return;
     }
+    setLeavingScheduledCompanies((current) => new Set(current).add(company));
+    await new Promise<void>((resolve) => {
+      window.setTimeout(resolve, 280);
+    });
     setBusy(true);
     try {
       const result = await cancelScheduledSends({
@@ -1836,6 +2035,9 @@ function App() {
       });
       if (editingScheduledCompany === company) {
         cancelScheduledCompanyEdit();
+      }
+      if (rescheduleCompany === company) {
+        setRescheduleCompany(null);
       }
       setExpandedScheduledCompanies((current) => {
         const next = new Set(current);
@@ -1853,6 +2055,11 @@ function App() {
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Failed to remove scheduled company batch.");
     } finally {
+      setLeavingScheduledCompanies((current) => {
+        const next = new Set(current);
+        next.delete(company);
+        return next;
+      });
       setBusy(false);
     }
   }
@@ -1921,6 +2128,9 @@ function App() {
       setBusy(false);
     }
     await refresh();
+    await refreshAnalytics().catch(() => {
+      /* streak card refreshes on tab focus if this fails */
+    });
   }
 
   async function retryFailedInBatch() {
@@ -2548,7 +2758,7 @@ function App() {
               Send{candidates.length > 0 ? ` (${candidates.length})` : ""}
             </button>
             <button className={tab === "scheduled" ? "tab active" : "tab"} onClick={() => setTab("scheduled")}>
-              Scheduled{upcomingSends.length > 0 ? ` (${upcomingSends.length})` : ""}
+              Scheduled{scheduledLaterSends.length > 0 ? ` (${scheduledLaterSends.length})` : ""}
             </button>
             <button
               className={tab === "analytics" ? "tab tab-grove active" : "tab tab-grove"}
@@ -3472,7 +3682,7 @@ function App() {
               )}
             </div>
 
-            {upcomingSends.length === 0 ? (
+            {scheduledLaterSends.length === 0 ? (
               <p className="hint">No scheduled sends right now. Schedule a batch from the Send tab.</p>
             ) : (
               <div className="scheduled-groups">
@@ -3482,8 +3692,22 @@ function App() {
                   const attachedResume =
                     items.find((item) => item.resumeFileName)?.resumeFileName ??
                     resumes.find((resume) => resume.id === selectedResumeId)?.fileName;
+                  const peoplePageCount = Math.max(1, Math.ceil(items.length / SCHEDULED_PEOPLE_PAGE_SIZE));
+                  const peoplePage = Math.min(
+                    peoplePageCount - 1,
+                    Math.max(0, scheduledPeoplePageByCompany[company] ?? 0),
+                  );
+                  const pagedItems = items.slice(
+                    peoplePage * SCHEDULED_PEOPLE_PAGE_SIZE,
+                    (peoplePage + 1) * SCHEDULED_PEOPLE_PAGE_SIZE,
+                  );
                   return (
-                    <div className={`scheduled-group ${expanded ? "expanded" : "collapsed"}`} key={company}>
+                    <div
+                      className={`scheduled-group-exit${leavingScheduledCompanies.has(company) ? " is-leaving" : ""}`}
+                      key={company}
+                    >
+                      <div className="scheduled-group-exit-inner">
+                    <div className={`scheduled-group ${expanded ? "expanded" : "collapsed"}`}>
                       <div className="scheduled-group-bar">
                         <button
                           type="button"
@@ -3494,30 +3718,48 @@ function App() {
                           <div className="scheduled-group-toggle-main">
                             <h3>{company}</h3>
                             <span>
-                              {items.length} send{items.length === 1 ? "" : "s"} · first{" "}
+                              {items.length} {items.length === 1 ? "send" : "sends"} · first{" "}
                               {formatShortWhen(items[0]!.scheduledFor)}
                               {attachedResume ? ` · ${attachedResume}` : ""}
                             </span>
                           </div>
-                          <span className="scheduled-group-chevron">{expanded ? "Hide" : "View"}</span>
                         </button>
-                        <button
-                          type="button"
-                          className="secondary subtle-danger scheduled-group-remove"
-                          disabled={busy || scheduledEditBusy || removableCount === 0}
-                          onClick={() => void removeScheduledCompany(company, items)}
-                          aria-label={`Remove all scheduled sends for ${company}`}
-                          title={
-                            removableCount === 0
-                              ? "Nothing removable right now"
-                              : `Remove all ${removableCount} scheduled send${removableCount === 1 ? "" : "s"}`
-                          }
-                        >
-                          Remove
-                        </button>
+                        <div className="scheduled-group-trail">
+                          <button
+                            type="button"
+                            className="scheduled-group-action view"
+                            aria-expanded={expanded}
+                            onClick={() => toggleScheduledCompany(company)}
+                          >
+                            {expanded ? "Hide" : "View"}
+                          </button>
+                          <button
+                            type="button"
+                            className="scheduled-group-action remove"
+                            disabled={
+                              busy ||
+                              scheduledEditBusy ||
+                              removableCount === 0 ||
+                              leavingScheduledCompanies.has(company)
+                            }
+                            onClick={() => void removeScheduledCompany(company, items)}
+                            aria-label={`Remove all scheduled sends for ${company}`}
+                            title={
+                              removableCount === 0
+                                ? "Nothing removable right now"
+                                : `Remove all ${removableCount} scheduled send${removableCount === 1 ? "" : "s"}`
+                            }
+                          >
+                            Remove
+                          </button>
+                        </div>
                       </div>
-                      {expanded && (
-                        <div className="scheduled-group-body">
+                      <div
+                        className="scheduled-group-body-wrap"
+                        aria-hidden={!expanded}
+                      >
+                        <div className="scheduled-group-body-clip">
+                          <div className="scheduled-group-body">
                           <div className="scheduled-batch-email">
                             <div className="scheduled-batch-email-head">
                               <div>
@@ -3622,11 +3864,93 @@ function App() {
                               )}
                             </div>
                           </div>
+                          <div className="scheduled-batch-actions">
+                            <div className="scheduled-batch-actions-row">
+                              <button
+                                type="button"
+                                className="secondary"
+                                disabled={busy || scheduledEditBusy || rescheduleBusy || removableCount === 0}
+                                onClick={() => openCompanyReschedulePanel(company, items)}
+                              >
+                                {rescheduleCompany === company ? "Close" : "Change time"}
+                              </button>
+                              <button
+                                type="button"
+                                className="primary"
+                                disabled={busy || scheduledEditBusy || rescheduleBusy || removableCount === 0}
+                                onClick={() => void sendCompanyScheduledNow(company, items)}
+                              >
+                                Send now
+                              </button>
+                            </div>
+                            {rescheduleCompany === company && (
+                              <div className="scheduled-reschedule-panel">
+                                <div className="scheduled-reschedule-presets" role="group" aria-label="Quick times">
+                                  {SCHEDULE_PRESETS.filter((preset) => preset.id !== "now").map((preset) => {
+                                    const value = toDatetimeLocalValue(preset.resolve());
+                                    const active = rescheduleAt === value;
+                                    return (
+                                      <button
+                                        key={preset.id}
+                                        type="button"
+                                        className={`schedule-chip${active ? " active" : ""}`}
+                                        disabled={rescheduleBusy}
+                                        onClick={() => setRescheduleAt(value)}
+                                      >
+                                        {preset.label}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                                <label className="scheduled-reschedule-field">
+                                  <span>Or pick a custom time</span>
+                                  <input
+                                    className="scheduled-reschedule-input"
+                                    type="datetime-local"
+                                    value={rescheduleAt}
+                                    onChange={(event) => setRescheduleAt(event.target.value)}
+                                    disabled={rescheduleBusy}
+                                  />
+                                </label>
+                                <p className="hint scheduled-reschedule-hint">
+                                  Moves the whole {company} batch — later sends keep the same spacing.
+                                </p>
+                                <div className="scheduled-reschedule-actions">
+                                  <button
+                                    type="button"
+                                    className="primary"
+                                    disabled={rescheduleBusy || !rescheduleAt.trim()}
+                                    onClick={() => void saveCompanyReschedule(company, items)}
+                                  >
+                                    {rescheduleBusy ? "Saving…" : "Save new time"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="secondary"
+                                    disabled={rescheduleBusy}
+                                    onClick={() => setRescheduleCompany(null)}
+                                  >
+                                    Cancel
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
                           <ul className="scheduled-list">
-                            {items.map((item) => {
+                            <li className="scheduled-list-header" aria-hidden="true">
+                              <span>Person</span>
+                              <span>Status</span>
+                              <span>When</span>
+                              <span>Actions</span>
+                            </li>
+                            {pagedItems.map((item, index) => {
                               const sendingNow = item.jobStatus === "in_progress";
                               return (
-                                <li className="scheduled-item" key={item.queueItemId}>
+                                <li
+                                  className="scheduled-item"
+                                  key={item.queueItemId}
+                                  style={{ ["--item-i" as string]: String(index) }}
+                                >
                                   <div className="scheduled-item-main">
                                     <div className="scheduled-item-identity">
                                       <PersonAvatar candidate={item} size="tiny" />
@@ -3642,8 +3966,8 @@ function App() {
                                     <div className="scheduled-item-actions">
                                       <button
                                         type="button"
-                                        className="secondary subtle-danger"
-                                        disabled={busy || scheduledEditBusy || sendingNow}
+                                        className="scheduled-person-remove"
+                                        disabled={busy || scheduledEditBusy || rescheduleBusy || sendingNow}
                                         onClick={() => void removeScheduledItem(item)}
                                       >
                                         Remove
@@ -3654,8 +3978,44 @@ function App() {
                               );
                             })}
                           </ul>
+                          {items.length > SCHEDULED_PEOPLE_PAGE_SIZE && (
+                            <div className="list-pagination scheduled-people-pagination">
+                              <button
+                                type="button"
+                                disabled={peoplePage <= 0}
+                                onClick={() =>
+                                  setScheduledPeoplePageByCompany((pages) => ({
+                                    ...pages,
+                                    [company]: Math.max(0, peoplePage - 1),
+                                  }))
+                                }
+                              >
+                                Previous
+                              </button>
+                              <span>
+                                {peoplePage * SCHEDULED_PEOPLE_PAGE_SIZE + 1}–
+                                {Math.min((peoplePage + 1) * SCHEDULED_PEOPLE_PAGE_SIZE, items.length)} of{" "}
+                                {items.length}
+                              </span>
+                              <button
+                                type="button"
+                                disabled={peoplePage >= peoplePageCount - 1}
+                                onClick={() =>
+                                  setScheduledPeoplePageByCompany((pages) => ({
+                                    ...pages,
+                                    [company]: Math.min(peoplePageCount - 1, peoplePage + 1),
+                                  }))
+                                }
+                              >
+                                Next
+                              </button>
+                            </div>
+                          )}
+                          </div>
                         </div>
-                      )}
+                      </div>
+                    </div>
+                      </div>
                     </div>
                   );
                 })}
@@ -4343,12 +4703,12 @@ function App() {
                       <p className="eyebrow">Your streak forest</p>
                       <h2>Streak Grove</h2>
                       <p className="hint">
-                        One tree for every day in a row you send — the forest keeps growing with your streak. Skip a day
-                        and it returns to bare soil.
+                        One tree for every day in a row you schedule or send — the forest keeps growing with your streak.
+                        Skip a day and it returns to bare soil.
                       </p>
-                      {analytics.goalProgress.sendStreak > 0 && analytics.goalProgress.sentToday === 0 && (
+                      {analytics.goalProgress.sendStreak > 0 && !analytics.goalProgress.activityToday && (
                         <p className="grove-warning">
-                          No sends yet today — send one email to keep{" "}
+                          No outreach yet today — schedule or send one email to keep{" "}
                           {analytics.goalProgress.sendStreak === 1
                             ? "your tree"
                             : `all ${analytics.goalProgress.sendStreak} trees`}{" "}
@@ -4386,7 +4746,11 @@ function App() {
                       tempUnit={groveTempUnit}
                       streak={analytics.goalProgress.sendStreak}
                       bestStreak={analytics.goalProgress.longestSendStreak}
-                      sentToday={analytics.goalProgress.sentToday}
+                      sentToday={
+                        analytics.goalProgress.activityToday
+                          ? Math.max(analytics.goalProgress.sentToday, 1)
+                          : 0
+                      }
                       level={analytics.motivation.level}
                       title={analytics.motivation.title}
                       goalMet={analytics.goalProgress.met}
@@ -4402,7 +4766,7 @@ function App() {
                     <div className="goal-progress">
                       <div className="goal-progress-meta">
                         <strong>
-                          {analytics.goalProgress.sentToday} / {analytics.goalProgress.goal} sent today
+                          {analytics.goalProgress.sentToday} / {analytics.goalProgress.goal} companies today
                         </strong>
                         <span>
                           {pct(analytics.goalProgress.sentToday / Math.max(1, analytics.goalProgress.goal))} of daily goal
@@ -4447,13 +4811,13 @@ function App() {
                     </div>
                   </div>
                   <div className="village-stat-chips">
-                    <div className="village-chip"><strong>{analytics.today.sent}</strong><span>Today</span></div>
-                    <div className="village-chip"><strong>{analytics.week.sent}</strong><span>This week</span></div>
-                    <div className="village-chip"><strong>{analytics.week.companiesReached}</strong><span>Companies</span></div>
+                    <div className="village-chip"><strong>{analytics.goalProgress.sentToday}</strong><span>Companies today</span></div>
+                    <div className="village-chip"><strong>{analytics.week.sent}</strong><span>Sends this week</span></div>
+                    <div className="village-chip"><strong>{analytics.week.companiesReached}</strong><span>Companies reached</span></div>
                     <div className="village-chip"><strong>{analytics.allTime.recruitersContacted}</strong><span>People</span></div>
                   </div>
                   <label className="goal-edit village-goal-edit">
-                    Daily send goal
+                    Daily company goal
                     <span className="goal-edit-row">
                       <input
                         type="number"
@@ -4464,7 +4828,7 @@ function App() {
                       />
                       <button
                         onClick={() =>
-                          void updateAnalyticsGoal({ dailySendGoal: Number(goalDraft) || 20, localDate: localYmd() })
+                          void updateAnalyticsGoal({ dailySendGoal: Number(goalDraft) || 5, localDate: localYmd() })
                             .then(() => refreshAnalytics())
                             .then(() => setMessage("Daily goal saved."))
                         }
@@ -4490,7 +4854,7 @@ function App() {
                     <div className="setup-section-head">
                       <div>
                         <p className="eyebrow">Climb</p>
-                        <h2>Cumulative sends</h2>
+                        <h2>Cumulative companies</h2>
                       </div>
                     </div>
                     <CumulativeSendsChart points={analytics.cumulativeSends} />
@@ -4504,34 +4868,51 @@ function App() {
                       </div>
                     </div>
                     <div className="trend-legend">
-                      <span><i className="legend-sent" /> Sent</span>
+                      <span><i className="legend-sent" /> Scheduled companies</span>
                       <span><i className="legend-found" /> Emails found</span>
-                      <span><i className="legend-company" /> Companies</span>
+                      <span><i className="legend-company" /> Companies reached</span>
                     </div>
-                    <div className="trend-bars trend-bars-triple" aria-label="Sends, emails found, and companies per day">
+                    <div className="trend-bars trend-bars-triple" aria-label="Companies scheduled, emails found, and companies reached per day">
                       {analytics.daily.map((day) => {
                         const max = Math.max(
                           1,
-                          ...analytics.daily.map((d) => Math.max(d.sent, d.discovered, d.companiesReached)),
+                          ...analytics.daily.map((d) =>
+                            Math.max(d.scheduledCompanies, d.discovered, d.companiesReached),
+                          ),
                         );
                         return (
                           <div
                             className="trend-bar"
                             key={day.date}
-                            title={`${day.date}: ${day.sent} sent, ${day.discovered} emails found, ${day.companiesReached} companies`}
+                            title={`${day.date}: ${day.scheduledCompanies} companies scheduled, ${day.discovered} emails found, ${day.companiesReached} companies reached`}
                           >
                             <div className="trend-bar-stack triple">
                               <div
                                 className="trend-bar-fill sent"
-                                style={{ height: `${Math.max(day.sent > 0 ? 8 : 0, Math.round((day.sent / max) * 100))}%` }}
+                                style={{
+                                  height: `${Math.max(
+                                    day.scheduledCompanies > 0 ? 8 : 0,
+                                    Math.round((day.scheduledCompanies / max) * 100),
+                                  )}%`,
+                                }}
                               />
                               <div
                                 className="trend-bar-fill found"
-                                style={{ height: `${Math.max(day.discovered > 0 ? 6 : 0, Math.round((day.discovered / max) * 100))}%` }}
+                                style={{
+                                  height: `${Math.max(
+                                    day.discovered > 0 ? 6 : 0,
+                                    Math.round((day.discovered / max) * 100),
+                                  )}%`,
+                                }}
                               />
                               <div
                                 className="trend-bar-fill company"
-                                style={{ height: `${Math.max(day.companiesReached > 0 ? 6 : 0, Math.round((day.companiesReached / max) * 100))}%` }}
+                                style={{
+                                  height: `${Math.max(
+                                    day.companiesReached > 0 ? 6 : 0,
+                                    Math.round((day.companiesReached / max) * 100),
+                                  )}%`,
+                                }}
                               />
                             </div>
                             <small>{day.date.slice(5)}</small>
@@ -4656,7 +5037,8 @@ function App() {
                   <div className="stat"><strong>{analytics.usage.emailSamples}</strong><span>Voice samples</span></div>
                   <div className="stat"><strong>{analytics.usage.activeDays}</strong><span>Active send days</span></div>
                   <div className="stat"><strong>{analytics.usage.avgSendsPerActiveDay}</strong><span>Avg sends / day</span></div>
-                  <div className="stat"><strong>{analytics.usage.longestStreak}</strong><span>Best streak</span></div>
+                  <div className="stat"><strong>{analytics.goalProgress.sendStreak}</strong><span>Current streak</span></div>
+                  <div className="stat"><strong>{analytics.goalProgress.longestSendStreak}</strong><span>Best streak</span></div>
                 </div>
                 {analytics.usage.geminiCallsEstimated && (
                   <p className="hint">* Gemini calls estimated from older saved drafts before live tracking.</p>
@@ -4727,22 +5109,19 @@ function App() {
                     </div>
                   </section>
 
-                  <section className="panel analytics-card">
+                  <section className="panel analytics-card streak-ring-card">
                     <div className="setup-section-head">
                       <div>
-                        <p className="eyebrow">Nudge</p>
+                        <p className="eyebrow">Grove</p>
                         <h2>Keep the grove growing</h2>
+                        <p className="hint">Current run vs your best streak — schedule daily to fill the ring.</p>
                       </div>
                     </div>
-                    {analytics.health.length === 0 ? (
-                      <p className="ok">You&apos;re on track — keep the streak alive and open a new company when you can.</p>
-                    ) : (
-                      <div className="warning-box">
-                        {analytics.health.map((warning) => (
-                          <p key={warning}>{warning}</p>
-                        ))}
-                      </div>
-                    )}
+                    <StreakRingGraphic
+                      current={analytics.goalProgress.sendStreak}
+                      best={analytics.goalProgress.longestSendStreak}
+                      activityToday={analytics.goalProgress.activityToday}
+                    />
                     <p className="hint analytics-asof">
                       As of {new Date(analytics.generatedAt).toLocaleString()}
                     </p>

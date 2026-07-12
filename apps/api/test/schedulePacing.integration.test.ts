@@ -91,7 +91,7 @@ describe("schedule pacing integration", () => {
     expect(listUpcomingSends(store)).toHaveLength(7);
   });
 
-  it("returns jobFailures instead of silently counting failed queue items as queued", async () => {
+  it("schedules overlapping slots without app-side hourly caps blocking the queue", async () => {
     process.env.HOURLY_SEND_LIMIT = "1";
     const first = await seedReadyCandidate("First Recruiter", "Acme", "first@acme.com");
     const second = await seedReadyCandidate("Second Recruiter", "Beta", "second@beta.com");
@@ -108,22 +108,14 @@ describe("schedule pacing integration", () => {
       mode: "schedule",
     });
 
-    expect(result.jobs).toHaveLength(0);
-    expect(result.queued).toHaveLength(0);
-    expect(result.jobFailures).toHaveLength(1);
-    expect(result.jobFailures?.[0]?.candidateId).toBe(second.id);
-    expect(result.jobFailures?.[0]?.queueItemId).toBeTruthy();
-    expect(result.jobFailures?.[0]?.reason).toContain("Hourly send limit reached");
-    expect(listUpcomingSends(store)).toHaveLength(1);
-
-    const failedQueue = store.listSendQueue().find((item) => item.candidateId === second.id);
-    expect(failedQueue?.status).toBe("failed");
-    expect(failedQueue?.failureReason).toContain("Hourly send limit reached");
-    expect(store.listActiveCandidates().some((person) => person.id === second.id)).toBe(true);
-    expect(result.archived ?? []).toHaveLength(0);
+    expect(result.jobs).toHaveLength(1);
+    expect(result.queued).toHaveLength(1);
+    expect(result.jobFailures ?? []).toHaveLength(0);
+    expect(listUpcomingSends(store)).toHaveLength(2);
+    expect(store.listActiveCandidates().some((person) => person.id === second.id)).toBe(false);
   });
 
-  it("archives only successfully scheduled candidates in a mixed pacing batch", async () => {
+  it("archives every successfully scheduled candidate even when slots overlap", async () => {
     process.env.HOURLY_SEND_LIMIT = "1";
     const blocker = await seedReadyCandidate("Blocker Recruiter", "Acme", "blocker@acme.com");
     const first = await seedReadyCandidate("First Recruiter", "Beta", "first@beta.com");
@@ -145,15 +137,12 @@ describe("schedule pacing integration", () => {
       mode: "schedule",
     });
 
-    // Explicit scheduler shifts the second person one hour later; only that slot is free.
-    expect(result.jobs).toHaveLength(1);
-    expect(result.queued).toHaveLength(1);
-    expect(result.jobFailures).toHaveLength(1);
-    expect(result.jobFailures?.[0]?.candidateId).toBe(first.id);
-    expect(result.archived).toHaveLength(1);
-    expect(result.archived[0]?.id).toBe(second.id);
-    expect(store.listActiveCandidates().map((person) => person.id)).toEqual([first.id]);
-    expect(listUpcomingSends(store)).toHaveLength(2);
+    expect(result.jobs).toHaveLength(2);
+    expect(result.queued).toHaveLength(2);
+    expect(result.jobFailures ?? []).toHaveLength(0);
+    expect(result.archived).toHaveLength(2);
+    expect(store.listActiveCandidates()).toHaveLength(0);
+    expect(listUpcomingSends(store)).toHaveLength(3);
   });
 
   it("uses each job scheduledFor bucket for pacing instead of treating all pending jobs as now", async () => {

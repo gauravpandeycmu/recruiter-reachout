@@ -50,6 +50,7 @@ import {
   listUpcomingSends,
   updatePendingSendJobContent,
   updateScheduledCompanyBatch,
+  rescheduleQueuedSend,
   retryFailedSends,
   getSetupSessionStatus,
   openSetupLogin,
@@ -496,6 +497,24 @@ const server = createServer(async (req, res) => {
         pendingOnly?: boolean;
       };
       sendJson(res, 200, await cancelScheduledSendsForBatch(store, body));
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/send-queue/reschedule") {
+      const body = (await readJson(req)) as {
+        queueItemId?: string;
+        scheduledFor?: string;
+        sendNow?: boolean;
+      };
+      sendJson(
+        res,
+        200,
+        await rescheduleQueuedSend(store, {
+          queueItemId: body.queueItemId ?? "",
+          scheduledFor: body.scheduledFor,
+          sendNow: body.sendNow,
+        }),
+      );
       return;
     }
 

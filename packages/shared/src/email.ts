@@ -244,7 +244,7 @@ export function footerToHtml(footer?: EmailFooter): string {
 
   const lines = [
     escapeHtml(footer.closing),
-    footer.name ? `<strong>${escapeHtml(footer.name)}</strong>` : "",
+    footer.name ? `<strong style="color:#172033;font-weight:700;">${escapeHtml(footer.name)}</strong>` : "",
     escapeHtml(footer.subtitle),
     "",
     orgLine,

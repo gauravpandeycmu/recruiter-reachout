@@ -266,46 +266,20 @@ export function scheduleCandidatesExplicit(
   const queued: SendQueueItem[] = [];
   const rejected: ExplicitScheduleResult["rejected"] = [];
   const shifted: ExplicitScheduleResult["shifted"] = [];
-  const domainCounts = new Map<string, number>();
-  const hourBuckets = new Map<string, number>();
 
+  // Explicit schedules honor the user's start time + interval exactly.
+  // Volume / domain caps are left to the user — do not reject or roll over.
   let autoIndex = 0;
   for (const candidate of filtered) {
     const email = candidate.email ?? candidate.emailCandidates?.[0]?.email ?? "";
     const confidence = email ? resolveEmailConfidence(candidate, email) : "unknown";
     const hasOverride = perCandidateSchedule.has(candidate.id);
-    let scheduledFor = hasOverride
+    const scheduledFor = hasOverride
       ? perCandidateSchedule.get(candidate.id)!
       : withJitter(addMinutes(startAt, autoIndex * intervalMinutes), autoIndex === 0 ? 0 : jitterSeconds);
     autoIndex += 1;
 
-    const domain = email.split("@")[1]?.toLowerCase() ?? "";
-    const domainCount = domainCounts.get(domain) ?? 0;
-    if (domainCount >= settings.perDomainCap) {
-      rejected.push({ candidateId: candidate.id, reason: `Per-domain cap reached for ${domain}.` });
-      continue;
-    }
-    if (queued.length >= settings.sendCapPerDay) {
-      rejected.push({ candidateId: candidate.id, reason: "Daily send cap reached." });
-      continue;
-    }
-
-    const hourKey = scheduledFor.toISOString().slice(0, 13);
-    const hourCount = hourBuckets.get(hourKey) ?? 0;
-    if (hourCount >= settings.perHourCap) {
-      const original = scheduledFor.toISOString();
-      scheduledFor = addHours(scheduledFor, 1);
-      shifted.push({
-        candidateId: candidate.id,
-        original,
-        shiftedTo: scheduledFor.toISOString(),
-        reason: "Hourly cap — shifted one hour later.",
-      });
-    }
-
     queued.push(createQueueItem(candidate, email, confidence, "scheduled", scheduledFor));
-    domainCounts.set(domain, domainCount + 1);
-    hourBuckets.set(scheduledFor.toISOString().slice(0, 13), (hourBuckets.get(scheduledFor.toISOString().slice(0, 13)) ?? 0) + 1);
   }
 
   return { queued, rejected, shifted };

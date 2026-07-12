@@ -1,7 +1,7 @@
 {
   "name": "@recruiter/web",
   "private": true,
-  "version": "0.1.0",
+  "version": "2.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 3000",
@@ -10,7 +10,7 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@recruiter/shared": "0.1.0",
+    "@recruiter/shared": "2.0.0",
     "@types/three": "^0.185.1",
     "@vitejs/plugin-react": "latest",
     "react": "latest",

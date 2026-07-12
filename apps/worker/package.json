@@ -1,7 +1,7 @@
 {
   "name": "@recruiter/worker",
   "private": true,
-  "version": "0.1.0",
+  "version": "2.0.0",
   "type": "module",
   "scripts": {
     "dev": "tsx src/index.ts",
@@ -21,7 +21,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@recruiter/shared": "0.1.0",
+    "@recruiter/shared": "2.0.0",
     "playwright": "latest",
     "tsx": "latest"
   }

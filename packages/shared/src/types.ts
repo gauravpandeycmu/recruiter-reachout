@@ -368,6 +368,8 @@ export interface AnalyticsDayBucket {
   discovered: number;
   /** Distinct companies that received at least one send that day. */
   companiesReached: number;
+  /** Distinct companies scheduled (Schedule click) that local day. */
+  scheduledCompanies: number;
 }
 
 export interface AnalyticsCompanyRow {
@@ -507,14 +509,23 @@ export interface AnalyticsSummary {
   health: string[];
   goal: AnalyticsGoalSettings;
   goalProgress: {
+    /**
+     * Distinct companies scheduled today (Schedule / Send-now queue click).
+     * One company batch counts as 1 toward the daily goal — not per-email.
+     */
     sentToday: number;
     goal: number;
     met: boolean;
     streak: number;
-    /** Consecutive days with at least one send (today counts once you send). */
+    /**
+     * Consecutive days with outreach activity: a successful Gmail send, or scheduling
+     * at least one email (queue click). Scheduling for later still secures that local day.
+     */
     sendStreak: number;
-    /** Longest run of consecutive send days ever. */
+    /** Longest run of consecutive outreach-activity days ever. */
     longestSendStreak: number;
+    /** True when today already has a send or a successful schedule — streak is safe. */
+    activityToday: boolean;
     shouldCelebrate: boolean;
   };
   generatedAt: string;

@@ -2,7 +2,9 @@
 
 Chrome extension plus local dashboard/API for email-only recruiter outreach.
 
-## What Works In V1
+**Current product truth (v2):** see [`docs/PROJECT_HANDOFF.md`](docs/PROJECT_HANDOFF.md) — features, streak/goal semantics, scheduling edge cases, APIs, and gotchas for new sessions.
+
+## What Works In V2
 
 - Capture visible recruiter candidates from LinkedIn profiles, LinkedIn search, Google, or Bing pages.
 - Store candidates in a local queue.
@@ -15,6 +17,9 @@ Chrome extension plus local dashboard/API for email-only recruiter outreach.
 - Connect Gmail through OAuth and refresh access tokens automatically.
 - Queue large recruiter backlogs locally with a conservative default send cap.
 - Use a public tracking relay for real open/click tracking while keeping your DB local.
+- Schedule company batches (exact times), reschedule / send-now from the Scheduled tab.
+- Daily **company** goal (default 5) + Grove outreach streak from schedule-or-send activity.
+- 3D Streak Grove + Fun-zone streak ring and analytics.
 
 Gmail OAuth endpoints, MIME generation, and Gmail API draft/send calls are prepared. Real Gmail actions are intentionally gated until credentials are configured and the manual test flow passes.
 

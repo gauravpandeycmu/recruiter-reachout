@@ -87,23 +87,26 @@ describe("scheduleCandidatesExplicit", () => {
     ).not.toThrow();
   });
 
-  it("rejects candidates when daily cap is reached", () => {
-    const many = Array.from({ length: 3 }, (_, index) => candidate(index));
+  it("schedules the full batch at the requested times without domain/daily caps", () => {
+    const many = Array.from({ length: 8 }, (_, index) => candidate(index));
     const result = scheduleCandidatesExplicit(
       many,
-      { startAt: "2026-05-13T10:00:00.000Z", jitterSeconds: 0 },
+      { startAt: "2026-05-13T10:00:00.000Z", intervalMinutes: 4, jitterSeconds: 0 },
       {
         sendCapPerDay: 2,
-        perDomainCap: 10,
-        perHourCap: 10,
+        perDomainCap: 2,
+        perHourCap: 2,
       },
     );
 
-    expect(result.queued).toHaveLength(2);
-    expect(result.rejected).toHaveLength(1);
+    expect(result.queued).toHaveLength(8);
+    expect(result.rejected).toHaveLength(0);
+    expect(result.shifted).toHaveLength(0);
+    expect(result.queued[0]?.scheduledFor).toBe("2026-05-13T10:00:00.000Z");
+    expect(result.queued[7]?.scheduledFor).toBe("2026-05-13T10:28:00.000Z");
   });
 
-  it("shifts later candidates when the hourly cap is hit", () => {
+  it("still spaces by interval when many land in the same hour", () => {
     const many = Array.from({ length: 3 }, (_, index) => candidate(index, `Co${index}`));
     const result = scheduleCandidatesExplicit(
       many,
@@ -116,8 +119,11 @@ describe("scheduleCandidatesExplicit", () => {
     );
 
     expect(result.queued).toHaveLength(3);
-    expect(result.shifted).toHaveLength(1);
-    expect(result.shifted[0]?.reason).toBe("Hourly cap — shifted one hour later.");
-    expect(result.queued[2]?.scheduledFor.startsWith("2026-05-13T11:")).toBe(true);
+    expect(result.shifted).toHaveLength(0);
+    expect(result.queued.map((item) => item.scheduledFor)).toEqual([
+      "2026-05-13T10:00:00.000Z",
+      "2026-05-13T10:01:00.000Z",
+      "2026-05-13T10:02:00.000Z",
+    ]);
   });
 });
