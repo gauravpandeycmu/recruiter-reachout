@@ -2531,6 +2531,19 @@ html[data-theme="dark"] .streak-tree-moon::after {
   background: var(--surface-3);
 }
 
+.scheduled-group-bar.past-due {
+  background: color-mix(in srgb, #f5c542 28%, var(--surface-2));
+  border-bottom: 1px solid color-mix(in srgb, #d4a017 35%, var(--line-soft));
+}
+
+.scheduled-group-bar.past-due:hover {
+  background: color-mix(in srgb, #f5c542 38%, var(--surface-2));
+}
+
+.scheduled-group.past-due {
+  border-color: color-mix(in srgb, #d4a017 45%, var(--line-soft));
+}
+
 .scheduled-group-toggle:hover {
   background: transparent;
 }
@@ -2569,6 +2582,18 @@ html[data-theme="dark"] .streak-tree-moon::after {
 .scheduled-group-action.view:hover {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
   border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+.scheduled-group-action.past-due {
+  background: color-mix(in srgb, #f5c542 55%, #fff8e1);
+  border-color: color-mix(in srgb, #d4a017 55%, transparent);
+  color: #7a4e00;
+  min-width: auto;
+}
+
+.scheduled-group-action.past-due:hover {
+  background: color-mix(in srgb, #f5c542 70%, #fff8e1);
+  border-color: #d4a017;
 }
 
 .scheduled-group-action.remove {
@@ -2747,6 +2772,11 @@ html[data-theme="dark"] .streak-tree-moon::after {
 .scheduled-status-chip.live {
   background: #fef3c7;
   color: #92400e;
+}
+
+.scheduled-status-chip.past-due {
+  background: #fde68a;
+  color: #7a4e00;
 }
 
 .scheduled-item-actions {
@@ -3996,6 +4026,24 @@ html[data-theme="dark"] .streak-tree-moon::after {
   object-fit: cover;
   transition: transform var(--dur) var(--ease-spring);
   width: 38px;
+}
+
+.avatar-link {
+  border-radius: 999px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  line-height: 0;
+  outline-offset: 2px;
+  text-decoration: none;
+}
+
+.avatar-link:hover .avatar,
+.avatar-link:focus-visible .avatar {
+  transform: scale(1.06);
+}
+
+.avatar-link:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
 }
 
 .candidate:hover .avatar {
@@ -6030,6 +6078,174 @@ html[data-theme="dark"] .village-hero-panel {
   margin-top: 0;
 }
 
+.grove-guide-section {
+  margin-top: 4px;
+}
+
+.grove-guide-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+}
+
+.grove-guide-card {
+  align-items: center;
+  background: var(--panel-solid);
+  border: 1px solid var(--line-soft);
+  border-radius: 16px;
+  display: grid;
+  gap: 14px;
+  grid-template-columns: 112px minmax(0, 1fr);
+  padding: 12px 14px 12px 8px;
+  perspective: 520px;
+  transition:
+    opacity 200ms ease,
+    filter 200ms ease,
+    border-color 200ms ease;
+}
+
+.grove-guide-card.locked {
+  filter: grayscale(0.92);
+  opacity: 0.55;
+}
+
+.grove-guide-card.unlocked {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--line-soft));
+}
+
+.grove-guide-thumb-wrap {
+  flex: 0 0 auto;
+  height: 128px;
+  position: relative;
+  width: 112px;
+}
+
+.grove-guide-thumb {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  display: block;
+  height: 128px;
+  object-fit: contain;
+  object-position: center bottom;
+  width: 112px;
+}
+
+.grove-guide-thumb.is-live {
+  left: 0;
+  position: absolute;
+  top: 0;
+}
+
+.grove-guide-thumb.is-idle-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.grove-guide-thumb.is-locked,
+.grove-guide-thumb.is-loading {
+  background: transparent;
+  position: relative;
+}
+
+.grove-guide-thumb.is-locked::after,
+.grove-guide-thumb.is-loading::after {
+  background: color-mix(in srgb, var(--muted) 40%, transparent);
+  border-radius: 50% 50% 42% 42%;
+  content: "";
+  height: 48px;
+  left: 50%;
+  position: absolute;
+  top: 28px;
+  transform: translateX(-50%);
+  width: 48px;
+}
+
+.grove-guide-thumb.is-locked::before,
+.grove-guide-thumb.is-loading::before {
+  background: color-mix(in srgb, var(--muted) 45%, #6b4a2e);
+  bottom: 18px;
+  content: "";
+  height: 28px;
+  left: 50%;
+  position: absolute;
+  transform: translateX(-50%);
+  width: 6px;
+}
+
+.grove-guide-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.grove-guide-title-row {
+  align-items: baseline;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.grove-guide-copy h3 {
+  font-size: 15px;
+  margin: 0;
+}
+
+.grove-guide-state {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.grove-guide-card.unlocked .grove-guide-state {
+  color: color-mix(in srgb, var(--accent) 80%, var(--ink));
+}
+
+.grove-guide-copy p {
+  color: var(--ink-soft);
+  font-size: 12.5px;
+  line-height: 1.45;
+  margin: 0;
+}
+
+.grove-guide-card.locked .grove-guide-copy h3 {
+  letter-spacing: 0.08em;
+}
+
+.grove-guide-expand {
+  align-items: center;
+  background: transparent;
+  border: 1px dashed color-mix(in srgb, var(--accent) 35%, var(--line));
+  border-radius: 999px;
+  color: var(--ink);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 600;
+  gap: 8px;
+  justify-content: center;
+  justify-self: center;
+  margin-top: 4px;
+  min-height: 40px;
+  padding: 8px 18px;
+  transition:
+    background 180ms ease,
+    border-color 180ms ease;
+}
+
+.grove-guide-expand:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-color: var(--accent);
+}
+
+.grove-guide-expand-arrow {
+  font-size: 16px;
+  line-height: 1;
+}
+
 .analytics-section {
   display: grid;
   gap: 14px;
@@ -6915,7 +7131,8 @@ html[data-theme="dark"] .climb-card,
 html[data-theme="dark"] .trend-card,
 html[data-theme="dark"] .companies-card,
 html[data-theme="dark"] .fun-section .panel,
-html[data-theme="dark"] .fun-stats-bright .stat {
+html[data-theme="dark"] .fun-stats-bright .stat,
+html[data-theme="dark"] .grove-guide-card {
   background: var(--surface) !important;
   border-color: var(--line-soft) !important;
   color: var(--ink);
@@ -7010,6 +7227,26 @@ html[data-theme="dark"] .scheduled-group-bar:hover,
 html[data-theme="dark"] .candidate:hover,
 html[data-theme="dark"] .guess:hover {
   background: var(--surface-hover) !important;
+}
+
+html[data-theme="dark"] .scheduled-group-bar.past-due {
+  background: color-mix(in srgb, #c9a227 32%, var(--surface-2)) !important;
+  border-bottom-color: color-mix(in srgb, #c9a227 45%, var(--line-soft));
+}
+
+html[data-theme="dark"] .scheduled-group-bar.past-due:hover {
+  background: color-mix(in srgb, #c9a227 42%, var(--surface-2)) !important;
+}
+
+html[data-theme="dark"] .scheduled-group-action.past-due {
+  background: color-mix(in srgb, #c9a227 40%, var(--surface-3));
+  border-color: color-mix(in srgb, #e8c070 50%, transparent);
+  color: #f0d78a;
+}
+
+html[data-theme="dark"] .scheduled-status-chip.past-due {
+  background: rgba(140, 100, 30, 0.45) !important;
+  color: #f0d78a;
 }
 
 html[data-theme="dark"] .clickable-row:hover td,

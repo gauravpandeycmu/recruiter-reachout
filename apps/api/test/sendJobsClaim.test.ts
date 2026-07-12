@@ -76,4 +76,54 @@ describe("claimNextSendJob due-slot gating", () => {
 
     await rm(directory, { recursive: true, force: true });
   });
+
+  it("claims the earliest scheduledFor among multiple due jobs", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-claim-order-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const now = new Date("2026-07-10T15:00:00.000Z");
+    store.upsertSendJob(
+      baseJob({
+        id: "later-due",
+        scheduledFor: "2026-07-10T14:50:00.000Z",
+        createdAt: "2026-07-10T13:00:00.000Z",
+      }),
+    );
+    store.upsertSendJob(
+      baseJob({
+        id: "earlier-due",
+        to: "earlier@acme.com",
+        scheduledFor: "2026-07-10T14:30:00.000Z",
+        createdAt: "2026-07-10T14:00:00.000Z",
+      }),
+    );
+
+    const claimed = claimNextSendJob(store, now);
+    expect(claimed?.id).toBe("earlier-due");
+
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("reclaims stale in_progress jobs so they can send again", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-claim-stale-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const now = new Date("2026-07-10T15:00:00.000Z");
+    store.upsertSendJob(
+      baseJob({
+        id: "stale",
+        status: "in_progress",
+        scheduledFor: "2026-07-10T14:00:00.000Z",
+        updatedAt: "2026-07-10T14:40:00.000Z",
+      }),
+    );
+
+    const claimed = claimNextSendJob(store, now);
+    expect(claimed?.id).toBe("stale");
+    expect(claimed?.status).toBe("in_progress");
+
+    await rm(directory, { recursive: true, force: true });
+  });
 });

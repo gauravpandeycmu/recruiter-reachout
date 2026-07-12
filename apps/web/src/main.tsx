@@ -63,6 +63,7 @@ import {
 import {
   groupUpcomingByCompany,
   isScheduleForNow,
+  isScheduledItemOverdue,
   resumeTintIndex,
   stripTestModePrefix,
   summarizeUpcomingSends,
@@ -86,6 +87,8 @@ import {
   toggleThemePreference,
 } from "./theme";
 import { GroveLoadingPlay } from "./GroveLoadingPlay";
+import { GroveTreeFieldGuide } from "./GroveTreeFieldGuide";
+import { resolveGroveUnlockDays } from "./groveTreeGuide";
 import { StreakTreeBuddy } from "./StreakTreeBuddy";
 import { ThemeModeSwitch } from "./ThemeModeSwitch";
 import "./styles.css";
@@ -212,17 +215,35 @@ function PersonAvatar({
   candidate,
   size = "small",
 }: {
-  candidate: Pick<RecruiterCandidate, "fullName" | "profilePhotoUrl"> & { firstName?: string };
+  candidate: Pick<RecruiterCandidate, "fullName" | "profilePhotoUrl" | "linkedinUrl"> & { firstName?: string };
   size?: "small" | "tiny";
 }) {
   const className = `avatar ${size === "tiny" ? "small" : ""}`.trim();
-  if (candidate.profilePhotoUrl) {
-    return <img className={className} src={candidate.profilePhotoUrl} alt="" referrerPolicy="no-referrer" />;
-  }
-  return (
+  const avatar = candidate.profilePhotoUrl ? (
+    <img className={className} src={candidate.profilePhotoUrl} alt="" referrerPolicy="no-referrer" />
+  ) : (
     <span className={`${className} avatar-fallback`} aria-hidden="true">
       {avatarInitial(candidate)}
     </span>
+  );
+
+  const linkedinUrl = candidate.linkedinUrl?.trim();
+  if (!linkedinUrl) {
+    return avatar;
+  }
+
+  return (
+    <a
+      className="avatar-link"
+      href={linkedinUrl}
+      target="_blank"
+      rel="noreferrer"
+      aria-label={`Open ${candidate.fullName || "recruiter"} on LinkedIn`}
+      title="Open LinkedIn profile"
+      onClick={(event) => event.stopPropagation()}
+    >
+      {avatar}
+    </a>
   );
 }
 
@@ -756,6 +777,8 @@ function App() {
   const [goalDraft, setGoalDraft] = useState("20");
   const [showCatToast, setShowCatToast] = useState(false);
   const celebratedDateRef = useRef<string | null>(null);
+  const [unlockedGroveTrees, setUnlockedGroveTrees] = useState<ReadonlySet<string>>(() => new Set());
+  const [groveUnlockDays, setGroveUnlockDays] = useState(0);
   const footerReadyRef = useRef(false);
   const footerSaveTimerRef = useRef<number | null>(null);
   const tabsNavRef = useRef<HTMLElement | null>(null);
@@ -1324,6 +1347,26 @@ function App() {
       window.setTimeout(() => setShowCatToast(false), 6500);
     }
   }
+
+  useEffect(() => {
+    if (!analytics) {
+      return;
+    }
+    const unlockDays = resolveGroveUnlockDays(
+      analytics.goalProgress.sendStreak,
+      analytics.goalProgress.longestSendStreak,
+    );
+    setGroveUnlockDays(unlockDays);
+    let cancelled = false;
+    void import("./StreakGrove3D").then((mod) => {
+      if (cancelled) return;
+      // Derive from the live planting sequence for best streak days (sticky if grove resets).
+      setUnlockedGroveTrees(mod.plantedSpeciesForStreak(unlockDays));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [analytics?.goalProgress.sendStreak, analytics?.goalProgress.longestSendStreak]);
 
   async function loadTestModeSettings() {
     try {
@@ -1924,6 +1967,18 @@ function App() {
       setRescheduleCompany(null);
       return;
     }
+    setExpandedScheduledCompanies((current) => new Set(current).add(company));
+    setRescheduleCompany(company);
+    setRescheduleAt(toDatetimeLocalValue(new Date(actionable[0]!.scheduledFor)));
+  }
+
+  function openPastDueReschedule(company: string, items: UpcomingSendView[]) {
+    const actionable = items.filter((item) => item.jobStatus !== "in_progress");
+    if (actionable.length === 0) {
+      setMessage(`${company} has send(s) in progress — wait for them to finish.`);
+      return;
+    }
+    setExpandedScheduledCompanies((current) => new Set(current).add(company));
     setRescheduleCompany(company);
     setRescheduleAt(toDatetimeLocalValue(new Date(actionable[0]!.scheduledFor)));
   }
@@ -3689,6 +3744,8 @@ function App() {
                 {upcomingByCompany.map(([company, items]) => {
                   const expanded = expandedScheduledCompanies.has(company);
                   const removableCount = items.filter((item) => item.jobStatus !== "in_progress").length;
+                  const overdueCount = items.filter((item) => isScheduledItemOverdue(item)).length;
+                  const companyPastDue = overdueCount > 0;
                   const attachedResume =
                     items.find((item) => item.resumeFileName)?.resumeFileName ??
                     resumes.find((resume) => resume.id === selectedResumeId)?.fileName;
@@ -3707,8 +3764,8 @@ function App() {
                       key={company}
                     >
                       <div className="scheduled-group-exit-inner">
-                    <div className={`scheduled-group ${expanded ? "expanded" : "collapsed"}`}>
-                      <div className="scheduled-group-bar">
+                    <div className={`scheduled-group ${expanded ? "expanded" : "collapsed"}${companyPastDue ? " past-due" : ""}`}>
+                      <div className={`scheduled-group-bar${companyPastDue ? " past-due" : ""}`}>
                         <button
                           type="button"
                           className="scheduled-group-toggle"
@@ -3718,13 +3775,26 @@ function App() {
                           <div className="scheduled-group-toggle-main">
                             <h3>{company}</h3>
                             <span>
-                              {items.length} {items.length === 1 ? "send" : "sends"} · first{" "}
-                              {formatShortWhen(items[0]!.scheduledFor)}
+                              {items.length} {items.length === 1 ? "send" : "sends"} ·{" "}
+                              {companyPastDue
+                                ? `${overdueCount} past due`
+                                : `first ${formatShortWhen(items[0]!.scheduledFor)}`}
                               {attachedResume ? ` · ${attachedResume}` : ""}
                             </span>
                           </div>
                         </button>
                         <div className="scheduled-group-trail">
+                          {companyPastDue && (
+                            <button
+                              type="button"
+                              className="scheduled-group-action past-due"
+                              onClick={() => openPastDueReschedule(company, items)}
+                              title="Send time has passed — worker should pick these up soon, or change the time"
+                              aria-label={`${company} is past due — change send time`}
+                            >
+                              Past due
+                            </button>
+                          )}
                           <button
                             type="button"
                             className="scheduled-group-action view"
@@ -3945,9 +4015,10 @@ function App() {
                             </li>
                             {pagedItems.map((item, index) => {
                               const sendingNow = item.jobStatus === "in_progress";
+                              const pastDue = isScheduledItemOverdue(item);
                               return (
                                 <li
-                                  className="scheduled-item"
+                                  className={`scheduled-item${pastDue ? " past-due" : ""}`}
                                   key={item.queueItemId}
                                   style={{ ["--item-i" as string]: String(index) }}
                                 >
@@ -3959,8 +4030,12 @@ function App() {
                                         <span className="scheduled-item-email">{item.email}</span>
                                       </div>
                                     </div>
-                                    <span className={`scheduled-status-chip ${sendingNow ? "live" : "pending"}`}>
-                                      {sendingNow ? "Sending now" : "Scheduled"}
+                                    <span
+                                      className={`scheduled-status-chip ${
+                                        sendingNow ? "live" : pastDue ? "past-due" : "pending"
+                                      }`}
+                                    >
+                                      {sendingNow ? "Sending now" : pastDue ? "Past due" : "Scheduled"}
                                     </span>
                                     <time dateTime={item.scheduledFor}>{formatShortWhen(item.scheduledFor)}</time>
                                     <div className="scheduled-item-actions">
@@ -4839,6 +4914,12 @@ function App() {
                   </label>
                 </div>
               </section>
+
+              <GroveTreeFieldGuide
+                unlocked={unlockedGroveTrees}
+                bestUnlockDays={groveUnlockDays}
+                testMode={testModeEnabled || Boolean(envStatus?.testMode.enabled)}
+              />
 
               <section className="analytics-section useful-section">
                 <div className="analytics-section-head">

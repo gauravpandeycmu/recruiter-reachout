@@ -73,6 +73,15 @@ export function isScheduleForNow(startAt: Date, preset: string | null, nowMs = D
   return startAt.getTime() <= nowMs + 90_000;
 }
 
+/** True when the slot time has passed and the worker has not claimed it yet. */
+export function isScheduledItemOverdue(item: UpcomingSendView, nowMs = Date.now()): boolean {
+  if (item.jobStatus === "in_progress") {
+    return false;
+  }
+  const at = new Date(item.scheduledFor).getTime();
+  return Number.isFinite(at) && at < nowMs;
+}
+
 export function stripTestModePrefix(subject: string): string {
   return subject.replace(/^\[TEST MODE\]\s*/i, "");
 }

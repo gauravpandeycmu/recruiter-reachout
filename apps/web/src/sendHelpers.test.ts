@@ -3,6 +3,7 @@ import type { UpcomingSendView } from "./api.js";
 import {
   groupUpcomingByCompany,
   isScheduleForNow,
+  isScheduledItemOverdue,
   resumeTint,
   stripTestModePrefix,
   summarizeUpcomingSends,
@@ -148,6 +149,50 @@ describe("isScheduleForNow", () => {
     const now = Date.parse("2026-07-11T12:00:00.000Z");
     expect(isScheduleForNow(new Date(now + 60_000), null, now)).toBe(true);
     expect(isScheduleForNow(new Date(now + 120_000), null, now)).toBe(false);
+  });
+});
+
+describe("isScheduledItemOverdue", () => {
+  it("flags past slots that are not currently sending", () => {
+    const now = Date.parse("2026-07-11T12:00:00.000Z");
+    expect(
+      isScheduledItemOverdue(
+        upcoming({
+          queueItemId: "q1",
+          candidateId: "c1",
+          fullName: "Jane",
+          scheduledFor: "2026-07-11T11:59:00.000Z",
+        }),
+        now,
+      ),
+    ).toBe(true);
+  });
+
+  it("does not flag in-progress or future slots", () => {
+    const now = Date.parse("2026-07-11T12:00:00.000Z");
+    expect(
+      isScheduledItemOverdue(
+        upcoming({
+          queueItemId: "q1",
+          candidateId: "c1",
+          fullName: "Jane",
+          scheduledFor: "2026-07-11T11:00:00.000Z",
+          jobStatus: "in_progress",
+        }),
+        now,
+      ),
+    ).toBe(false);
+    expect(
+      isScheduledItemOverdue(
+        upcoming({
+          queueItemId: "q2",
+          candidateId: "c2",
+          fullName: "Bob",
+          scheduledFor: "2026-07-11T12:05:00.000Z",
+        }),
+        now,
+      ),
+    ).toBe(false);
   });
 });
 

@@ -37,6 +37,7 @@ export interface UpcomingSendView {
   company?: string;
   email: string;
   profilePhotoUrl?: string;
+  linkedinUrl?: string;
   scheduledFor: string;
   queueStatus: string;
   jobStatus?: string;

@@ -1630,37 +1630,35 @@ type Species =
   | "oak"
   | "pine"
   | "birch"
-  | "cherry"
   | "maple"
-  | "willow"
-  | "spruce"
   | "poplar"
   | "aspen"
-  | "cedar"
   | "apple"
   | "dogwood"
   | "redmaple"
-  | "cypress"
-  | "olive"
   | "magnolia"
-  | "larch"
-  | "sycamore"
-  | "beech"
-  | "elm"
   | "plum"
-  | "fir"
-  | "juniper"
-  | "sequoia"
   | "ginkgo"
   | "acacia"
   | "palm"
-  | "rowan"
-  | "hemlock"
   | "baobab"
   | "bamboo"
   | "jacaranda"
-  | "copperbeech"
-  | "araucaria";
+  | "araucaria"
+  | "redbud"
+  | "flametree"
+  | "crystal"
+  | "candyfloss"
+  | "stormtree"
+  | "heartwood"
+  | "auroratree"
+  | "spiraltree"
+  | "ghosttree"
+  | "bubbletree"
+  | "moontree"
+  | "fungicap"
+  | "voidgate"
+  | "soulbloom";
 
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
@@ -1679,45 +1677,70 @@ const SPECIES_POOL: Species[] = [
   "oak",
   "pine",
   "birch",
-  "cherry",
   "maple",
-  "willow",
-  "spruce",
   "poplar",
   "aspen",
-  "cedar",
   "apple",
   "dogwood",
   "redmaple",
-  "cypress",
-  "olive",
   "magnolia",
-  "larch",
-  "sycamore",
-  "beech",
-  "elm",
   "plum",
-  "fir",
-  "juniper",
-  "sequoia",
   "ginkgo",
   "acacia",
   "palm",
-  "rowan",
-  "hemlock",
   "baobab",
   "bamboo",
   "jacaranda",
-  "copperbeech",
   "araucaria",
+  "redbud",
+  "flametree",
+  "crystal",
+  "candyfloss",
+  "stormtree",
+  "heartwood",
+  "auroratree",
+  "spiraltree",
+  "ghosttree",
+  "bubbletree",
+  "moontree",
+  "fungicap",
+  "voidgate",
+  "soulbloom",
 ];
 
-function pickSpecies(rand: () => number, lakeD2: number): Species {
-  if (lakeD2 < 1.9 && rand() < 0.35) return "willow";
-  if (lakeD2 < 2.2 && rand() < 0.1) return "cypress";
-  if (lakeD2 < 2.0 && rand() < 0.08) return "juniper";
-  // Even mix across the full species set
-  return SPECIES_POOL[Math.floor(rand() * SPECIES_POOL.length)]!;
+/** Catalog completes by this streak day; until then plantings look random (dupes ok). */
+const SPECIES_UNLOCK_BY_DAY = 100;
+
+/**
+ * Fixed seeded planting order for every grove slot.
+ * Days 1–100: ~3 of each species, shuffled — feels random, guarantees the full
+ * catalog by day 100. Past 100: more seeded random draws (dupes welcome).
+ */
+function buildPlantingSequence(slotCount: number): Species[] {
+  const rand = mulberry32(0x67a7e001);
+  const pool = SPECIES_POOL;
+  const bag: Species[] = [];
+  for (const species of pool) {
+    bag.push(species, species, species);
+  }
+  while (bag.length < SPECIES_UNLOCK_BY_DAY) {
+    bag.push(pool[Math.floor(rand() * pool.length)]!);
+  }
+  for (let i = bag.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(rand() * (i + 1));
+    const tmp = bag[i]!;
+    bag[i] = bag[j]!;
+    bag[j] = tmp;
+  }
+  const sequence: Species[] = [];
+  for (let i = 0; i < slotCount; i += 1) {
+    if (i < SPECIES_UNLOCK_BY_DAY) {
+      sequence.push(bag[i]!);
+    } else {
+      sequence.push(pool[Math.floor(rand() * pool.length)]!);
+    }
+  }
+  return sequence;
 }
 
 function buildSlots3D(): Slot3D[] {
@@ -1740,23 +1763,238 @@ function buildSlots3D(): Slot3D[] {
       if (y < WATER_Y + 0.15) continue;
       const slope = Math.hypot(heightAt(x + 1.2, z) - y, heightAt(x, z + 1.2) - y) / 1.2;
       if (y > 24 || slope > 1.4) continue;
-      slots.push({ x, z, species: pickSpecies(rand, lakeD2), seed: n * 31 + 11 });
+      // Species filled after sort from the seeded planting sequence
+      slots.push({ x, z, species: "oak", seed: n * 31 + 11 });
       if (slots.length >= SOFT_CAP) break;
     }
     if (slots.length >= SOFT_CAP) break;
   }
   const focal = { x: -12, z: 18 };
-  return slots.sort(
+  slots.sort(
     (a, b) =>
       (a.x - focal.x) ** 2 +
       (a.z - focal.z) ** 2 -
       ((b.x - focal.x) ** 2 + (b.z - focal.z) ** 2),
   );
+  const sequence = buildPlantingSequence(slots.length);
+  for (let i = 0; i < slots.length; i += 1) {
+    slots[i]!.species = sequence[i]!;
+  }
+  return slots;
 }
 
 const SLOTS_3D = buildSlots3D();
 /** Soft GPU ceiling — the grove keeps growing toward this; not a product “max streak”. */
 const MAX_TREES_3D = SLOTS_3D.length;
+
+/** Species planted for a streak length (uses best/current day count). */
+export function plantedSpeciesForStreak(streak: number): Set<string> {
+  const count = Math.min(Math.max(0, Math.floor(streak)), SLOTS_3D.length);
+  const found = new Set<string>();
+  for (let i = 0; i < count; i += 1) {
+    found.add(SLOTS_3D[i]!.species);
+  }
+  return found;
+}
+
+export function groveSpeciesCount(): number {
+  return SPECIES_POOL.length;
+}
+
+let thumbRenderer: THREE.WebGLRenderer | null = null;
+const thumbCache = new Map<string, string>();
+
+function animateTreeParts(root: THREE.Object3D, elapsed: number, delta: number) {
+  root.traverse((obj) => {
+    const mesh = obj as THREE.Mesh;
+    const kind = mesh.userData?.animate as string | undefined;
+    if (!kind) return;
+    const phase = (mesh.userData.phase as number) || 0;
+    if (kind === "flame") {
+      const baseY = (mesh.userData.baseY as number) ?? mesh.position.y;
+      mesh.position.y = baseY + Math.sin(elapsed * 11 + phase) * 0.1;
+      mesh.scale.y = 0.82 + Math.sin(elapsed * 14 + phase * 1.3) * 0.22;
+      mesh.scale.x = 0.92 + Math.sin(elapsed * 9 + phase) * 0.1;
+      const mat = mesh.material as THREE.MeshStandardMaterial;
+      if (mat?.emissiveIntensity != null) {
+        mat.emissiveIntensity = 1.0 + Math.sin(elapsed * 16 + phase) * 0.55;
+      }
+    } else if (kind === "frond") {
+      const base = (mesh.userData.baseRotX as number) ?? mesh.rotation.x;
+      mesh.rotation.x = base + Math.sin(elapsed * 2.2 + phase) * 0.08;
+    } else if (kind === "bob") {
+      const baseY = (mesh.userData.baseY as number) ?? mesh.position.y;
+      mesh.position.y = baseY + Math.sin(elapsed * 2.4 + phase) * 0.12;
+    } else if (kind === "lightning") {
+      const mat = mesh.material as THREE.MeshStandardMaterial;
+      const flash = Math.sin(elapsed * 18 + phase) > 0.72 ? 1 : 0.08;
+      mesh.visible = flash > 0.5 || Math.sin(elapsed * 3 + phase) > 0.4;
+      if (mat?.emissiveIntensity != null) mat.emissiveIntensity = 0.4 + flash * 2.2;
+    } else if (kind === "aurora") {
+      const baseY = (mesh.userData.baseY as number) ?? mesh.position.y;
+      mesh.position.y = baseY + Math.sin(elapsed * 1.6 + phase) * 0.25;
+      mesh.rotation.z = Math.sin(elapsed * 1.2 + phase) * 0.2;
+      const mat = mesh.material as THREE.MeshStandardMaterial;
+      if (mat?.emissiveIntensity != null) {
+        mat.emissiveIntensity = 0.6 + Math.sin(elapsed * 2 + phase) * 0.45;
+      }
+    } else if (kind === "spin") {
+      mesh.rotation.y = elapsed * 0.7 + phase;
+    } else if (kind === "ghost") {
+      const baseY = (mesh.userData.baseY as number) ?? mesh.position.y;
+      mesh.position.y = baseY + Math.sin(elapsed * 1.5 + phase) * 0.15;
+      const mat = mesh.material as THREE.MeshStandardMaterial;
+      if (mat?.opacity != null) {
+        mat.opacity = 0.35 + Math.sin(elapsed * 2.2 + phase) * 0.25;
+      }
+    } else if (kind === "bubble") {
+      const baseY = (mesh.userData.baseY as number) ?? mesh.position.y;
+      let y = baseY + ((elapsed * 0.55 + phase) % 2.4);
+      if (y > baseY + 2.2) y = baseY;
+      mesh.position.y = y;
+      mesh.position.x += Math.sin(elapsed * 2 + phase) * 0.002;
+    } else if (kind === "moon") {
+      const baseY = (mesh.userData.baseY as number) ?? mesh.position.y;
+      mesh.position.y = baseY + Math.sin(elapsed * 1.3 + phase) * 0.12;
+      const mat = mesh.material as THREE.MeshStandardMaterial;
+      if (mat?.emissiveIntensity != null) {
+        mat.emissiveIntensity = 0.65 + Math.sin(elapsed * 2.5 + phase) * 0.35;
+      }
+    } else if (kind === "voidspin") {
+      mesh.rotation.y = elapsed * 0.45;
+      mesh.rotation.z = Math.sin(elapsed * 0.8) * 0.08;
+    } else if (kind === "voidspark") {
+      const baseY = (mesh.userData.baseY as number) ?? mesh.position.y;
+      mesh.position.y = baseY + Math.sin(elapsed * 3 + phase) * 0.08;
+      const mat = mesh.material as THREE.MeshStandardMaterial;
+      if (mat?.emissiveIntensity != null) {
+        mat.emissiveIntensity = 0.8 + Math.sin(elapsed * 5 + phase) * 0.7;
+      }
+    } else if (kind === "soul") {
+      const baseY = (mesh.userData.baseY as number) ?? mesh.position.y;
+      mesh.position.y = baseY + ((elapsed * 0.35 + phase) % 2.0);
+      mesh.rotation.z += delta * 0.4;
+      const mat = mesh.material as THREE.MeshStandardMaterial;
+      if (mat?.opacity != null) {
+        mat.opacity = 0.45 + Math.sin(elapsed * 2 + phase) * 0.3;
+      }
+    }
+  });
+}
+
+function makeThumbScene(speciesId: Species): {
+  scene: THREE.Scene;
+  camera: THREE.PerspectiveCamera;
+  tree: THREE.Group;
+} {
+  const scene = new THREE.Scene();
+  const hemi = new THREE.HemisphereLight(0xe8f2ff, 0x6a7a4a, 1.05);
+  const key = new THREE.DirectionalLight(0xfff2d8, 1.15);
+  key.position.set(3, 6, 4);
+  scene.add(hemi, key);
+  const tree = buildTreeMesh(speciesId, 77);
+  tree.rotation.y = 0;
+  tree.scale.setScalar(0.85);
+  scene.add(tree);
+  const camera = new THREE.PerspectiveCamera(30, 168 / 192, 0.1, 40);
+  camera.position.set(0.1, 2.55, 6.6);
+  camera.lookAt(0, 2.35, 0);
+  return { scene, camera, tree };
+}
+
+/** One-shot WebGL snapshot of the exact grove mesh for field-guide cards. */
+export function renderSpeciesThumbnail(speciesId: string): string {
+  const cacheKey = `${speciesId}@myst1`;
+  const cached = thumbCache.get(cacheKey);
+  if (cached) return cached;
+  if (!SPECIES_POOL.includes(speciesId as Species)) {
+    return "";
+  }
+  if (!thumbRenderer) {
+    thumbRenderer = new THREE.WebGLRenderer({
+      antialias: true,
+      alpha: true,
+      preserveDrawingBuffer: true,
+      powerPreference: "low-power",
+    });
+    thumbRenderer.outputColorSpace = THREE.SRGBColorSpace;
+  }
+  thumbRenderer.setSize(168, 192, false);
+  thumbRenderer.setPixelRatio(1);
+  const { scene, camera, tree } = makeThumbScene(speciesId as Species);
+  thumbRenderer.setClearColor(0x000000, 0);
+  thumbRenderer.render(scene, camera);
+  const url = thumbRenderer.domElement.toDataURL("image/png");
+  thumbCache.set(cacheKey, url);
+  scene.remove(tree);
+  disposeTreeObject(tree);
+  return url;
+}
+
+/** Live WebGL tree for field-guide hover — rotates the real mesh, not a flat image. */
+export function LiveSpeciesThumb({
+  speciesId,
+  className,
+}: {
+  speciesId: string;
+  className?: string;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !SPECIES_POOL.includes(speciesId as Species)) return;
+
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const renderer = new THREE.WebGLRenderer({
+      canvas,
+      antialias: true,
+      alpha: true,
+      powerPreference: "low-power",
+    });
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.setClearColor(0x000000, 0);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+    renderer.setSize(112, 128, false);
+
+    const { scene, camera, tree } = makeThumbScene(speciesId as Species);
+    let raf = 0;
+    let last = performance.now();
+    const start = last;
+
+    const tick = (now: number) => {
+      const delta = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      const elapsed = (now - start) / 1000;
+      if (!reducedMotion) {
+        tree.rotation.y += delta * 0.95;
+        animateTreeParts(tree, elapsed, delta);
+      } else {
+        tree.rotation.y = 0.32;
+      }
+      renderer.render(scene, camera);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+
+    return () => {
+      cancelAnimationFrame(raf);
+      scene.remove(tree);
+      disposeTreeObject(tree);
+      renderer.dispose();
+    };
+  }, [speciesId]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      className={className ?? "grove-guide-thumb is-live"}
+      width={112}
+      height={128}
+      aria-hidden="true"
+    />
+  );
+}
 
 /** Front meadow point where early trees gather as heroes. */
 const SHOWCASE = { x: -7, z: 26 };
@@ -1817,40 +2055,38 @@ function cameraForGrove(count: number): { base: THREE.Vector3; target: THREE.Vec
 }
 
 const CANOPY_COLORS: Record<Species, [string, string]> = {
-  oak: ["#2f6a36", "#6eab55"],
-  pine: ["#1a3f2c", "#3a6e48"],
-  birch: ["#7aa43f", "#b5d46e"],
-  cherry: ["#d882ae", "#f5c0d6"],
-  maple: ["#b85c22", "#e89a48"],
-  willow: ["#5f8d42", "#97c06a"],
-  spruce: ["#163528", "#2f5a40"],
-  poplar: ["#6a9a48", "#c4d98a"],
-  aspen: ["#8fb84a", "#e2ef8e"],
-  cedar: ["#2a4a32", "#5a7a4e"],
-  apple: ["#4e8a3a", "#a8d06a"],
-  dogwood: ["#e8e4dc", "#f7f2ea"],
-  redmaple: ["#8b1e1e", "#d94a3a"],
-  cypress: ["#2d4a38", "#5a7a58"],
-  olive: ["#6a7a4a", "#b8c47a"],
-  magnolia: ["#f0e8dc", "#fff8f0"],
-  larch: ["#7a9a3a", "#c8d86a"],
-  sycamore: ["#4a6a3a", "#9aba68"],
-  beech: ["#3d6b3a", "#7fad5e"],
-  elm: ["#4a7038", "#8fbc5a"],
-  plum: ["#9a4a7a", "#d890b8"],
-  fir: ["#1a3828", "#3a6048"],
-  juniper: ["#2a4838", "#5a7860"],
-  sequoia: ["#1e3a28", "#4a6a48"],
-  ginkgo: ["#c4b030", "#efe070"],
-  acacia: ["#6a8a3a", "#c0d070"],
-  palm: ["#2a6a38", "#5aaa58"],
-  rowan: ["#4a7038", "#8fbc5a"],
-  hemlock: ["#1c382c", "#3e5e48"],
-  baobab: ["#6a8a48", "#a8c070"],
-  bamboo: ["#3a7a38", "#7aba58"],
-  jacaranda: ["#6a48a8", "#c090e0"],
-  copperbeech: ["#5a2820", "#a84838"],
-  araucaria: ["#2a4830", "#4a7050"],
+  oak: ["#1f5c28", "#5f9e44"],
+  pine: ["#0f2e22", "#2d5a3c"],
+  birch: ["#8fbe45", "#d4f07a"],
+  maple: ["#c44e12", "#ffb24a"],
+  poplar: ["#5a9e3a", "#d0ec88"],
+  aspen: ["#b8d84a", "#f2ff9a"],
+  apple: ["#2f8f28", "#7ed85a"],
+  dogwood: ["#f2ece4", "#ffffff"],
+  redmaple: ["#9a1212", "#ff4a38"],
+  magnolia: ["#fff0e0", "#ffe8f2"],
+  plum: ["#7a2080", "#e090d8"],
+  ginkgo: ["#d4a010", "#ffe860"],
+  acacia: ["#88a828", "#e8f070"],
+  palm: ["#1a7a40", "#50d070"],
+  baobab: ["#708848", "#c8d890"],
+  bamboo: ["#28a030", "#90e070"],
+  jacaranda: ["#5828c0", "#d8a0ff"],
+  araucaria: ["#204030", "#588868"],
+  redbud: ["#d01060", "#ff90c0"],
+  flametree: ["#ff2a00", "#ffcc33"],
+  crystal: ["#4ad0ff", "#e8ffff"],
+  candyfloss: ["#ff7eb9", "#c5a3ff"],
+  stormtree: ["#1a1a2e", "#7ec8ff"],
+  heartwood: ["#ff2d55", "#ff8fab"],
+  auroratree: ["#00e5a8", "#7b61ff"],
+  spiraltree: ["#ff6b00", "#ffe066"],
+  ghosttree: ["#e8eef8", "#ffffff"],
+  bubbletree: ["#7ad7ff", "#d6f4ff"],
+  moontree: ["#f0e6c8", "#fff8e0"],
+  fungicap: ["#c45c2a", "#f0d090"],
+  voidgate: ["#0a0618", "#6b4dff"],
+  soulbloom: ["#b388ff", "#e8d5ff"],
 };
 
 const blobMat = new THREE.MeshStandardMaterial({
@@ -1908,7 +2144,7 @@ function makeTrunk(topR: number, botR: number, h: number, mat: THREE.Material): 
 function addConeTiers(
   g: THREE.Group,
   seed: number,
-  species: "pine" | "spruce" | "cedar" | "larch" | "cypress" | "fir" | "juniper" | "sequoia" | "hemlock",
+  species: "pine",
   tiers: Array<{ r: number; h: number; y: number }>,
 ) {
   const rand = mulberry32(seed);
@@ -1940,70 +2176,6 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
       { r: 0.72, h: 1.4, y: 3.6 },
       { r: 0.42, h: 0.95, y: 4.25 },
     ]);
-  } else if (species === "spruce") {
-    g.add(makeTrunk(0.07, 0.16, 1.4, trunkMat));
-    addConeTiers(g, seed + 3, "spruce", [
-      { r: 1.15, h: 2.0, y: 2.0 },
-      { r: 0.88, h: 1.85, y: 3.15 },
-      { r: 0.58, h: 1.55, y: 4.2 },
-      { r: 0.32, h: 1.1, y: 5.05 },
-    ]);
-  } else if (species === "cedar") {
-    g.add(makeTrunk(0.1, 0.22, 1.5, cedarTrunkMat));
-    addConeTiers(g, seed + 3, "cedar", [
-      { r: 1.55, h: 1.5, y: 2.0 },
-      { r: 1.25, h: 1.35, y: 2.85 },
-      { r: 0.9, h: 1.2, y: 3.55 },
-      { r: 0.5, h: 0.9, y: 4.15 },
-    ]);
-  } else if (species === "larch") {
-    g.add(makeTrunk(0.07, 0.15, 1.25, trunkMat));
-    addConeTiers(g, seed + 3, "larch", [
-      { r: 1.2, h: 1.5, y: 1.85 },
-      { r: 0.9, h: 1.35, y: 2.85 },
-      { r: 0.55, h: 1.1, y: 3.7 },
-    ]);
-  } else if (species === "cypress") {
-    g.add(makeTrunk(0.06, 0.12, 2.0, trunkMat));
-    addConeTiers(g, seed + 3, "cypress", [
-      { r: 0.55, h: 1.8, y: 2.4 },
-      { r: 0.42, h: 1.6, y: 3.5 },
-      { r: 0.28, h: 1.3, y: 4.45 },
-      { r: 0.16, h: 0.9, y: 5.2 },
-    ]);
-  } else if (species === "fir") {
-    g.add(makeTrunk(0.08, 0.18, 1.5, trunkMat));
-    addConeTiers(g, seed + 3, "fir", [
-      { r: 1.4, h: 1.7, y: 2.1 },
-      { r: 1.05, h: 1.55, y: 3.15 },
-      { r: 0.7, h: 1.35, y: 4.1 },
-      { r: 0.38, h: 1.0, y: 4.9 },
-    ]);
-  } else if (species === "juniper") {
-    g.add(makeTrunk(0.05, 0.1, 0.9, trunkMat));
-    addConeTiers(g, seed + 3, "juniper", [
-      { r: 0.85, h: 1.1, y: 1.35 },
-      { r: 0.65, h: 0.95, y: 2.05 },
-      { r: 0.4, h: 0.75, y: 2.6 },
-    ]);
-  } else if (species === "sequoia") {
-    g.add(makeTrunk(0.16, 0.38, 2.8, cedarTrunkMat));
-    addConeTiers(g, seed + 3, "sequoia", [
-      { r: 1.6, h: 1.8, y: 3.2 },
-      { r: 1.25, h: 1.6, y: 4.3 },
-      { r: 0.85, h: 1.4, y: 5.3 },
-      { r: 0.45, h: 1.1, y: 6.15 },
-    ]);
-  } else if (species === "hemlock") {
-    g.add(makeTrunk(0.07, 0.15, 1.6, trunkMat));
-    // Soft drooping evergreen — wider lower tiers, airier than spruce
-    addConeTiers(g, seed + 3, "hemlock", [
-      { r: 1.45, h: 1.35, y: 2.0 },
-      { r: 1.15, h: 1.25, y: 2.9 },
-      { r: 0.85, h: 1.15, y: 3.7 },
-      { r: 0.55, h: 1.0, y: 4.4 },
-      { r: 0.28, h: 0.75, y: 5.0 },
-    ]);
   } else if (species === "ginkgo") {
     g.add(makeTrunk(0.09, 0.2, 2.0, trunkMat));
     // Golden fan canopy — irregular bright lobes
@@ -2027,40 +2199,32 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     rim2.position.set(-0.9, 2.72, -0.15);
     g.add(crown, rim1, rim2);
   } else if (species === "palm") {
-    g.add(makeTrunk(0.1, 0.18, 3.2, cedarTrunkMat));
-    // Frond discs around the crown
-    for (let i = 0; i < 7; i += 1) {
-      const frond = makeBlob(0.95 - i * 0.04, species, seed + i, 0.28);
-      const a = (i / 7) * Math.PI * 2 + rand() * 0.2;
-      frond.position.set(Math.cos(a) * 0.85, 3.35 + (rand() - 0.5) * 0.25, Math.sin(a) * 0.85);
-      frond.rotation.z = Math.cos(a) * 0.35;
-      frond.rotation.x = Math.sin(a) * 0.35;
+    // Tall trunk + long arched fronds (not pancake blobs)
+    g.add(makeTrunk(0.09, 0.16, 3.4, cedarTrunkMat));
+    const frondMat = new THREE.MeshStandardMaterial({
+      color: new THREE.Color("#2a9a48"),
+      roughness: 0.85,
+    });
+    for (let i = 0; i < 9; i += 1) {
+      const a = (i / 9) * Math.PI * 2;
+      const frond = new THREE.Mesh(new THREE.ConeGeometry(0.22, 2.4, 5), frondMat);
+      frond.scale.set(0.28, 1, 1);
+      frond.position.set(Math.cos(a) * 0.35, 3.55, Math.sin(a) * 0.35);
+      frond.rotation.order = "YXZ";
+      frond.rotation.y = a;
+      frond.rotation.x = 1.05 + rand() * 0.2;
+      frond.castShadow = false;
+      frond.userData.animate = "frond";
+      frond.userData.phase = rand() * Math.PI * 2;
+      frond.userData.baseRotX = frond.rotation.x;
       g.add(frond);
     }
-    const top = makeBlob(0.55, species, seed + 20, 0.5);
-    top.position.set(0, 3.55, 0);
-    g.add(top);
-  } else if (species === "rowan") {
-    g.add(makeTrunk(0.08, 0.18, 2.1, trunkMat));
-    const main = makeBlob(1.15, species, seed + 1, 0.88);
-    main.position.set(0, 2.75, 0);
-    const s1 = makeBlob(0.7, species, seed + 2);
-    s1.position.set(0.7, 2.35, 0.2);
-    const s2 = makeBlob(0.65, species, seed + 3);
-    s2.position.set(-0.65, 2.4, -0.15);
-    const s3 = makeBlob(0.5, species, seed + 4);
-    s3.position.set(0.05, 3.25, 0.05);
-    g.add(main, s1, s2, s3);
-    // Orange-red berry clusters
-    for (let i = 0; i < 8; i += 1) {
-      const berry = new THREE.Mesh(
-        new THREE.SphereGeometry(0.055, 5, 5),
-        new THREE.MeshStandardMaterial({ color: new THREE.Color("#d94a28"), roughness: 0.65 }),
-      );
-      berry.position.set((rand() - 0.5) * 1.8, 2.2 + rand() * 1.2, (rand() - 0.5) * 1.8);
-      berry.castShadow = false;
-      g.add(berry);
-    }
+    const crown = new THREE.Mesh(
+      new THREE.SphereGeometry(0.28, 6, 6),
+      new THREE.MeshStandardMaterial({ color: new THREE.Color("#1a6a30"), roughness: 0.9 }),
+    );
+    crown.position.y = 3.45;
+    g.add(crown);
   } else if (species === "baobab") {
     // Massive bottle trunk + sparse high canopy
     const bole = new THREE.Mesh(
@@ -2107,18 +2271,6 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     const s3 = makeBlob(0.6, species, seed + 4, 0.8);
     s3.position.set(0.1, 3.4, -0.1);
     g.add(main, s1, s2, s3);
-  } else if (species === "copperbeech") {
-    g.add(makeTrunk(0.12, 0.3, 2.15, trunkMat));
-    // Deep burgundy broad canopy
-    const main = makeBlob(1.65, species, seed + 1, 0.78);
-    main.position.set(0, 2.95, 0);
-    const s1 = makeBlob(1.0, species, seed + 2, 0.8);
-    s1.position.set(0.95, 2.45, 0.25);
-    const s2 = makeBlob(0.95, species, seed + 3, 0.8);
-    s2.position.set(-0.9, 2.5, -0.2);
-    const s3 = makeBlob(0.7, species, seed + 4, 0.75);
-    s3.position.set(0.05, 3.55, 0);
-    g.add(main, s1, s2, s3);
   } else if (species === "araucaria") {
     g.add(makeTrunk(0.1, 0.2, 2.6, trunkMat));
     // Monkey-puzzle: stacked geometric discs
@@ -2137,6 +2289,362 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
       disc.castShadow = false;
       disc.receiveShadow = true;
       g.add(disc);
+    }
+  } else if (species === "redbud") {
+    // Fancy early hook — magenta bloom cloud + dense flower flecks
+    g.add(makeTrunk(0.09, 0.2, 1.85, trunkMat));
+    const main = makeBlob(1.35, species, seed + 1, 0.72);
+    main.position.set(0, 2.55, 0);
+    const s1 = makeBlob(0.85, species, seed + 2, 0.7);
+    s1.position.set(0.85, 2.15, 0.35);
+    const s2 = makeBlob(0.8, species, seed + 3, 0.68);
+    s2.position.set(-0.8, 2.2, -0.25);
+    const s3 = makeBlob(0.7, species, seed + 4, 0.65);
+    s3.position.set(0.15, 3.15, -0.15);
+    const s4 = makeBlob(0.55, species, seed + 5, 0.7);
+    s4.position.set(-0.35, 2.85, 0.55);
+    g.add(main, s1, s2, s3, s4);
+    for (let i = 0; i < 14; i += 1) {
+      const bloom = new THREE.Mesh(
+        new THREE.SphereGeometry(0.07 + rand() * 0.04, 5, 5),
+        new THREE.MeshStandardMaterial({
+          color: new THREE.Color(rand() > 0.45 ? "#f8bbd0" : "#ec407a"),
+          roughness: 0.55,
+          emissive: new THREE.Color("#c2185b"),
+          emissiveIntensity: 0.08,
+        }),
+      );
+      bloom.position.set((rand() - 0.5) * 2.2, 2.0 + rand() * 1.4, (rand() - 0.5) * 2.2);
+      bloom.castShadow = false;
+      g.add(bloom);
+    }
+  } else if (species === "flametree") {
+    // 🔥 emoji energy — layered teardrop flames, white-hot core, flicker via userData
+    const charTrunk = new THREE.MeshStandardMaterial({ color: new THREE.Color("#141010"), roughness: 0.98 });
+    g.add(makeTrunk(0.1, 0.22, 1.55, charTrunk));
+    const flameColors = ["#fff5c0", "#ffdd33", "#ff8a00", "#ff3d00", "#ff1a00"];
+    for (let i = 0; i < 16; i += 1) {
+      const t = i / 15;
+      const h = 1.1 + (1 - t) * 1.4 + rand() * 0.35;
+      const flame = new THREE.Mesh(
+        new THREE.ConeGeometry(0.22 + (1 - t) * 0.35, h, 6),
+        new THREE.MeshStandardMaterial({
+          color: new THREE.Color(flameColors[Math.min(flameColors.length - 1, Math.floor(t * flameColors.length))]!),
+          emissive: new THREE.Color(t < 0.35 ? "#ffe066" : "#ff4500"),
+          emissiveIntensity: 1.4 - t * 0.6,
+          roughness: 0.25,
+          metalness: 0,
+          transparent: true,
+          opacity: 0.92,
+        }),
+      );
+      const a = (i / 16) * Math.PI * 2 + rand() * 0.5;
+      const r = t * 0.55 + rand() * 0.2;
+      const baseY = 1.7 + t * 0.15 + rand() * 0.2;
+      flame.position.set(Math.cos(a) * r, baseY + h * 0.35, Math.sin(a) * r);
+      flame.rotation.z = (rand() - 0.5) * 0.25;
+      flame.castShadow = false;
+      flame.userData.animate = "flame";
+      flame.userData.phase = rand() * Math.PI * 2;
+      flame.userData.baseY = flame.position.y;
+      flame.userData.baseScaleY = 1;
+      g.add(flame);
+    }
+    const core = new THREE.Mesh(
+      new THREE.SphereGeometry(0.42, 10, 10),
+      new THREE.MeshStandardMaterial({
+        color: new THREE.Color("#fff8e0"),
+        emissive: new THREE.Color("#ffcc33"),
+        emissiveIntensity: 2.2,
+        roughness: 0.2,
+      }),
+    );
+    core.position.set(0, 2.15, 0);
+    core.userData.animate = "flame";
+    core.userData.phase = 0;
+    core.userData.baseY = 2.15;
+    g.add(core);
+  } else if (species === "crystal") {
+    // Icy shard canopy — geometric, not blobby
+    const iceTrunk = new THREE.MeshStandardMaterial({ color: new THREE.Color("#c8d8e8"), roughness: 0.4 });
+    g.add(makeTrunk(0.07, 0.14, 1.9, iceTrunk));
+    for (let i = 0; i < 9; i += 1) {
+      const shard = new THREE.Mesh(
+        new THREE.OctahedronGeometry(0.45 + rand() * 0.35, 0),
+        new THREE.MeshStandardMaterial({
+          color: new THREE.Color(rand() > 0.5 ? "#7ae0ff" : "#e8ffff"),
+          emissive: new THREE.Color("#3aa0ff"),
+          emissiveIntensity: 0.22,
+          roughness: 0.2,
+          metalness: 0.35,
+          transparent: true,
+          opacity: 0.88,
+        }),
+      );
+      shard.position.set((rand() - 0.5) * 1.8, 2.1 + rand() * 1.5, (rand() - 0.5) * 1.8);
+      shard.rotation.set(rand() * Math.PI, rand() * Math.PI, rand() * Math.PI);
+      shard.castShadow = false;
+      g.add(shard);
+    }
+  } else if (species === "candyfloss") {
+    // Pastel cotton-candy clouds on a thin stick
+    g.add(makeTrunk(0.05, 0.1, 2.2, birchTrunkMat));
+    const puff = (r: number, y: number, x: number, z: number, seedN: number) => {
+      const cloud = makeBlob(r, species, seedN, 0.55);
+      cloud.position.set(x, y, z);
+      cloud.userData.animate = "bob";
+      cloud.userData.phase = rand() * Math.PI * 2;
+      cloud.userData.baseY = y;
+      return cloud;
+    };
+    g.add(
+      puff(1.4, 2.9, 0, 0, seed + 1),
+      puff(1.0, 3.2, 0.7, 0.2, seed + 2),
+      puff(0.95, 3.15, -0.65, -0.15, seed + 3),
+      puff(0.8, 3.55, 0.1, -0.4, seed + 4),
+      puff(0.7, 2.6, 0.35, 0.55, seed + 5),
+    );
+  } else if (species === "stormtree") {
+    // Dark canopy + flickering lightning bolts
+    g.add(makeTrunk(0.1, 0.22, 2.1, trunkMat));
+    const cloud = makeBlob(1.5, species, seed + 1, 0.55);
+    cloud.position.set(0, 2.9, 0);
+    g.add(cloud);
+    for (let i = 0; i < 5; i += 1) {
+      const bolt = new THREE.Mesh(
+        new THREE.BoxGeometry(0.06, 1.1 + rand() * 0.6, 0.06),
+        new THREE.MeshStandardMaterial({
+          color: new THREE.Color("#e8f4ff"),
+          emissive: new THREE.Color("#7ec8ff"),
+          emissiveIntensity: 1.8,
+          roughness: 0.2,
+        }),
+      );
+      bolt.position.set((rand() - 0.5) * 1.6, 1.6 + rand() * 0.8, (rand() - 0.5) * 1.6);
+      bolt.rotation.z = (rand() - 0.5) * 0.5;
+      bolt.castShadow = false;
+      bolt.userData.animate = "lightning";
+      bolt.userData.phase = rand() * Math.PI * 2;
+      g.add(bolt);
+    }
+  } else if (species === "heartwood") {
+    g.add(makeTrunk(0.08, 0.16, 1.8, trunkMat));
+    for (let i = 0; i < 10; i += 1) {
+      const heart = new THREE.Mesh(
+        new THREE.SphereGeometry(0.22 + rand() * 0.12, 8, 8),
+        new THREE.MeshStandardMaterial({
+          color: new THREE.Color(rand() > 0.5 ? "#ff2d55" : "#ff8fab"),
+          emissive: new THREE.Color("#ff2d55"),
+          emissiveIntensity: 0.35,
+          roughness: 0.45,
+        }),
+      );
+      heart.scale.set(1, 0.85, 0.7);
+      heart.position.set((rand() - 0.5) * 1.8, 2.1 + rand() * 1.3, (rand() - 0.5) * 1.8);
+      heart.castShadow = false;
+      heart.userData.animate = "bob";
+      heart.userData.phase = rand() * Math.PI * 2;
+      heart.userData.baseY = heart.position.y;
+      g.add(heart);
+    }
+  } else if (species === "auroratree") {
+    g.add(makeTrunk(0.07, 0.14, 2.0, birchTrunkMat));
+    for (let i = 0; i < 6; i += 1) {
+      const ribbon = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.35, 2.2 + rand() * 0.6),
+        new THREE.MeshStandardMaterial({
+          color: new THREE.Color(i % 2 === 0 ? "#00e5a8" : "#7b61ff"),
+          emissive: new THREE.Color(i % 2 === 0 ? "#00c896" : "#5a40e0"),
+          emissiveIntensity: 0.9,
+          roughness: 0.3,
+          transparent: true,
+          opacity: 0.75,
+          side: THREE.DoubleSide,
+        }),
+      );
+      const a = (i / 6) * Math.PI * 2;
+      ribbon.position.set(Math.cos(a) * 0.55, 2.8, Math.sin(a) * 0.55);
+      ribbon.rotation.y = a;
+      ribbon.castShadow = false;
+      ribbon.userData.animate = "aurora";
+      ribbon.userData.phase = (i / 6) * Math.PI * 2;
+      ribbon.userData.baseY = ribbon.position.y;
+      g.add(ribbon);
+    }
+  } else if (species === "spiraltree") {
+    g.add(makeTrunk(0.09, 0.2, 1.9, trunkMat));
+    const swirl = new THREE.Group();
+    swirl.position.y = 2.5;
+    swirl.userData.animate = "spin";
+    for (let i = 0; i < 8; i += 1) {
+      const lobe = makeBlob(0.7, species, seed + i, 0.7);
+      const a = (i / 8) * Math.PI * 2;
+      lobe.position.set(Math.cos(a) * 1.0, Math.sin(i * 0.4) * 0.35, Math.sin(a) * 1.0);
+      swirl.add(lobe);
+    }
+    g.add(swirl);
+  } else if (species === "ghosttree") {
+    g.add(makeTrunk(0.07, 0.14, 2.0, birchTrunkMat));
+    for (let i = 0; i < 5; i += 1) {
+      const wisp = makeBlob(0.85 - i * 0.08, species, seed + i, 0.9);
+      wisp.position.set((rand() - 0.5) * 0.9, 2.3 + i * 0.35, (rand() - 0.5) * 0.9);
+      const mat = new THREE.MeshStandardMaterial({
+        color: new THREE.Color("#f4f7ff"),
+        emissive: new THREE.Color("#c8d4f0"),
+        emissiveIntensity: 0.35,
+        transparent: true,
+        opacity: 0.55,
+        roughness: 0.35,
+      });
+      wisp.material = mat;
+      wisp.userData.animate = "ghost";
+      wisp.userData.phase = rand() * Math.PI * 2;
+      wisp.userData.baseY = wisp.position.y;
+      g.add(wisp);
+    }
+  } else if (species === "bubbletree") {
+    g.add(makeTrunk(0.06, 0.12, 1.7, trunkMat));
+    for (let i = 0; i < 12; i += 1) {
+      const bubble = new THREE.Mesh(
+        new THREE.SphereGeometry(0.14 + rand() * 0.18, 8, 8),
+        new THREE.MeshStandardMaterial({
+          color: new THREE.Color("#b8ecff"),
+          emissive: new THREE.Color("#4ec8ff"),
+          emissiveIntensity: 0.25,
+          transparent: true,
+          opacity: 0.55,
+          roughness: 0.15,
+          metalness: 0.1,
+        }),
+      );
+      bubble.position.set((rand() - 0.5) * 1.6, 1.4 + rand() * 2.2, (rand() - 0.5) * 1.6);
+      bubble.castShadow = false;
+      bubble.userData.animate = "bubble";
+      bubble.userData.phase = rand() * Math.PI * 2;
+      bubble.userData.baseY = bubble.position.y;
+      g.add(bubble);
+    }
+  } else if (species === "moontree") {
+    g.add(makeTrunk(0.08, 0.16, 2.1, trunkMat));
+    for (let i = 0; i < 6; i += 1) {
+      const moon = new THREE.Mesh(
+        new THREE.SphereGeometry(0.35 + rand() * 0.2, 10, 10),
+        new THREE.MeshStandardMaterial({
+          color: new THREE.Color("#fff6d8"),
+          emissive: new THREE.Color("#ffe9a8"),
+          emissiveIntensity: 0.9,
+          roughness: 0.35,
+        }),
+      );
+      const a = (i / 6) * Math.PI * 2;
+      moon.position.set(Math.cos(a) * 1.05, 2.4 + (i % 2) * 0.55, Math.sin(a) * 1.05);
+      moon.castShadow = false;
+      moon.userData.animate = "moon";
+      moon.userData.phase = a;
+      moon.userData.baseY = moon.position.y;
+      g.add(moon);
+    }
+  } else if (species === "fungicap") {
+    // Giant mushroom — unmistakable silhouette
+    const stem = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.28, 0.38, 1.6, 10),
+      new THREE.MeshStandardMaterial({ color: new THREE.Color("#e8d8b8"), roughness: 0.9 }),
+    );
+    stem.position.y = 0.8;
+    stem.castShadow = true;
+    g.add(stem);
+    const cap = new THREE.Mesh(
+      new THREE.SphereGeometry(1.35, 12, 10, 0, Math.PI * 2, 0, Math.PI * 0.55),
+      new THREE.MeshStandardMaterial({ color: new THREE.Color("#c45c2a"), roughness: 0.85 }),
+    );
+    cap.position.y = 1.85;
+    cap.castShadow = true;
+    g.add(cap);
+    for (let i = 0; i < 8; i += 1) {
+      const spot = new THREE.Mesh(
+        new THREE.SphereGeometry(0.12 + rand() * 0.08, 6, 6),
+        new THREE.MeshStandardMaterial({ color: new THREE.Color("#f0d090"), roughness: 0.8 }),
+      );
+      const a = (i / 8) * Math.PI * 2 + rand() * 0.2;
+      spot.position.set(Math.cos(a) * 0.7, 2.15 + rand() * 0.25, Math.sin(a) * 0.7);
+      g.add(spot);
+    }
+  } else if (species === "voidgate") {
+    // Mystical portal canopy — a dark ring that drinks the light
+    const pillar = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.08, 0.14, 1.9, 8),
+      new THREE.MeshStandardMaterial({ color: new THREE.Color("#1a1028"), roughness: 0.9 }),
+    );
+    pillar.position.y = 0.95;
+    pillar.castShadow = true;
+    g.add(pillar);
+    const gate = new THREE.Group();
+    gate.position.y = 2.55;
+    gate.userData.animate = "voidspin";
+    const rim = new THREE.Mesh(
+      new THREE.TorusGeometry(1.05, 0.12, 8, 24),
+      new THREE.MeshStandardMaterial({
+        color: new THREE.Color("#2a1848"),
+        emissive: new THREE.Color("#6b4dff"),
+        emissiveIntensity: 0.85,
+        roughness: 0.3,
+      }),
+    );
+    rim.rotation.x = Math.PI / 2;
+    gate.add(rim);
+    const disc = new THREE.Mesh(
+      new THREE.CircleGeometry(0.95, 24),
+      new THREE.MeshStandardMaterial({
+        color: new THREE.Color("#05030c"),
+        emissive: new THREE.Color("#1a0a40"),
+        emissiveIntensity: 0.55,
+        roughness: 0.8,
+        side: THREE.DoubleSide,
+      }),
+    );
+    disc.rotation.x = -Math.PI / 2;
+    gate.add(disc);
+    for (let i = 0; i < 10; i += 1) {
+      const spark = new THREE.Mesh(
+        new THREE.SphereGeometry(0.05 + rand() * 0.04, 5, 5),
+        new THREE.MeshStandardMaterial({
+          color: new THREE.Color("#c4b5ff"),
+          emissive: new THREE.Color("#8b5cff"),
+          emissiveIntensity: 1.4,
+          roughness: 0.2,
+        }),
+      );
+      const a = (i / 10) * Math.PI * 2;
+      spark.position.set(Math.cos(a) * 0.7, (rand() - 0.5) * 0.15, Math.sin(a) * 0.7);
+      spark.userData.animate = "voidspark";
+      spark.userData.phase = a;
+      spark.userData.baseY = spark.position.y;
+      gate.add(spark);
+    }
+    g.add(gate);
+  } else if (species === "soulbloom") {
+    // Spirit petals drifting upward from a slender silver trunk
+    g.add(makeTrunk(0.06, 0.11, 2.0, birchTrunkMat));
+    for (let i = 0; i < 14; i += 1) {
+      const petal = new THREE.Mesh(
+        new THREE.SphereGeometry(0.18 + rand() * 0.12, 7, 7),
+        new THREE.MeshStandardMaterial({
+          color: new THREE.Color(rand() > 0.5 ? "#b388ff" : "#e8d5ff"),
+          emissive: new THREE.Color("#7c4dff"),
+          emissiveIntensity: 0.55,
+          transparent: true,
+          opacity: 0.72,
+          roughness: 0.35,
+        }),
+      );
+      petal.scale.set(1.2, 0.45, 0.85);
+      petal.position.set((rand() - 0.5) * 1.7, 1.6 + rand() * 1.8, (rand() - 0.5) * 1.7);
+      petal.rotation.z = (rand() - 0.5) * 0.8;
+      petal.castShadow = false;
+      petal.userData.animate = "soul";
+      petal.userData.phase = rand() * Math.PI * 2;
+      petal.userData.baseY = petal.position.y;
+      g.add(petal);
     }
   } else if (species === "birch") {
     g.add(makeTrunk(0.06, 0.12, 3.0, birchTrunkMat));
@@ -2164,15 +2672,6 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
       b.position.set((rand() - 0.5) * 0.25, 2.2 + i * 0.55, (rand() - 0.5) * 0.25);
       g.add(b);
     }
-  } else if (species === "willow") {
-    const trunk = makeTrunk(0.1, 0.26, 2.0, trunkMat);
-    trunk.rotation.z = 0.18;
-    g.add(trunk);
-    const b1 = makeBlob(1.85, species, seed + 1, 0.7);
-    b1.position.set(-0.3, 2.55, 0);
-    const b2 = makeBlob(1.15, species, seed + 2, 0.78);
-    b2.position.set(0.8, 1.95, 0.3);
-    g.add(b1, b2);
   } else if (species === "apple") {
     g.add(makeTrunk(0.1, 0.24, 1.55, trunkMat));
     const main = makeBlob(1.35, species, seed + 1, 0.95);
@@ -2196,7 +2695,7 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     g.add(makeTrunk(0.08, 0.18, 1.45, trunkMat));
     const main = makeBlob(1.15, "dogwood", seed + 1, 0.85);
     main.position.set(0, 2.15, 0);
-    const s1 = makeBlob(0.7, "cherry", seed + 2, 0.9);
+    const s1 = makeBlob(0.7, "redbud", seed + 2, 0.9);
     s1.position.set(0.7, 1.85, 0.2);
     const s2 = makeBlob(0.65, "dogwood", seed + 3, 0.9);
     s2.position.set(-0.65, 1.9, -0.15);
@@ -2210,46 +2709,6 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     const s2 = makeBlob(0.75, species, seed + 3);
     s2.position.set(-0.7, 2.1, -0.15);
     g.add(main, s1, s2);
-  } else if (species === "olive") {
-    g.add(makeTrunk(0.09, 0.2, 1.7, trunkMat));
-    const main = makeBlob(1.2, species, seed + 1, 0.75);
-    main.position.set(0.1, 2.4, 0);
-    const s1 = makeBlob(0.85, species, seed + 2, 0.7);
-    s1.position.set(0.7, 2.0, 0.25);
-    const s2 = makeBlob(0.8, species, seed + 3, 0.72);
-    s2.position.set(-0.75, 2.05, -0.2);
-    g.add(main, s1, s2);
-  } else if (species === "sycamore") {
-    g.add(makeTrunk(0.12, 0.3, 2.2, birchTrunkMat));
-    const main = makeBlob(1.6, species, seed + 1, 0.85);
-    main.position.set(0, 3.0, 0);
-    const s1 = makeBlob(0.95, species, seed + 2);
-    s1.position.set(0.95, 2.5, 0.3);
-    const s2 = makeBlob(0.9, species, seed + 3);
-    s2.position.set(-0.9, 2.55, -0.25);
-    const s3 = makeBlob(0.7, species, seed + 4);
-    s3.position.set(0.1, 3.55, -0.1);
-    g.add(main, s1, s2, s3);
-  } else if (species === "beech") {
-    g.add(makeTrunk(0.12, 0.28, 2.1, trunkMat));
-    const main = makeBlob(1.7, species, seed + 1, 0.78);
-    main.position.set(0, 2.9, 0);
-    const s1 = makeBlob(1.0, species, seed + 2, 0.8);
-    s1.position.set(0.9, 2.4, 0.25);
-    const s2 = makeBlob(0.95, species, seed + 3, 0.8);
-    s2.position.set(-0.85, 2.45, -0.2);
-    g.add(main, s1, s2);
-  } else if (species === "elm") {
-    g.add(makeTrunk(0.1, 0.24, 2.3, trunkMat));
-    const main = makeBlob(1.5, species, seed + 1, 0.7);
-    main.position.set(0, 3.1, 0);
-    const s1 = makeBlob(0.9, species, seed + 2, 0.75);
-    s1.position.set(1.0, 2.6, 0.15);
-    const s2 = makeBlob(0.85, species, seed + 3, 0.75);
-    s2.position.set(-0.95, 2.65, -0.1);
-    const s3 = makeBlob(0.65, species, seed + 4, 0.7);
-    s3.position.set(0.05, 3.6, 0.05);
-    g.add(main, s1, s2, s3);
   } else if (species === "plum") {
     g.add(makeTrunk(0.08, 0.18, 1.5, trunkMat));
     const main = makeBlob(1.2, species, seed + 1, 0.92);
@@ -2260,10 +2719,10 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     s2.position.set(-0.65, 1.95, -0.15);
     g.add(main, s1, s2);
   } else {
-    // oak / cherry / maple / redmaple — rounded broad canopies
-    const h = species === "cherry" ? 1.55 : species === "maple" || species === "redmaple" ? 2.0 : 2.15;
+    // oak / maple / redmaple — rounded broad canopies
+    const h = species === "maple" || species === "redmaple" ? 2.0 : 2.15;
     g.add(makeTrunk(0.11, 0.28, h, trunkMat));
-    const spread = species === "cherry" ? 1.25 : species === "maple" || species === "redmaple" ? 1.45 : 1.55;
+    const spread = species === "maple" || species === "redmaple" ? 1.45 : 1.55;
     const flat = species === "maple" || species === "redmaple" ? 0.82 : 0.9;
     const main = makeBlob(spread, species, seed + 1, flat);
     main.position.set(0, h + spread * 0.65, 0);
@@ -3062,7 +3521,10 @@ export function StreakGrove3D({
                 : Math.max(t.targetScale, cur - step * 0.6);
             t.group.scale.setScalar(next);
           }
-          if (!reducedMotion) t.group.rotation.z = Math.sin(elapsed * 0.85 + t.phase) * 0.014;
+          if (!reducedMotion) {
+            t.group.rotation.z = Math.sin(elapsed * 0.85 + t.phase) * 0.014;
+            animateTreeParts(t.group, elapsed, delta);
+          }
         }
         const pulse = world.goalMet ? 1 + Math.sin(elapsed * 2.2) * 0.03 : 1;
         world.sun.intensity = world.weatherSunI * pulse;

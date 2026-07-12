@@ -7,10 +7,39 @@ export function listPendingSendJobs(store: Store): SendJob[] {
   return store
     .listSendJobs()
     .filter((job) => job.status === "pending")
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    .sort((a, b) => {
+      const aKey = a.scheduledFor || a.createdAt;
+      const bKey = b.scheduledFor || b.createdAt;
+      const bySchedule = aKey.localeCompare(bKey);
+      return bySchedule !== 0 ? bySchedule : a.createdAt.localeCompare(b.createdAt);
+    });
+}
+
+/** Reset jobs stuck in_progress after a worker crash so they can be claimed again. */
+export function reclaimStaleSendJobs(store: Store, now = new Date(), staleMs = 15 * 60 * 1000): number {
+  const cutoff = now.getTime() - staleMs;
+  let reclaimed = 0;
+  for (const job of store.listSendJobs()) {
+    if (job.status !== "in_progress") {
+      continue;
+    }
+    const touched = new Date(job.updatedAt || job.createdAt).getTime();
+    if (Number.isNaN(touched) || touched > cutoff) {
+      continue;
+    }
+    store.upsertSendJob({
+      ...job,
+      status: "pending",
+      failureReason: undefined,
+      updatedAt: now.toISOString(),
+    });
+    reclaimed += 1;
+  }
+  return reclaimed;
 }
 
 export function claimNextSendJob(store: Store, now = new Date()): SendJob | undefined {
+  reclaimStaleSendJobs(store, now);
   const due = listPendingSendJobs(store).find((job) => {
     if (job.mode === "send_now" || !job.scheduledFor) {
       return true;

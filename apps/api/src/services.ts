@@ -1550,6 +1550,7 @@ export interface UpcomingSendView {
   company?: string;
   email: string;
   profilePhotoUrl?: string;
+  linkedinUrl?: string;
   scheduledFor: string;
   queueStatus: string;
   jobStatus?: string;
@@ -1584,6 +1585,7 @@ export function listUpcomingSends(store: Store): UpcomingSendView[] {
         company: person?.company,
         email: item.email,
         profilePhotoUrl: person?.profilePhotoUrl,
+        linkedinUrl: person?.linkedinUrl,
         scheduledFor: item.scheduledFor,
         queueStatus: item.status,
         jobStatus: job?.status,
