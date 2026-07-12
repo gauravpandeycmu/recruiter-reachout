@@ -1878,6 +1878,13 @@ function animateTreeParts(root: THREE.Object3D, elapsed: number, delta: number) 
       if (mat?.opacity != null) {
         mat.opacity = 0.45 + Math.sin(elapsed * 2 + phase) * 0.3;
       }
+    } else if (kind === "heartbeat") {
+      const baseY = (mesh.userData.baseY as number) ?? mesh.position.y;
+      mesh.position.y = baseY + Math.sin(elapsed * 1.8 + phase) * 0.1;
+      const thump = Math.pow(Math.max(0, Math.sin(elapsed * 3.4 + phase)), 3);
+      const s = (mesh.userData.baseScale as number) ?? 1;
+      mesh.scale.setScalar(s * (1 + thump * 0.16));
+      mesh.rotation.y += delta * 0.3;
     } else if (kind === "glowpulse") {
       const mat = mesh.material as THREE.SpriteMaterial;
       const base = (mesh.userData.baseOpacity as number) ?? 0.5;
@@ -2652,22 +2659,35 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     g.add(makeRisingParticles("#9cc4e4", 16, 1.2, 0.4, 2.3, 0.05, seed + 23, true));
   } else if (species === "heartwood") {
     g.add(makeTrunk(0.08, 0.16, 1.8, trunkMat));
-    for (let i = 0; i < 10; i += 1) {
-      const heart = new THREE.Mesh(
-        new THREE.SphereGeometry(0.22 + rand() * 0.12, 8, 8),
-        new THREE.MeshStandardMaterial({
-          color: new THREE.Color(rand() > 0.5 ? "#ff2d55" : "#ff8fab"),
-          emissive: new THREE.Color("#ff2d55"),
-          emissiveIntensity: 0.35,
-          roughness: 0.45,
-        }),
-      );
-      heart.scale.set(1, 0.85, 0.7);
+    const loveGlow = makeGlow("#ff6b93", 2.8, 0.28);
+    loveGlow.position.set(0, 2.7, 0);
+    g.add(loveGlow);
+    g.add(makeRisingParticles("#ffc4d4", 8, 0.9, 1.6, 4.2, 0.055, seed + 47));
+    for (let i = 0; i < 8; i += 1) {
+      // Low-poly heart: two lobes + a rotated cube point, beating as one group
+      const heart = new THREE.Group();
+      const size = 0.16 + rand() * 0.09;
+      const mat = new THREE.MeshStandardMaterial({
+        color: new THREE.Color(rand() > 0.5 ? "#ff2d55" : "#ff8fab"),
+        emissive: new THREE.Color("#ff2d55"),
+        emissiveIntensity: 0.4,
+        roughness: 0.4,
+      });
+      const lobeL = new THREE.Mesh(new THREE.SphereGeometry(size * 0.62, 8, 8), mat);
+      lobeL.position.set(-size * 0.42, size * 0.3, 0);
+      const lobeR = new THREE.Mesh(new THREE.SphereGeometry(size * 0.62, 8, 8), mat);
+      lobeR.position.set(size * 0.42, size * 0.3, 0);
+      const point = new THREE.Mesh(new THREE.BoxGeometry(size * 1.1, size * 1.1, size * 0.85), mat);
+      point.rotation.z = Math.PI / 4;
+      point.position.y = -size * 0.25;
+      lobeL.castShadow = lobeR.castShadow = point.castShadow = false;
+      heart.add(lobeL, lobeR, point);
       heart.position.set((rand() - 0.5) * 1.8, 2.1 + rand() * 1.3, (rand() - 0.5) * 1.8);
-      heart.castShadow = false;
-      heart.userData.animate = "bob";
+      heart.rotation.y = rand() * Math.PI * 2;
+      heart.userData.animate = "heartbeat";
       heart.userData.phase = rand() * Math.PI * 2;
       heart.userData.baseY = heart.position.y;
+      heart.userData.baseScale = 1;
       g.add(heart);
     }
   } else if (species === "auroratree") {

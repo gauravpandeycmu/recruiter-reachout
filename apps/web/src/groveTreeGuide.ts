@@ -119,7 +119,7 @@ export const GROVE_TREE_GUIDE: GroveTreeGuideEntry[] = [
     id: "heartwood",
     name: "Heartwood",
     colors: ["#ff2d55", "#ff8fab"],
-    fact: "Floating hearts doing cardio. Peak Valentine’s energy, year-round commitment issues optional.",
+    fact: "Real hearts now — lobes, point, and a visible heartbeat. Sheds pink sparkles like it means it.",
   },
   {
     id: "auroratree",
