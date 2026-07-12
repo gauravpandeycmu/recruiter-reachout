@@ -466,8 +466,8 @@ h2 {
   position: absolute;
   top: 4px;
   transition:
-    transform 220ms var(--ease-out),
-    width 220ms var(--ease-out),
+    transform 280ms var(--ease-out),
+    width 280ms var(--ease-out),
     opacity 160ms var(--ease-out);
   z-index: 0;
 }
@@ -524,8 +524,9 @@ html[data-theme="dark"] .tab.tab-grove.active {
   color: #9fd86a;
 }
 
+/* Soft dissolve in — short delay so the pill starts moving first */
 .tab-panel-live {
-  animation: tab-panel-in 240ms var(--ease-out) both;
+  animation: tab-panel-in 360ms var(--ease-out) 45ms both;
 }
 
 .tab-panel-dormant {
@@ -535,11 +536,13 @@ html[data-theme="dark"] .tab.tab-grove.active {
 @keyframes tab-panel-in {
   from {
     opacity: 0;
-    transform: translateY(8px);
+    filter: blur(3px);
+    transform: scale(0.992);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    filter: blur(0);
+    transform: scale(1);
   }
 }
 
@@ -4085,7 +4088,7 @@ textarea:focus {
 
 .preview-card {
   animation: soft-pop var(--dur-slow) var(--ease-out) both;
-  border-top: 1px solid #e5eaf3;
+  border-top: 1px solid var(--line-soft);
   display: grid;
   gap: 12px;
   margin-top: 16px;
@@ -4209,7 +4212,7 @@ textarea:focus {
 }
 
 .resume-picker {
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--line-soft);
   display: grid;
   gap: 8px;
   margin-top: 4px;
@@ -4223,8 +4226,11 @@ textarea:focus {
 }
 
 .resume-picker-option {
-  border: 1px solid transparent;
+  --resume-tint: #3d6f99;
+  background: color-mix(in srgb, var(--resume-tint) 12%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--resume-tint) 32%, var(--line-soft));
   border-radius: 12px;
+  color: var(--resume-tint);
   cursor: pointer;
   display: flex;
   flex-direction: column;
@@ -4233,8 +4239,29 @@ textarea:focus {
   min-width: 140px;
   padding: 10px 12px;
   text-align: left;
-  transition: box-shadow 0.15s ease, border-color 0.15s ease;
+  transition:
+    box-shadow 0.15s ease,
+    border-color 0.15s ease,
+    background 0.15s ease;
 }
+
+.resume-picker-option.tint-0 { --resume-tint: #3d6f99; }
+.resume-picker-option.tint-1 { --resume-tint: #3d8a6a; }
+.resume-picker-option.tint-2 { --resume-tint: #7a5a9a; }
+.resume-picker-option.tint-3 { --resume-tint: #9a6b45; }
+.resume-picker-option.tint-4 { --resume-tint: #6a7f4e; }
+.resume-picker-option.tint-5 { --resume-tint: #94556a; }
+.resume-picker-option.tint-6 { --resume-tint: #3f7f86; }
+.resume-picker-option.tint-7 { --resume-tint: #8a7a45; }
+
+html[data-theme="dark"] .resume-picker-option.tint-0 { --resume-tint: #8eb4d4; }
+html[data-theme="dark"] .resume-picker-option.tint-1 { --resume-tint: #7dccab; }
+html[data-theme="dark"] .resume-picker-option.tint-2 { --resume-tint: #b79ad4; }
+html[data-theme="dark"] .resume-picker-option.tint-3 { --resume-tint: #d4a57c; }
+html[data-theme="dark"] .resume-picker-option.tint-4 { --resume-tint: #a3b87e; }
+html[data-theme="dark"] .resume-picker-option.tint-5 { --resume-tint: #d08da3; }
+html[data-theme="dark"] .resume-picker-option.tint-6 { --resume-tint: #7dbcc4; }
+html[data-theme="dark"] .resume-picker-option.tint-7 { --resume-tint: #c4b47a; }
 
 .resume-picker-option strong {
   font-size: 13px;
@@ -4252,12 +4279,15 @@ textarea:focus {
 }
 
 .resume-picker-option.selected {
-  box-shadow: 0 0 0 1px currentColor;
+  background: color-mix(in srgb, var(--resume-tint) 20%, var(--surface));
+  border-color: var(--resume-tint);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--resume-tint) 45%, transparent);
   font-weight: 600;
 }
 
 .resume-picker-option:hover {
-  box-shadow: 0 1px 6px rgba(23, 32, 51, 0.08);
+  background: color-mix(in srgb, var(--resume-tint) 16%, var(--surface));
+  box-shadow: 0 1px 6px rgb(0 0 0 / 10%);
 }
 
 .resume-upload-row {
@@ -4306,15 +4336,35 @@ textarea:focus {
 }
 
 .resume-library-card {
-  background: var(--surface-2);
-  border: 1px solid var(--line);
+  --resume-tint: #3d6f99;
+  background: color-mix(in srgb, var(--resume-tint) 10%, var(--surface-2));
+  border: 1px solid color-mix(in srgb, var(--resume-tint) 28%, var(--line-soft));
   border-radius: 14px;
   overflow: hidden;
   padding: 12px;
 }
 
+.resume-library-card.tint-0 { --resume-tint: #3d6f99; }
+.resume-library-card.tint-1 { --resume-tint: #3d8a6a; }
+.resume-library-card.tint-2 { --resume-tint: #7a5a9a; }
+.resume-library-card.tint-3 { --resume-tint: #9a6b45; }
+.resume-library-card.tint-4 { --resume-tint: #6a7f4e; }
+.resume-library-card.tint-5 { --resume-tint: #94556a; }
+.resume-library-card.tint-6 { --resume-tint: #3f7f86; }
+.resume-library-card.tint-7 { --resume-tint: #8a7a45; }
+
+html[data-theme="dark"] .resume-library-card.tint-0 { --resume-tint: #8eb4d4; }
+html[data-theme="dark"] .resume-library-card.tint-1 { --resume-tint: #7dccab; }
+html[data-theme="dark"] .resume-library-card.tint-2 { --resume-tint: #b79ad4; }
+html[data-theme="dark"] .resume-library-card.tint-3 { --resume-tint: #d4a57c; }
+html[data-theme="dark"] .resume-library-card.tint-4 { --resume-tint: #a3b87e; }
+html[data-theme="dark"] .resume-library-card.tint-5 { --resume-tint: #d08da3; }
+html[data-theme="dark"] .resume-library-card.tint-6 { --resume-tint: #7dbcc4; }
+html[data-theme="dark"] .resume-library-card.tint-7 { --resume-tint: #c4b47a; }
+
 .resume-library-card.selected {
-  box-shadow: 0 0 0 1px rgba(31, 75, 122, 0.18);
+  border-color: var(--resume-tint);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--resume-tint) 40%, transparent);
 }
 
 .resume-library-card .resume-preview-header {
@@ -4324,12 +4374,8 @@ textarea:focus {
   padding: 0;
 }
 
-.resume-library-card .resume-preview-header {
-  align-items: start;
-  margin-bottom: 10px;
-}
-
 .resume-library-card .resume-preview-header strong {
+  color: var(--resume-tint);
   display: block;
 }
 
@@ -6477,11 +6523,9 @@ html[data-theme="dark"] .scheduled-item.editing,
 html[data-theme="dark"] .scheduled-later-banner,
 html[data-theme="dark"] .history-person-card,
 html[data-theme="dark"] .history-company-card,
-html[data-theme="dark"] .resume-library-card,
 html[data-theme="dark"] .resume-preview-frame,
 html[data-theme="dark"] .passion-toggle,
 html[data-theme="dark"] .pages-toggle,
-html[data-theme="dark"] .schedule-chip,
 html[data-theme="dark"] .village-chip,
 html[data-theme="dark"] .send-streak-card,
 html[data-theme="dark"] .provider-usage-row,
@@ -6530,7 +6574,6 @@ html[data-theme="dark"] .scheduled-template-preview .scheduled-inline-body {
 html[data-theme="dark"] .pages-toggle,
 html[data-theme="dark"] .scheduled-group-bar,
 html[data-theme="dark"] .passion-toggle,
-html[data-theme="dark"] .resume-library-card,
 html[data-theme="dark"] .resume-preview-frame,
 html[data-theme="dark"] .provider-usage-row,
 html[data-theme="dark"] .history-person-card,
@@ -6540,11 +6583,29 @@ html[data-theme="dark"] .surface-2-forced {
 
 html[data-theme="dark"] .pages-toggle-option.active,
 html[data-theme="dark"] .pages-toggle-option:hover,
-html[data-theme="dark"] .schedule-chip,
 html[data-theme="dark"] .village-chip,
 html[data-theme="dark"] .donut-hole {
   background: var(--surface) !important;
   color: var(--ink);
+}
+
+html[data-theme="dark"] .schedule-chip {
+  background: var(--surface-2);
+  border-color: var(--line-soft);
+  color: var(--ink-soft);
+}
+
+html[data-theme="dark"] .schedule-chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
+}
+
+html[data-theme="dark"] .schedule-chip.active {
+  background: color-mix(in srgb, var(--accent) 22%, var(--surface));
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
 html[data-theme="dark"] .scheduled-group-bar:hover,
@@ -6702,7 +6763,40 @@ html[data-theme="dark"] .batch-progress {
 }
 
 html[data-theme="dark"] .preview-skeleton {
-  background: linear-gradient(110deg, #1a2230 25%, #243044 40%, #1a2230 55%) !important;
+  background: linear-gradient(110deg, #152030 25%, #2a3d55 42%, #152030 55%) !important;
+  background-size: 200% 100% !important;
+}
+
+html[data-theme="dark"] .preview-fold.is-revealing {
+  animation: preview-reveal-dark 620ms var(--ease-out) both;
+}
+
+html[data-theme="dark"] .preview-fold.is-revealing .preview-live-subject,
+html[data-theme="dark"] .preview-fold.is-revealing .preview-html,
+html[data-theme="dark"] .preview-fold.is-revealing .preview-html-body {
+  animation-name: preview-swap-dark;
+}
+
+@keyframes preview-reveal-dark {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.988);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes preview-swap-dark {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 html[data-theme="dark"] .temp-unit-toggle button.active {

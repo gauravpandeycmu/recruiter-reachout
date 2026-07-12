@@ -133,13 +133,19 @@ function formatSchemaAddress(value: unknown): string | undefined {
   return parts.length > 0 ? parts.join(", ") : undefined;
 }
 
-/** Job / req id from common careers URL shapes (`/jobs/154242`, `/details/200670689`). */
+/** Job / req id from common careers URL shapes (`/jobs/154242`, `/details/200670689`, Ashby `/org/<uuid>`). */
 export function jobIdFromJobUrl(jobUrl?: string): string | undefined {
   if (!jobUrl) {
     return undefined;
   }
   try {
     const url = new URL(normalizeJobPostingUrl(jobUrl) ?? jobUrl);
+    const uuid = url.pathname.match(
+      /\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\/|$)/i,
+    );
+    if (uuid?.[1]) {
+      return uuid[1];
+    }
     const match = url.pathname.match(/\/(?:jobs|details|job|position)\/(\d{4,12})(?:\/|$)/i);
     return match?.[1];
   } catch {

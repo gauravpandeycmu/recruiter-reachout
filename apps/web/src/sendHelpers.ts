@@ -1,6 +1,6 @@
 import type { UpcomingSendView } from "./api.js";
 
-/** Soft tint pairs so each resume is recognizable in Setup and on Send. */
+/** Soft tint accents — backgrounds come from CSS so dark mode stays readable. */
 export const RESUME_TINTS = [
   { bg: "#eef5fb", border: "#b7cfe3", accent: "#3d6f99" },
   { bg: "#eef8f3", border: "#b5d9c8", accent: "#3d8a6a" },
@@ -12,12 +12,16 @@ export const RESUME_TINTS = [
   { bg: "#f6f3e9", border: "#d8cfb0", accent: "#8a7a45" },
 ] as const;
 
-export function resumeTint(resumeId: string): (typeof RESUME_TINTS)[number] {
+export function resumeTintIndex(resumeId: string): number {
   let hash = 0;
   for (let index = 0; index < resumeId.length; index += 1) {
     hash = (hash * 31 + resumeId.charCodeAt(index)) >>> 0;
   }
-  return RESUME_TINTS[hash % RESUME_TINTS.length]!;
+  return hash % RESUME_TINTS.length;
+}
+
+export function resumeTint(resumeId: string): (typeof RESUME_TINTS)[number] {
+  return RESUME_TINTS[resumeTintIndex(resumeId)]!;
 }
 
 export function groupUpcomingByCompany(items: UpcomingSendView[]): Array<[string, UpcomingSendView[]]> {

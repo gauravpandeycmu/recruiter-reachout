@@ -463,6 +463,31 @@ describe("extension parser", () => {
     expect(candidates[0]?.profilePhotoUrl).toBe("https://media.licdn.com/dms/image/v2/profile-displayphoto/sam.jpg");
   });
 
+  it("does not invent a photo when LinkedIn only shows a ghost avatar", () => {
+    document.body.innerHTML = `
+      <li class="reusable-search__result-container">
+        <a href="https://www.linkedin.com/in/no-photo-person">
+          <div class="presence-entity">
+            <img
+              class="ghost-person presence-entity__image"
+              src="https://media.licdn.com/dms/image/v2/profile-displayphoto-shrink_100/some-default.jpg"
+              alt=""
+            />
+          </div>
+        </a>
+        <a href="https://www.linkedin.com/in/no-photo-person"><span aria-hidden="true">No Photo Person</span></a>
+        <p>Recruiter at Acme</p>
+        <a href="https://www.linkedin.com/in/mutual-friend">
+          <img src="https://media.licdn.com/dms/image/v2/profile-displayphoto/mutual.jpg" alt="Mutual Friend" />
+        </a>
+      </li>
+    `;
+
+    const candidates = parseSearchResults(document);
+    expect(candidates[0]?.fullName).toBe("No Photo Person");
+    expect(candidates[0]?.profilePhotoUrl).toBeUndefined();
+  });
+
   it("reads profile photo from JSON-LD Person.image", () => {
     document.head.innerHTML = `
       <script type="application/ld+json">

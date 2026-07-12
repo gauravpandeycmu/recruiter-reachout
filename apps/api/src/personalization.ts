@@ -1,5 +1,5 @@
 import type { EmailSample } from "@recruiter/shared";
-import { extractJobIdFromUrl, extractJobIds, stripBareJobUrls } from "@recruiter/shared";
+import { extractJobIdFromUrl, extractJobIds, isUuidJobId, stripBareJobUrls } from "@recruiter/shared";
 import { extractGeminiResponseText, extractJsonObjectText, type GeminiResponse } from "./geminiResponse.js";
 import type { GenerationProgressStep } from "./jobPosting.js";
 import { recordLlmUsage } from "./llmUsage.js";
@@ -47,6 +47,9 @@ const MAX_LINKEDIN_POST_CHARS = 4000;
 const MAX_BODY_WORDS = 150;
 const MAX_BODY_WORDS_PASSIONATE = 200;
 const MAX_SUBJECT_CHARS = 80;
+/** Full or truncated Ashby-style UUID fragments that should not appear in email prose. */
+const UUID_FRAGMENT_IN_BODY_RE =
+  /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f-]{0,14}/i;
 
 function normalizeHttpUrl(value?: string): string | undefined {
   const raw = value?.trim();
@@ -411,7 +414,18 @@ export function buildPersonalizationPrompt(input: GenerateContentInput): string 
       "- Do not summarize the job description back to the recipient, and do not claim any skill it asks for unless the samples show it.",
       "",
     );
-    if (primaryIds.length > 0) {
+    if (primaryIds.length > 0 && isUuidJobId(primaryIds[0])) {
+      const role = roleTitle || "the opening";
+      lines.push(
+        "== JOB / REQ ID (ATS UUID — do not paste) ==",
+        `- Detected posting ID: ${primaryIds[0]}`,
+        "- This is a long ATS UUID (Ashby-style). Do NOT paste it into the subject or body — it looks broken and recruiters do not route on it in email.",
+        `- Mention the role title naturally in the hook instead (e.g. "reaching out about the ${role} role").`,
+        "- Do not invent a shorter/truncated version of the UUID either.",
+        "- Do NOT paste the job posting URL into the email — the send pipeline hyperlinks the role title once.",
+        "",
+      );
+    } else if (primaryIds.length > 0) {
       lines.push(
         "== JOB / REQ ID (required) ==",
         `- Detected ID(s): ${primaryIds.join(", ")}`,
@@ -425,24 +439,38 @@ export function buildPersonalizationPrompt(input: GenerateContentInput): string 
       lines.push(
         "== JOB / REQ ID ==",
         "- If the job description includes a job ID, requisition ID, posting ID, or similar code, mention that exact ID early in the hook (first sentence after the greeting is best).",
+        "- If the only ID is a long UUID, skip it and mention the role title instead.",
         "- If no ID is present, do not invent one.",
         "",
       );
     }
     if (jobUrl) {
+      const uuidPrimary = primaryIds[0] && isUuidJobId(primaryIds[0]);
       lines.push(
         "== JOB POSTING LINK ==",
         `- A job posting URL exists (${jobUrl}), but do NOT paste that URL into the subject or body.`,
-        primaryIds[0]
-          ? `- Mention only the job/req ID (${primaryIds[0]}) in the body. The send pipeline turns that single ID into one clickable link.`
-          : "- If you mention a job/req ID, the send pipeline turns that ID into a clickable link.",
+        uuidPrimary
+          ? `- Mention the role title (${roleTitle || "the opening"}) in the body. The send pipeline turns that title into one clickable link.`
+          : primaryIds[0]
+            ? `- Mention only the job/req ID (${primaryIds[0]}) in the body. The send pipeline turns that single ID into one clickable link.`
+            : "- If you mention a job/req ID, the send pipeline turns that ID into a clickable link.",
         "- Do not write https://…, www.…, or any bare careers URL in the email body.",
         "",
       );
     }
   } else if (jobUrl) {
     const urlJobId = extractJobIdFromUrl(jobUrl);
-    if (urlJobId) {
+    if (urlJobId && isUuidJobId(urlJobId)) {
+      const role = roleTitle || "the opening";
+      lines.push(
+        "== JOB / REQ ID (ATS UUID — do not paste) ==",
+        `- Detected posting ID from the URL: ${urlJobId}`,
+        "- This is a long ATS UUID. Do NOT paste it (or any truncated form) into the email.",
+        `- Mention the role title naturally (e.g. "reaching out about the ${role} role"). The send pipeline hyperlinks the role title once.`,
+        "- Do NOT paste the job posting URL into the email body.",
+        "",
+      );
+    } else if (urlJobId) {
       lines.push(
         "== JOB / REQ ID (required) ==",
         `- Detected ID from the posting URL: ${urlJobId}`,
@@ -454,9 +482,11 @@ export function buildPersonalizationPrompt(input: GenerateContentInput): string 
     lines.push(
       "== JOB POSTING LINK ==",
       `- A job posting URL exists (${jobUrl}), but do NOT paste that URL into the subject or body.`,
-      roleTitle
-        ? `- Mention the role (${roleTitle}) early. Mention the job/req ID if known — the send pipeline hyperlinks the ID only, once.`
-        : "- Mention the opening early. Mention the job/req ID if known — the send pipeline hyperlinks the ID only, once.",
+      urlJobId && isUuidJobId(urlJobId)
+        ? `- Mention the role (${roleTitle || "the opening"}) early. The send pipeline hyperlinks the role title once — never paste the UUID.`
+        : roleTitle
+          ? `- Mention the role (${roleTitle}) early. Mention the job/req ID if known — the send pipeline hyperlinks the ID only, once.`
+          : "- Mention the opening early. Mention the job/req ID if known — the send pipeline hyperlinks the ID only, once.",
       "- Do not write https://…, www.…, or any bare careers URL in the email body.",
       "",
     );
@@ -658,7 +688,20 @@ export function validateGeneratedEmail(
   const jobIds = extractJobIds(context?.jobDescription);
   const urlJobId = extractJobIdFromUrl(context?.jobUrl);
   const primaryId = jobIds[0] ?? urlJobId;
-  if (primaryId && !combinedLower.includes(primaryId.toLowerCase())) {
+  if (primaryId && isUuidJobId(primaryId)) {
+    // UUID ATS IDs should never appear in the body (full or truncated).
+    if (UUID_FRAGMENT_IN_BODY_RE.test(combined)) {
+      issues.push(
+        "Remove the ATS UUID (and any truncated form of it) from the email — mention the role title instead.",
+      );
+    }
+    const roleTitle = context?.roleTitle?.trim();
+    if (roleTitle && !combinedLower.includes(roleTitle.toLowerCase())) {
+      issues.push(
+        `Mention the role title (${roleTitle}) early in the email — ideally in the first sentence after the greeting.`,
+      );
+    }
+  } else if (primaryId && !combinedLower.includes(primaryId.toLowerCase())) {
     issues.push(
       `Mention the job/req ID (${primaryId}) early in the email — ideally in the first sentence after the greeting.`,
     );
@@ -677,7 +720,9 @@ export function validateGeneratedEmail(
     })();
     if (combinedLower.includes(urlLower) || combinedLower.includes(urlHostPath) || /https?:\/\//i.test(combined)) {
       issues.push(
-        "Remove the bare job posting URL from the email body. Mention only the job/req ID — it will be hyperlinked automatically on send.",
+        primaryId && isUuidJobId(primaryId)
+          ? "Remove the bare job posting URL from the email body. Mention the role title — it will be hyperlinked automatically on send."
+          : "Remove the bare job posting URL from the email body. Mention only the job/req ID — it will be hyperlinked automatically on send.",
       );
     }
   }

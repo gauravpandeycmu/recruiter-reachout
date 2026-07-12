@@ -96,7 +96,16 @@ export const SCRAPE_VISIBLE_PEOPLE = `(() => {
       !/ghost|data:image|static\\/img\\/transparent/i.test(src)
     );
   };
-  var imgSrc = function (img) { return img.currentSrc || img.src || img.getAttribute("data-delayed-url") || ""; };
+  var isGhostImg = function (img) {
+    var bits = [img.className || "", (img.parentElement && img.parentElement.className) || "", img.getAttribute("src") || "", img.getAttribute("alt") || ""].join(" ");
+    return /ghost_person|ghosts\\/person|ghost-person|\\bghost\\b/i.test(bits);
+  };
+  var imgSrc = function (img) {
+    var delayed = img.getAttribute("data-delayed-url") || "";
+    if (isGhostImg(img) && !usablePhoto(delayed)) return "";
+    if (usablePhoto(delayed)) return delayed;
+    return img.currentSrc || img.src || delayed || "";
+  };
   var isLocation = function (t) {
     return /(?:,\\s*(?:United States|USA|Canada|United Kingdom))\\b|,\\s*[A-Z]{2}\\b|\\bArea\\b|\\bGreater\\b|\\bMetropolitan\\b/.test(t);
   };

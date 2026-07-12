@@ -366,6 +366,7 @@ function nameForProfileUrl(root: ParentNode, profileUrl: string): string {
  * Search cards contain OTHER people's faces too (mutual-connection avatars).
  * LinkedIn's 2025 DOM often leaves avatar alt empty — the reliable signal is the
  * wrapping profile link (avatar link and name link share the same /in/ href).
+ * Ghost placeholders must stay undefined — never invent a face.
  */
 function photoForSearchCard(
   root: ParentNode | undefined,
@@ -381,30 +382,33 @@ function photoForSearchCard(
     return undefined;
   }
 
+  // Prefer images inside THIS person's own profile anchors only.
   for (const anchor of root.querySelectorAll<HTMLAnchorElement>('a[href*="/in/"]')) {
     if (normalizeProfileUrl(anchor.href) !== linkedinUrl) {
       continue;
     }
-    const nested = anchor.querySelector("img");
-    const fromAnchor = nested ? imageUrl(nested) : undefined;
-    if (fromAnchor) {
-      return fromAnchor;
+    for (const img of anchor.querySelectorAll<HTMLImageElement>("img")) {
+      const url = imageUrl(img);
+      if (url) {
+        return url;
+      }
     }
   }
 
+  // Exact full-name alt match only — never partial / includes matching (wrong faces).
   for (const img of root.querySelectorAll<HTMLImageElement>("img")) {
-    const url = imageUrl(img);
-    if (!url) {
+    const alt = dedupeRepeatedName(normalizeWhitespace(img.alt ?? "")).toLowerCase();
+    if (alt !== target) {
       continue;
     }
     const wrap = img.closest('a[href*="/in/"]');
     const wrapUrl =
       wrap && "href" in wrap ? normalizeProfileUrl(String((wrap as HTMLAnchorElement).href)) : "";
-    if (wrapUrl === linkedinUrl) {
-      return url;
+    if (wrapUrl && wrapUrl !== linkedinUrl) {
+      continue;
     }
-    const alt = dedupeRepeatedName(normalizeWhitespace(img.alt ?? "")).toLowerCase();
-    if (alt && (alt === target || alt.includes(target) || (alt.length >= 5 && target.includes(alt)))) {
+    const url = imageUrl(img);
+    if (url) {
       return url;
     }
   }
@@ -875,23 +879,19 @@ function extractProfilePhotoForPerson(
   const target = fullName.toLowerCase();
   const images = [...documentRef.querySelectorAll<HTMLImageElement>("img")];
   const byAlt = images.find((img) => {
+    if (isGhostPhotoElement(img)) {
+      return false;
+    }
     const alt = dedupeRepeatedName(normalizeWhitespace(img.alt ?? "")).toLowerCase();
-    return alt.includes(target) && isUsablePhotoUrl(imageUrl(img));
+    return alt === target && isUsablePhotoUrl(imageUrl(img));
   });
   if (byAlt) {
     return imageUrl(byAlt);
   }
 
-  const topCard = images.find(
-    (img) =>
-      (img.closest(
-        '.pv-top-card, section.artdeco-card, [data-member-id], [class*="profile-picture"], [class*="profile-photo"], [class*="presence-entity"]',
-      ) ||
-        /profile-displayphoto|profile-shrink|licdn\.com\/dms\/image/i.test(imageUrl(img) ?? "")) &&
-      !img.closest('nav, aside, [class*="global-nav"], [class*="msg-overlay"]') &&
-      isUsablePhotoUrl(imageUrl(img)),
-  );
-  return topCard ? imageUrl(topCard) : undefined;
+  // Do not grab a random top-card /dms/image — that is how wrong faces leak in
+  // when the member has no profile photo.
+  return undefined;
 }
 
 function profilePhotoFromJsonLd(documentRef: Document): string | undefined {
@@ -963,6 +963,16 @@ function looksLikeProfilePhotoUrl(value: string): boolean {
   return /media\.licdn\.com|profile-displayphoto|profile-shrink|licdn\.com\/dms\/image/i.test(value);
 }
 
+function isGhostPhotoElement(image: HTMLImageElement): boolean {
+  const bits = [
+    image.className,
+    image.getAttribute("class") ?? "",
+    image.parentElement?.className ?? "",
+    image.getAttribute("src") ?? "",
+  ].join(" ");
+  return /ghost_person|ghosts\/person|ghost-person|\bghost\b/i.test(bits);
+}
+
 function isUsablePhotoUrl(value: string | undefined): value is string {
   return Boolean(
     value &&
@@ -984,14 +994,24 @@ function firstUrlFromSrcset(srcset: string | null | undefined): string | undefin
 }
 
 function imageUrl(image: HTMLImageElement): string | undefined {
-  const candidates = [
-    image.getAttribute("data-delayed-url") ?? undefined,
-    image.getAttribute("data-ghost-url") ?? undefined,
-    firstUrlFromSrcset(image.getAttribute("srcset")),
-    image.currentSrc,
-    image.src,
-  ];
-  for (const value of candidates) {
+  const delayed = image.getAttribute("data-delayed-url") ?? undefined;
+  const ghostAttr = image.getAttribute("data-ghost-url") ?? undefined;
+
+  // Explicit lazy-load URLs win (LinkedIn shows a ghost until these resolve).
+  if (isUsablePhotoUrl(delayed)) {
+    return delayed;
+  }
+  if (isUsablePhotoUrl(ghostAttr)) {
+    return ghostAttr;
+  }
+
+  // Still a ghost placeholder with no real lazy URL — member has no photo.
+  // Do not fall back to src/currentSrc (recycled or default CDN faces).
+  if (isGhostPhotoElement(image)) {
+    return undefined;
+  }
+
+  for (const value of [firstUrlFromSrcset(image.getAttribute("srcset")), image.currentSrc, image.src]) {
     if (isUsablePhotoUrl(value)) {
       return value;
     }

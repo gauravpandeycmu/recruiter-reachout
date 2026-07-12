@@ -62,7 +62,7 @@ import {
 import {
   groupUpcomingByCompany,
   isScheduleForNow,
-  resumeTint,
+  resumeTintIndex,
   stripTestModePrefix,
   summarizeUpcomingSends,
 } from "./sendHelpers";
@@ -3379,7 +3379,7 @@ function App() {
                                 ) : (
                                   <div className="resume-picker-options" role="listbox" aria-label="Choose resume">
                                     {resumes.map((resume) => {
-                                      const tint = resumeTint(resume.id);
+                                      const tintIndex = resumeTintIndex(resume.id);
                                       const selected = selectedResumeId === resume.id;
                                       return (
                                         <button
@@ -3387,12 +3387,7 @@ function App() {
                                           key={resume.id}
                                           role="option"
                                           aria-selected={selected}
-                                          className={`resume-picker-option${selected ? " selected" : ""}`}
-                                          style={{
-                                            background: tint.bg,
-                                            borderColor: selected ? tint.accent : tint.border,
-                                            color: tint.accent,
-                                          }}
+                                          className={`resume-picker-option tint-${tintIndex}${selected ? " selected" : ""}`}
                                           onClick={() => void chooseResume(resume.id)}
                                         >
                                           <strong>{resume.nickname}</strong>
@@ -3848,20 +3843,16 @@ function App() {
             ) : (
               <div className="resume-library">
                 {resumes.map((resume) => {
-                  const tint = resumeTint(resume.id);
+                  const tintIndex = resumeTintIndex(resume.id);
                   const selected = selectedResumeId === resume.id;
                   return (
                     <div
-                      className={`resume-library-card${selected ? " selected" : ""}`}
+                      className={`resume-library-card tint-${tintIndex}${selected ? " selected" : ""}`}
                       key={resume.id}
-                      style={{
-                        background: tint.bg,
-                        borderColor: selected ? tint.accent : tint.border,
-                      }}
                     >
                       <div className="resume-preview-header">
                         <div>
-                          <strong style={{ color: tint.accent }}>{resume.nickname}</strong>
+                          <strong>{resume.nickname}</strong>
                           <small>{resume.fileName}</small>
                         </div>
                         <div className="resume-library-actions">
