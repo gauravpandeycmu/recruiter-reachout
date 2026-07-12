@@ -76,7 +76,20 @@ import {
   WEATHER_CITY_CHANGED_EVENT,
   WEATHER_CITY_KEY,
 } from "./weatherLocation";
+import {
+  applyTheme,
+  readThemePreference,
+  THEME_CHANGED_EVENT,
+  THEME_PREF_KEY,
+  type ThemePreference,
+  toggleThemePreference,
+} from "./theme";
+import { GroveLoadingPlay } from "./GroveLoadingPlay";
+import { StreakTreeBuddy } from "./StreakTreeBuddy";
+import { ThemeModeSwitch } from "./ThemeModeSwitch";
 import "./styles.css";
+
+applyTheme();
 
 const StreakGrove3D = lazy(() =>
   import("./StreakGrove3D").then((mod) => ({ default: mod.StreakGrove3D })),
@@ -655,6 +668,7 @@ function App() {
   const [visitedTabs, setVisitedTabs] = useState<Set<Tab>>(() => new Set([readStoredTab()]));
   const [groveWeatherCity, setGroveWeatherCity] = useState(() => readWeatherCity());
   const [groveTempUnit, setGroveTempUnit] = useState<TempUnit>(() => readTempUnit());
+  const [themePref, setThemePref] = useState<ThemePreference>(() => readThemePreference());
   const [goalDraft, setGoalDraft] = useState("20");
   const [showCatToast, setShowCatToast] = useState(false);
   const celebratedDateRef = useRef<string | null>(null);
@@ -1320,7 +1334,7 @@ function App() {
     if (tab === "setup") {
       void loadTestModeSettings();
     }
-    if (tab === "analytics") {
+    if (tab === "send" || tab === "analytics") {
       void refreshAnalytics().catch((error: Error) => setMessage(error.message));
     }
     if (tab === "history") {
@@ -1348,21 +1362,28 @@ function App() {
   useEffect(() => {
     const syncCity = () => setGroveWeatherCity(readWeatherCity());
     const syncUnit = () => setGroveTempUnit(readTempUnit());
+    const syncTheme = () => setThemePref(readThemePreference());
     window.addEventListener(WEATHER_CITY_CHANGED_EVENT, syncCity);
     window.addEventListener(TEMP_UNIT_CHANGED_EVENT, syncUnit);
+    window.addEventListener(THEME_CHANGED_EVENT, syncTheme);
     const onStorage = (event: StorageEvent) => {
       if (event.key === WEATHER_CITY_KEY) syncCity();
       if (event.key === TEMP_UNIT_KEY) syncUnit();
+      if (event.key === THEME_PREF_KEY) {
+        applyTheme();
+        syncTheme();
+      }
     };
     window.addEventListener("storage", onStorage);
     return () => {
       window.removeEventListener(WEATHER_CITY_CHANGED_EVENT, syncCity);
       window.removeEventListener(TEMP_UNIT_CHANGED_EVENT, syncUnit);
+      window.removeEventListener(THEME_CHANGED_EVENT, syncTheme);
       window.removeEventListener("storage", onStorage);
     };
   }, []);
 
-  // Prefetch Grow chunk + analytics while idle so the tab opens without a cold start
+  // Prefetch Grove chunk + analytics while idle so the tab opens without a cold start
   useEffect(() => {
     const run = () => {
       prefetchGrowChunk();
@@ -2508,37 +2529,43 @@ function App() {
           <p className="eyebrow">Recruiter Reachout</p>
           <h1>Outreach dashboard</h1>
         </div>
-        <nav className="tabs" aria-label="Sections" ref={tabsNavRef}>
-          <span
-            className="tab-pill"
-            aria-hidden="true"
-            style={{
-              width: tabPill.width || undefined,
-              transform: `translateX(${tabPill.left}px)`,
-              opacity: tabPill.width > 0 ? 1 : 0,
-            }}
+        <div className="header-side">
+          <ThemeModeSwitch
+            theme={themePref}
+            onToggle={() => setThemePref(toggleThemePreference(themePref))}
           />
-          <button className={tab === "send" ? "tab active" : "tab"} onClick={() => setTab("send")}>
-            Send{candidates.length > 0 ? ` (${candidates.length})` : ""}
-          </button>
-          <button className={tab === "scheduled" ? "tab active" : "tab"} onClick={() => setTab("scheduled")}>
-            Scheduled{upcomingSends.length > 0 ? ` (${upcomingSends.length})` : ""}
-          </button>
-          <button
-            className={tab === "analytics" ? "tab active" : "tab"}
-            onClick={() => setTab("analytics")}
-            onMouseEnter={prefetchGrowChunk}
-            onFocus={prefetchGrowChunk}
-          >
-            Grow
-          </button>
-          <button className={tab === "history" ? "tab active" : "tab"} onClick={() => setTab("history")}>
-            History
-          </button>
-          <button className={tab === "setup" ? "tab active" : "tab"} onClick={() => setTab("setup")}>
-            Setup
-          </button>
-        </nav>
+          <nav className="tabs" aria-label="Sections" ref={tabsNavRef}>
+            <span
+              className="tab-pill"
+              aria-hidden="true"
+              style={{
+                width: tabPill.width || undefined,
+                transform: `translateX(${tabPill.left}px)`,
+                opacity: tabPill.width > 0 ? 1 : 0,
+              }}
+            />
+            <button className={tab === "send" ? "tab active" : "tab"} onClick={() => setTab("send")}>
+              Send{candidates.length > 0 ? ` (${candidates.length})` : ""}
+            </button>
+            <button className={tab === "scheduled" ? "tab active" : "tab"} onClick={() => setTab("scheduled")}>
+              Scheduled{upcomingSends.length > 0 ? ` (${upcomingSends.length})` : ""}
+            </button>
+            <button
+              className={tab === "analytics" ? "tab tab-grove active" : "tab tab-grove"}
+              onClick={() => setTab("analytics")}
+              onMouseEnter={prefetchGrowChunk}
+              onFocus={prefetchGrowChunk}
+            >
+              Grove
+            </button>
+            <button className={tab === "history" ? "tab active" : "tab"} onClick={() => setTab("history")}>
+              History
+            </button>
+            <button className={tab === "setup" ? "tab active" : "tab"} onClick={() => setTab("setup")}>
+              Setup
+            </button>
+          </nav>
+        </div>
       </header>
 
       {envStatus?.testMode.enabled && (
@@ -2561,12 +2588,8 @@ function App() {
             <section className="panel find-panel">
               <div className="find-panel-head">
                 <div>
-                  <p className="eyebrow">Source</p>
                   <h2>Find recruiters</h2>
-                  <p className="hint find-panel-hint">
-                    Type a company — we’ll open LinkedIn US people search, scrape the pages you choose, and add
-                    profiles to the batch below. LinkedIn must be signed in under Setup.
-                  </p>
+                  <p className="hint find-panel-hint">Search a company on LinkedIn and add people to your batch.</p>
                 </div>
               </div>
             <div className="find-form">
@@ -2676,24 +2699,46 @@ function App() {
               </p>
             )}
           </section>
-          {upcomingSummary && (
-            <aside className="panel next-send-card" role="status">
-              <p className="eyebrow">Next scheduled</p>
-              <strong className="next-send-name">{upcomingSummary.peopleLabel}</strong>
-              <span className="next-send-meta">{upcomingSummary.companiesLabel}</span>
-              <span className="next-send-time">
-                Next {formatShortWhen(upcomingSummary.nextTime)}
-                {upcomingSummary.nextSlotPeople > 1
-                  ? ` · ${upcomingSummary.nextSlotPeople} in that slot`
-                  : ""}
-              </span>
-              <button type="button" className="secondary subtle next-send-link" onClick={() => setTab("scheduled")}>
-                Open Scheduled
-              </button>
-            </aside>
-          )}
-          </div>
 
+          <aside
+            className={`panel next-send-card${upcomingSummary ? "" : " next-send-card-empty"}`}
+            role="status"
+          >
+            <p className="eyebrow">Next up</p>
+            {upcomingSummary ? (
+              <>
+                <strong className="next-send-name">{upcomingSummary.peopleLabel}</strong>
+                <span className="next-send-time">{formatShortWhen(upcomingSummary.nextTime)}</span>
+                <button type="button" className="secondary subtle next-send-link" onClick={() => setTab("scheduled")}>
+                  View queue
+                </button>
+              </>
+            ) : (
+              <>
+                <strong className="next-send-name">Nothing queued</strong>
+                <span className="next-send-meta">Send today or the trees wilt.</span>
+              </>
+            )}
+          </aside>
+
+          <button
+            type="button"
+            className="panel send-streak-card"
+            onClick={() => setTab("analytics")}
+            aria-label={
+              analytics
+                ? `${analytics.goalProgress.sendStreak}-day streak. Open Grove.`
+                : "Open Grove to see your streak"
+            }
+          >
+            <StreakTreeBuddy />
+            <span className="send-streak-count">
+              {analytics ? analytics.goalProgress.sendStreak : "—"}
+            </span>
+            <span className="send-streak-label">day streak</span>
+            <span className="send-streak-grow-link">See grove →</span>
+          </button>
+          </div>
           <section className="send-layout">
           <section className="panel batch-panel">
             {candidates.length === 0 ? (
@@ -4298,25 +4343,67 @@ function App() {
           ) : (
             <>
               <section className="panel village-hero-panel">
-                <Suspense
-                  fallback={
-                    <div className="grove-canvas-skeleton" aria-hidden="true">
-                      <p className="hint">Growing the forest…</p>
-                    </div>
-                  }
+                <div
+                  className={`outreach-village streak-grove${analytics.goalProgress.met ? " celebrating" : ""}`}
+                  aria-label={`Streak grove with ${analytics.goalProgress.sendStreak} trees`}
                 >
-                  <StreakGrove3D
-                    active={tab === "analytics"}
-                    weatherCity={groveWeatherCity}
-                    tempUnit={groveTempUnit}
-                    streak={analytics.goalProgress.sendStreak}
-                    bestStreak={analytics.goalProgress.longestSendStreak}
-                    sentToday={analytics.goalProgress.sentToday}
-                    level={analytics.motivation.level}
-                    title={analytics.motivation.title}
-                    goalMet={analytics.goalProgress.met}
-                  />
-                </Suspense>
+                  <div className="village-sky-label">
+                    <div>
+                      <p className="eyebrow">Your streak forest</p>
+                      <h2>Streak Grove</h2>
+                      <p className="hint">
+                        One tree for every day in a row you send — the forest keeps growing with your streak. Skip a day
+                        and it returns to bare soil.
+                      </p>
+                      {analytics.goalProgress.sendStreak > 0 && analytics.goalProgress.sentToday === 0 && (
+                        <p className="grove-warning">
+                          No sends yet today — send one email to keep{" "}
+                          {analytics.goalProgress.sendStreak === 1
+                            ? "your tree"
+                            : `all ${analytics.goalProgress.sendStreak} trees`}{" "}
+                          alive.
+                        </p>
+                      )}
+                    </div>
+                    <div className="village-character-card">
+                      <div
+                        className={`village-character level-${Math.min(analytics.motivation.level, 8)}`}
+                        aria-hidden="true"
+                      >
+                        <span className="village-character-body" />
+                        <span className="village-character-head" />
+                        <span className="village-character-hat" />
+                      </div>
+                      <div>
+                        <strong>{analytics.motivation.title}</strong>
+                        <span>Level {analytics.motivation.level}</span>
+                        <span>
+                          {analytics.goalProgress.sendStreak}-day streak
+                          {analytics.goalProgress.longestSendStreak > analytics.goalProgress.sendStreak
+                            ? ` · best ${analytics.goalProgress.longestSendStreak}`
+                            : analytics.goalProgress.longestSendStreak > 1
+                              ? " · personal best"
+                              : ""}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  <Suspense fallback={<GroveLoadingPlay />}>
+                    <StreakGrove3D
+                      active={tab === "analytics"}
+                      weatherCity={groveWeatherCity}
+                      tempUnit={groveTempUnit}
+                      streak={analytics.goalProgress.sendStreak}
+                      bestStreak={analytics.goalProgress.longestSendStreak}
+                      sentToday={analytics.goalProgress.sentToday}
+                      level={analytics.motivation.level}
+                      title={analytics.motivation.title}
+                      goalMet={analytics.goalProgress.met}
+                      testMode={Boolean(envStatus?.testMode.enabled)}
+                      showHeader={false}
+                    />
+                  </Suspense>
+                </div>
                 <div className="village-goal-rail">
                   <div className="village-goal-copy">
                     <p className="eyebrow">Today · {analytics.today.date}</p>

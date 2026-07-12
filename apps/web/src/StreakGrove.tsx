@@ -394,6 +394,7 @@ export function StreakGrove({
   level,
   title,
   goalMet,
+  hideHeader = false,
 }: {
   streak: number;
   bestStreak: number;
@@ -401,6 +402,7 @@ export function StreakGrove({
   level: number;
   title: string;
   goalMet: boolean;
+  hideHeader?: boolean;
 }) {
   const trees = useMemo(() => {
     const count = Math.min(Math.max(0, streak), MAX_TREES);
@@ -442,40 +444,7 @@ export function StreakGrove({
   const overflow = Math.max(0, streak - MAX_TREES);
   const streakAtRisk = streak > 0 && sentToday === 0;
 
-  return (
-    <div
-      className={`outreach-village streak-grove${goalMet ? " celebrating" : ""}`}
-      aria-label={`Streak grove with ${streak} trees`}
-    >
-      <div className="village-sky-label">
-        <div>
-          <p className="eyebrow">Your streak forest</p>
-          <h2>Streak Grove</h2>
-          <p className="hint">
-            One tree for every day in a row you send. Older trees grow taller — skip a day and the grove returns to bare soil.
-          </p>
-          {streakAtRisk && (
-            <p className="grove-warning">
-              No sends yet today — send one email to keep {streak === 1 ? "your tree" : `all ${streak} trees`} alive.
-            </p>
-          )}
-        </div>
-        <div className="village-character-card">
-          <div className={`village-character level-${Math.min(level, 8)}`} aria-hidden="true">
-            <span className="village-character-body" />
-            <span className="village-character-head" />
-            <span className="village-character-hat" />
-          </div>
-          <div>
-            <strong>{title}</strong>
-            <span>Level {level}</span>
-            <span>
-              {streak}-day streak{bestStreak > streak ? ` · best ${bestStreak}` : bestStreak > 1 ? " · personal best" : ""}
-            </span>
-          </div>
-        </div>
-      </div>
-
+  const canvas = (
       <svg className="village-canvas" viewBox="0 0 900 460" role="img">
         <defs>
           {/* ---- Sky & light ---- */}
@@ -1025,6 +994,46 @@ export function StreakGrove({
           <rect width="900" height="460" fill="url(#sgVignette)" />
         </g>
       </svg>
+  );
+
+  if (hideHeader) {
+    return canvas;
+  }
+
+  return (
+    <div
+      className={`outreach-village streak-grove${goalMet ? " celebrating" : ""}`}
+      aria-label={`Streak grove with ${streak} trees`}
+    >
+      <div className="village-sky-label">
+        <div>
+          <p className="eyebrow">Your streak forest</p>
+          <h2>Streak Grove</h2>
+          <p className="hint">
+            One tree for every day in a row you send. Older trees grow taller — skip a day and the grove returns to bare soil.
+          </p>
+          {streakAtRisk && (
+            <p className="grove-warning">
+              No sends yet today — send one email to keep {streak === 1 ? "your tree" : `all ${streak} trees`} alive.
+            </p>
+          )}
+        </div>
+        <div className="village-character-card">
+          <div className={`village-character level-${Math.min(level, 8)}`} aria-hidden="true">
+            <span className="village-character-body" />
+            <span className="village-character-head" />
+            <span className="village-character-hat" />
+          </div>
+          <div>
+            <strong>{title}</strong>
+            <span>Level {level}</span>
+            <span>
+              {streak}-day streak{bestStreak > streak ? ` · best ${bestStreak}` : bestStreak > 1 ? " · personal best" : ""}
+            </span>
+          </div>
+        </div>
+      </div>
+      {canvas}
     </div>
   );
 }

@@ -191,6 +191,8 @@ type WeatherPreset = {
   sunColor: string;
   sunI: number;
   hemiI: number;
+  hemiSky: string;
+  hemiGround: string;
   fillI: number;
   rimI: number;
   envI: number;
@@ -211,6 +213,8 @@ type WeatherPreset = {
   mistColor: string;
   /** Multiplied over terrain vertex colors — darkens wet ground, brightens snow. */
   terrainTint: string;
+  /** Star field opacity (0 = daytime / overcast hides them). */
+  starO: number;
 };
 
 const WEATHER_PRESETS: Record<WeatherKind, WeatherPreset> = {
@@ -224,6 +228,8 @@ const WEATHER_PRESETS: Record<WeatherKind, WeatherPreset> = {
     sunColor: "#fff4e4",
     sunI: 1.65,
     hemiI: 0.58,
+    hemiSky: "#9ec0e0",
+    hemiGround: "#4a6840",
     fillI: 0.28,
     rimI: 0.22,
     envI: 0.55,
@@ -239,6 +245,7 @@ const WEATHER_PRESETS: Record<WeatherKind, WeatherPreset> = {
     mistMul: 1,
     mistColor: "#c8d8e8",
     terrainTint: "#c8cfc0",
+    starO: 0,
   },
   cloudy: {
     zenith: "#7e93a8",
@@ -250,6 +257,8 @@ const WEATHER_PRESETS: Record<WeatherKind, WeatherPreset> = {
     sunColor: "#eceff2",
     sunI: 0.62,
     hemiI: 0.9,
+    hemiSky: "#aebfd0",
+    hemiGround: "#586450",
     fillI: 0.32,
     rimI: 0,
     envI: 0.48,
@@ -266,6 +275,7 @@ const WEATHER_PRESETS: Record<WeatherKind, WeatherPreset> = {
     mistMul: 1.4,
     mistColor: "#b6c2cc",
     terrainTint: "#b8beb2",
+    starO: 0,
   },
   rain: {
     zenith: "#525e6a",
@@ -279,6 +289,8 @@ const WEATHER_PRESETS: Record<WeatherKind, WeatherPreset> = {
     sunColor: "#ccd3da",
     sunI: 0.3,
     hemiI: 0.72,
+    hemiSky: "#8e9cac",
+    hemiGround: "#4c5852",
     fillI: 0.24,
     rimI: 0,
     envI: 0.35,
@@ -294,6 +306,7 @@ const WEATHER_PRESETS: Record<WeatherKind, WeatherPreset> = {
     mistMul: 1.25,
     mistColor: "#96a2ac",
     terrainTint: "#96a09c",
+    starO: 0,
   },
   snow: {
     zenith: "#8a9aae",
@@ -305,6 +318,8 @@ const WEATHER_PRESETS: Record<WeatherKind, WeatherPreset> = {
     sunColor: "#f2f4f6",
     sunI: 0.55,
     hemiI: 1.0,
+    hemiSky: "#c2cedc",
+    hemiGround: "#8a9298",
     fillI: 0.3,
     rimI: 0,
     envI: 0.52,
@@ -320,8 +335,295 @@ const WEATHER_PRESETS: Record<WeatherKind, WeatherPreset> = {
     mistMul: 1.3,
     mistColor: "#d0d8e0",
     terrainTint: "#d4d8dc",
+    starO: 0,
   },
 };
+
+/* ---------------- day / night ---------------- */
+
+/** Night versions of each weather mode. Same fields, resolved by blending with
+ *  the day preset on a continuous 0–1 night factor from the local clock. */
+const NIGHT_PRESETS: Record<WeatherKind, WeatherPreset> = {
+  // Clear night — deep indigo sky, bright moon, visible stars
+  sunny: {
+    zenith: "#142448",
+    horizon: "#364e78",
+    ground: "#1e2638",
+    fogColor: "#233456",
+    fogDensity: 0.0056,
+    clear: "#1b2a4a",
+    sunColor: "#c2d4f0",
+    sunI: 1.1,
+    hemiI: 0.62,
+    hemiSky: "#50688f",
+    hemiGround: "#2a3628",
+    fillI: 0.18,
+    rimI: 0.16,
+    envI: 0.32,
+    exposure: 1.02,
+    sunSpriteOpacity: 0.8,
+    sunSpriteScale: 20,
+    sunDiscColor: "#eaf2ff",
+    sunDiscGlow: 1.15,
+    cloudMul: 0.55,
+    cloudScaleMul: 1,
+    cloudYOff: 0,
+    cloudColor: "#3c4c6c",
+    mistMul: 0.8,
+    mistColor: "#26385a",
+    terrainTint: "#7886a0",
+    starO: 0.95,
+  },
+  // Overcast night — heavy lid of cloud, faint diffuse moon
+  cloudy: {
+    zenith: "#182130",
+    horizon: "#2e3a4c",
+    ground: "#1c2430",
+    fogColor: "#263243",
+    fogDensity: 0.0072,
+    clear: "#212d3e",
+    sunColor: "#9cb0ca",
+    sunI: 0.32,
+    hemiI: 0.58,
+    hemiSky: "#3a4c64",
+    hemiGround: "#242e26",
+    fillI: 0.18,
+    rimI: 0,
+    envI: 0.24,
+    exposure: 0.95,
+    sunSpriteOpacity: 0.07,
+    sunSpriteScale: 42,
+    sunDiscColor: "#a8b6ca",
+    sunDiscGlow: 0.12,
+    cloudMul: 1.6,
+    cloudScaleMul: 1.3,
+    cloudYOff: -5,
+    cloudColor: "#344052",
+    mistMul: 1.15,
+    mistColor: "#2a3a4e",
+    terrainTint: "#606c7e",
+    starO: 0.22,
+  },
+  // Night rain — darkest mode, but ridge and lake stay readable
+  rain: {
+    zenith: "#141a24",
+    horizon: "#28323e",
+    ground: "#181e26",
+    fogColor: "#232d39",
+    fogDensity: 0.0102,
+    clear: "#1f2833",
+    sunColor: "#7e8ca0",
+    sunI: 0.22,
+    hemiI: 0.46,
+    hemiSky: "#31404f",
+    hemiGround: "#202824",
+    fillI: 0.15,
+    rimI: 0,
+    envI: 0.16,
+    exposure: 0.9,
+    sunSpriteOpacity: 0,
+    sunSpriteScale: 26,
+    sunDiscColor: "#7e8a9a",
+    sunDiscGlow: 0,
+    cloudMul: 2.1,
+    cloudScaleMul: 1.4,
+    cloudYOff: -14,
+    cloudColor: "#2a343f",
+    mistMul: 1.15,
+    mistColor: "#242f3b",
+    terrainTint: "#525e6c",
+    starO: 0.06,
+  },
+  // Snowy night — snow bounces moonlight, so it stays surprisingly bright
+  snow: {
+    zenith: "#20304a",
+    horizon: "#465872",
+    ground: "#303a4c",
+    fogColor: "#3a4a64",
+    fogDensity: 0.0086,
+    clear: "#324058",
+    sunColor: "#d0dcf0",
+    sunI: 0.5,
+    hemiI: 0.78,
+    hemiSky: "#546a8c",
+    hemiGround: "#46505e",
+    fillI: 0.24,
+    rimI: 0,
+    envI: 0.32,
+    exposure: 1.0,
+    sunSpriteOpacity: 0.14,
+    sunSpriteScale: 34,
+    sunDiscColor: "#d4e0f2",
+    sunDiscGlow: 0.22,
+    cloudMul: 1.55,
+    cloudScaleMul: 1.25,
+    cloudYOff: -9,
+    cloudColor: "#38445a",
+    mistMul: 1.2,
+    mistColor: "#2e3c54",
+    terrainTint: "#8894a8",
+    starO: 0.3,
+  },
+};
+
+/** Golden-hour targets blended in around sunrise / sunset. Mostly a color pass —
+ *  numbers stay close to the day↔night blend underneath. */
+const DUSK_PRESETS: Record<WeatherKind, WeatherPreset> = {
+  sunny: {
+    ...WEATHER_PRESETS.sunny,
+    zenith: "#3c4c86",
+    horizon: "#f0a060",
+    ground: "#8a6a50",
+    fogColor: "#c89a74",
+    clear: "#b98a68",
+    sunColor: "#ffc890",
+    sunI: 1.15,
+    hemiSky: "#8a7c94",
+    hemiGround: "#4e4638",
+    exposure: 1.0,
+    sunSpriteOpacity: 0.9,
+    sunSpriteScale: 30,
+    sunDiscColor: "#ff9c50",
+    sunDiscGlow: 1.25,
+    cloudColor: "#f0ac80",
+    mistColor: "#d8a078",
+    terrainTint: "#b8a48e",
+    starO: 0.12,
+  },
+  cloudy: {
+    ...WEATHER_PRESETS.cloudy,
+    zenith: "#5a5a74",
+    horizon: "#c89a86",
+    ground: "#7e7268",
+    fogColor: "#a89088",
+    clear: "#9a8880",
+    sunColor: "#e8c0a0",
+    hemiSky: "#8a8290",
+    hemiGround: "#4a4640",
+    sunDiscColor: "#d8a888",
+    sunDiscGlow: 0.3,
+    cloudColor: "#b09088",
+    mistColor: "#a08c84",
+    terrainTint: "#a89a8c",
+    starO: 0.06,
+  },
+  rain: {
+    ...WEATHER_PRESETS.rain,
+    zenith: "#464452",
+    horizon: "#7e6c6a",
+    ground: "#5e5654",
+    fogColor: "#766866",
+    clear: "#746866",
+    cloudColor: "#847472",
+    mistColor: "#807270",
+    terrainTint: "#847c78",
+    starO: 0,
+  },
+  snow: {
+    ...WEATHER_PRESETS.snow,
+    zenith: "#6a6c8e",
+    horizon: "#e0b8c0",
+    ground: "#a89aa0",
+    fogColor: "#c0aab4",
+    clear: "#b4a2ac",
+    sunColor: "#f0d8d0",
+    sunDiscColor: "#f0c0a8",
+    sunDiscGlow: 0.35,
+    cloudColor: "#c8aab4",
+    mistColor: "#c0a8b4",
+    terrainTint: "#c4b4bc",
+    starO: 0.08,
+  },
+};
+
+/** How strongly golden hour tints each mode (heavy weather mutes sunsets). */
+const DUSK_STRENGTH: Record<WeatherKind, number> = {
+  sunny: 1,
+  cloudy: 0.55,
+  rain: 0.2,
+  snow: 0.45,
+};
+
+/** Where the moon hangs at night — opposite side of the sky from the sun,
+ *  kept low like SUN_DIR so it sits just above the ridge inside the camera frame. */
+const MOON_DIR = new THREE.Vector3(-0.32, 0.22, -0.9).normalize();
+
+/**
+ * Continuous day/night factors from the local clock.
+ * nightT: 0 = full day, 1 = full night. duskT peaks mid-transition (golden hour).
+ * Dawn ramps 5:30–7:00, dusk ramps 18:00–20:00.
+ */
+function dayNightFactors(now: Date = new Date()): { nightT: number; duskT: number } {
+  // Dev preview: window.__groveHourOverride or the temporary Grow toggles
+  const override = (window as { __groveHourOverride?: number }).__groveHourOverride;
+  const h = typeof override === "number" ? override : now.getHours() + now.getMinutes() / 60;
+  let nightT: number;
+  if (h < 5.5) nightT = 1;
+  else if (h < 7) nightT = 1 - (h - 5.5) / 1.5;
+  else if (h < 18) nightT = 0;
+  else if (h < 20) nightT = (h - 18) / 2;
+  else nightT = 1;
+  // Bell curve peaking when we're halfway between day and night
+  const duskT = Math.pow(Math.max(0, 1 - Math.abs(nightT - 0.5) * 2), 1.4);
+  return { nightT, duskT };
+}
+
+function mixHex(a: string, b: string, t: number): string {
+  return `#${new THREE.Color(a).lerp(new THREE.Color(b), t).getHexString()}`;
+}
+
+function mixPreset(a: WeatherPreset, b: WeatherPreset, t: number): WeatherPreset {
+  if (t <= 0) return a;
+  if (t >= 1) return b;
+  const out = {} as Record<keyof WeatherPreset, number | string>;
+  for (const key of Object.keys(a) as Array<keyof WeatherPreset>) {
+    const av = a[key];
+    const bv = b[key];
+    out[key] = typeof av === "number" ? lerp(av, bv as number, t) : mixHex(av, bv as string, t);
+  }
+  return out as WeatherPreset;
+}
+
+/** Day preset → night preset blend, with a golden-hour tint mid-transition. */
+function resolveWeatherPreset(
+  kind: WeatherKind,
+  now: Date = new Date(),
+): { preset: WeatherPreset; nightT: number } {
+  const { nightT, duskT } = dayNightFactors(now);
+  let preset = mixPreset(WEATHER_PRESETS[kind], NIGHT_PRESETS[kind], nightT);
+  if (duskT > 0.01) preset = mixPreset(preset, DUSK_PRESETS[kind], duskT * DUSK_STRENGTH[kind]);
+  return { preset, nightT };
+}
+
+/** Static star dome — faded in/out per weather + time of day. */
+function buildStars(): { obj: THREE.Points; mat: THREE.PointsMaterial } {
+  const count = 340;
+  const pos = new Float32Array(count * 3);
+  for (let i = 0; i < count; i += 1) {
+    // Upper hemisphere only, weighted away from the horizon
+    const az = hash2(i, 91) * Math.PI * 2;
+    const el = 0.12 + Math.pow(hash2(i, 92), 0.7) * 1.35;
+    const r = 430;
+    pos[i * 3] = Math.cos(az) * Math.cos(el) * r;
+    pos[i * 3 + 1] = Math.sin(el) * r;
+    pos[i * 3 + 2] = Math.sin(az) * Math.cos(el) * r;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  const mat = new THREE.PointsMaterial({
+    color: new THREE.Color("#dce8ff"),
+    size: 2.2,
+    sizeAttenuation: false,
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const obj = new THREE.Points(geo, mat);
+  obj.renderOrder = -1;
+  obj.visible = false;
+  return { obj, mat };
+}
 
 /** Map API weather buckets onto the grove's four scene presets. */
 function weatherFromApiCondition(condition: WeatherCondition): WeatherKind {
@@ -754,12 +1056,12 @@ varying vec3 vViewDir;
 varying vec3 vNormalW;
 uniform float uTime;
 
-// Cheap layered swell — looks like wind chop without Gerstner cost
+// Soft lake swell — ponds don't chop; keep it slow and low
 float swell(vec2 p, float t) {
   float w = 0.0;
-  w += sin(p.x * 2.4 + t * 0.85) * cos(p.y * 1.9 - t * 0.55) * 0.55;
-  w += sin(p.x * 4.1 - t * 1.1 + 1.3) * cos(p.y * 3.6 + t * 0.7) * 0.28;
-  w += sin((p.x + p.y) * 6.2 + t * 1.4) * 0.12;
+  w += sin(p.x * 1.6 + t * 0.28) * cos(p.y * 1.35 - t * 0.22) * 0.65;
+  w += sin(p.x * 2.8 - t * 0.35 + 1.3) * cos(p.y * 2.4 + t * 0.25) * 0.28;
+  w += sin((p.x + p.y) * 4.2 + t * 0.4) * 0.1;
   return w;
 }
 
@@ -767,16 +1069,16 @@ void main() {
   vUv = uv;
   // CircleGeometry lies in XY; we rotate -PI/2 so Z becomes up in local before model
   vec3 pos = position;
-  float h = swell(pos.xy * 1.15, uTime) * 0.045;
-  h += swell(pos.xy * 2.4 + 8.0, uTime * 1.15) * 0.018;
+  float h = swell(pos.xy * 0.95, uTime) * 0.012;
+  h += swell(pos.xy * 1.8 + 8.0, uTime * 0.9) * 0.005;
   pos.z += h;
 
   // Analytic normal from swell derivatives
-  float e = 0.08;
-  float hx = swell((pos.xy + vec2(e, 0.0)) * 1.15, uTime) * 0.045
-           + swell((pos.xy + vec2(e, 0.0)) * 2.4 + 8.0, uTime * 1.15) * 0.018;
-  float hz = swell((pos.xy + vec2(0.0, e)) * 1.15, uTime) * 0.045
-           + swell((pos.xy + vec2(0.0, e)) * 2.4 + 8.0, uTime * 1.15) * 0.018;
+  float e = 0.12;
+  float hx = swell((pos.xy + vec2(e, 0.0)) * 0.95, uTime) * 0.012
+           + swell((pos.xy + vec2(e, 0.0)) * 1.8 + 8.0, uTime * 0.9) * 0.005;
+  float hz = swell((pos.xy + vec2(0.0, e)) * 0.95, uTime) * 0.012
+           + swell((pos.xy + vec2(0.0, e)) * 1.8 + 8.0, uTime * 0.9) * 0.005;
   vec3 nLocal = normalize(vec3(-(hx - h) / e, -(hz - h) / e, 1.0));
 
   vec4 world = modelMatrix * vec4(pos, 1.0);
@@ -802,7 +1104,6 @@ uniform vec3 uSkyGround;
 uniform float uWaveMul;
 uniform float uGlitter;
 
-// Value-noise-ish hash for soft caustic shimmer
 float hash21(vec2 p) {
   return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
 }
@@ -821,69 +1122,58 @@ void main() {
   vec3 V = normalize(vViewDir);
   vec3 N = normalize(vNormalW);
 
-  // Fine wind ripples on top of vertex swell (detail normals)
-  float w1 = sin(vUv.x * 42.0 + uTime * 1.35) * cos(vUv.y * 34.0 - uTime * 1.05);
-  float w2 = sin(vUv.x * 68.0 - uTime * 1.7 + 1.7) * cos(vUv.y * 55.0 + uTime * 1.2);
-  float w3 = sin((vUv.x + vUv.y) * 90.0 + uTime * 2.1) * 0.55;
+  // Very fine wind film — barely there so a lake stays glassy
+  float w1 = sin(vUv.x * 28.0 + uTime * 0.45) * cos(vUv.y * 22.0 - uTime * 0.35);
+  float w2 = sin(vUv.x * 44.0 - uTime * 0.55 + 1.7) * cos(vUv.y * 36.0 + uTime * 0.4);
   N = normalize(N + vec3(
-    (w1 * 0.09 + w2 * 0.05 + w3 * 0.03) * uWaveMul,
+    (w1 * 0.028 + w2 * 0.016) * uWaveMul,
     0.0,
-    (w2 * 0.08 - w1 * 0.04 + w3 * 0.025) * uWaveMul
+    (w2 * 0.024 - w1 * 0.012) * uWaveMul
   ));
 
   float ndv = max(dot(N, V), 0.0);
-  // Schlick-ish fresnel — glancing edges mirror the sky hard
   float fresnel = pow(1.0 - ndv, 4.2);
   fresnel = mix(0.04, 1.0, fresnel);
 
   vec2 c = vUv - 0.5;
   float radial = length(c) * 2.0;
-  // Depth: deeper in the middle basin, shallower toward shore
   float depth = clamp(1.0 - pow(radial, 1.35) * 0.92, 0.0, 1.0);
 
-  // Beer-law-ish body: teal shallows → ink deeps
   vec3 body = mix(uShallow, uDeep, depth * 0.88 + 0.08);
-  // Slight murk / algae near shore
   body = mix(body, vec3(0.32, 0.48, 0.42), (1.0 - depth) * 0.14);
 
-  // Soft caustic mottling in shallows
-  float caust = noise(vUv * 18.0 + vec2(uTime * 0.12, -uTime * 0.09));
-  caust += noise(vUv * 36.0 - vec2(uTime * 0.18, uTime * 0.11)) * 0.5;
-  body += vec3(0.12, 0.22, 0.2) * (caust - 0.75) * (1.0 - depth) * 0.18;
+  float caust = noise(vUv * 14.0 + vec2(uTime * 0.05, -uTime * 0.04));
+  caust += noise(vUv * 28.0 - vec2(uTime * 0.07, uTime * 0.05)) * 0.5;
+  body += vec3(0.12, 0.22, 0.2) * (caust - 0.75) * (1.0 - depth) * 0.14;
 
-  // Procedural sky reflection (no cube map — avoids zebra striping)
   vec3 R = reflect(-V, N);
   float skyT = smoothstep(-0.12, 0.72, R.y);
   float groundT = smoothstep(0.08, -0.35, R.y);
   vec3 sky = mix(uSkyHorizon, uSkyZenith, skyT);
   sky = mix(sky, uSkyGround, groundT * 0.55);
-  // Stretch reflection a touch so distant mountains read in the water
   sky = mix(sky, uSkyHorizon * 0.92, smoothstep(0.15, 0.55, length(R.xz)) * 0.2);
 
   vec3 col = mix(body, sky, fresnel * (0.42 + depth * 0.28));
 
-  // Hot sun specular streak
   vec3 L = normalize(uSunDir);
   vec3 H = normalize(L + V);
-  float spec = pow(max(dot(N, H), 0.0), 220.0);
-  float wide = pow(max(dot(N, H), 0.0), 48.0);
-  col += vec3(1.0, 0.97, 0.9) * spec * 0.55 * uGlitter;
-  col += vec3(0.75, 0.88, 0.95) * wide * 0.08 * uGlitter;
+  float spec = pow(max(dot(N, H), 0.0), 280.0);
+  float wide = pow(max(dot(N, H), 0.0), 64.0);
+  col += vec3(1.0, 0.97, 0.9) * spec * 0.42 * uGlitter;
+  col += vec3(0.75, 0.88, 0.95) * wide * 0.06 * uGlitter;
 
-  // Drifting micro-glitter (sun on chop)
-  float glitter = noise(vUv * 55.0 + vec2(uTime * 0.35, uTime * 0.22));
-  glitter = smoothstep(0.82, 0.98, glitter);
-  col += vec3(0.9, 0.95, 1.0) * glitter * fresnel * 0.12 * uGlitter;
+  float glitter = noise(vUv * 40.0 + vec2(uTime * 0.12, uTime * 0.08));
+  glitter = smoothstep(0.88, 0.99, glitter);
+  col += vec3(0.9, 0.95, 1.0) * glitter * fresnel * 0.07 * uGlitter;
 
-  // Shore foam / pale rim where water meets bank
-  float shore = smoothstep(0.72, 0.98, radial);
-  float foam = shore * (0.55 + 0.45 * noise(vUv * 40.0 + uTime * 0.4));
-  col = mix(col, vec3(0.86, 0.92, 0.94), foam * 0.55);
-  // Darken just inside the foam line so the edge reads wet
+  float shore = smoothstep(0.78, 0.99, radial);
+  // Quiet lake edge — soft light ring, not ocean foam
+  float foam = shore * (0.28 + 0.22 * noise(vUv * 22.0 + uTime * 0.06));
+  col = mix(col, vec3(0.86, 0.92, 0.94), foam * 0.32);
   col = mix(col, body * 0.82, smoothstep(0.62, 0.82, radial) * (1.0 - shore) * 0.2);
 
   float alpha = mix(0.78, 0.94, fresnel);
-  alpha = mix(alpha, 0.88, shore * 0.35);
+  alpha = mix(alpha, 0.9, shore * 0.28);
   gl_FragColor = vec4(col, clamp(alpha, 0.76, 0.96));
 }
 `;
@@ -900,8 +1190,8 @@ function makeWaterMaterial(): THREE.ShaderMaterial {
       uSkyZenith: { value: new THREE.Color("#4a7ab8") },
       uSkyHorizon: { value: new THREE.Color("#c5d8ea") },
       uSkyGround: { value: new THREE.Color("#6a7a58") },
-      uWaveMul: { value: 1 },
-      uGlitter: { value: 1 },
+      uWaveMul: { value: 0.45 },
+      uGlitter: { value: 0.75 },
     },
     vertexShader: WATER_VERT,
     fragmentShader: WATER_FRAG,
@@ -988,56 +1278,91 @@ function buildForegroundGrass(): THREE.InstancedMesh {
   return mesh;
 }
 
-/** Simple low-poly ducks that paddle around the lake. */
-function buildLakeDucks(): { group: THREE.Group; ducks: Array<{ mesh: THREE.Group; phase: number; radius: number; speed: number }> } {
+/** Lake ducks — stay near the camera shore early, roam farther as streak grows. */
+function buildLakeDucks(): {
+  group: THREE.Group;
+  ducks: Array<{ mesh: THREE.Group; phase: number; homeRadius: number; speed: number; roamBias: number }>;
+} {
   const group = new THREE.Group();
-  const bodyMat = new THREE.MeshStandardMaterial({ color: new THREE.Color("#f4f2ec"), roughness: 0.75 });
-  const darkMat = new THREE.MeshStandardMaterial({ color: new THREE.Color("#2a2a2e"), roughness: 0.8 });
-  const beakMat = new THREE.MeshStandardMaterial({ color: new THREE.Color("#e0893a"), roughness: 0.7 });
-  const ducks: Array<{ mesh: THREE.Group; phase: number; radius: number; speed: number }> = [];
+  const bodyMat = new THREE.MeshStandardMaterial({ color: new THREE.Color("#f2efe6"), roughness: 0.72 });
+  const darkMat = new THREE.MeshStandardMaterial({ color: new THREE.Color("#2c2c30"), roughness: 0.78 });
+  const beakMat = new THREE.MeshStandardMaterial({ color: new THREE.Color("#e0893a"), roughness: 0.65 });
+  const ducks: Array<{ mesh: THREE.Group; phase: number; homeRadius: number; speed: number; roamBias: number }> = [];
 
-  for (let i = 0; i < 3; i += 1) {
+  for (let i = 0; i < 4; i += 1) {
     const duck = new THREE.Group();
-    const body = new THREE.Mesh(new THREE.SphereGeometry(0.28, 8, 6), i === 2 ? darkMat : bodyMat);
-    body.scale.set(1.15, 0.72, 1.35);
-    body.position.y = 0.12;
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.14, 7, 6), i === 2 ? darkMat : bodyMat);
-    head.position.set(0.22, 0.28, 0.05);
-    const beak = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.14, 5), beakMat);
+    const dark = i === 2;
+    const body = new THREE.Mesh(new THREE.SphereGeometry(0.32, 10, 8), dark ? darkMat : bodyMat);
+    body.scale.set(1.2, 0.72, 1.4);
+    body.position.y = 0.14;
+    body.castShadow = true;
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.15, 8, 7), dark ? darkMat : bodyMat);
+    head.position.set(0.26, 0.3, 0.04);
+    const beak = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.15, 5), beakMat);
     beak.rotation.z = -Math.PI / 2;
-    beak.position.set(0.34, 0.26, 0.05);
+    beak.position.set(0.4, 0.28, 0.04);
     duck.add(body, head, beak);
-    // Tiny wake ellipse
     const wake = new THREE.Mesh(
-      new THREE.CircleGeometry(0.35, 10),
-      new THREE.MeshBasicMaterial({ color: new THREE.Color("#d8e8f0"), transparent: true, opacity: 0.22, depthWrite: false }),
+      new THREE.CircleGeometry(0.42, 12),
+      new THREE.MeshBasicMaterial({
+        color: new THREE.Color("#d8e8f0"),
+        transparent: true,
+        opacity: 0.28,
+        depthWrite: false,
+      }),
     );
     wake.rotation.x = -Math.PI / 2;
     wake.position.y = 0.02;
     duck.add(wake);
-    duck.scale.setScalar(i === 1 ? 0.72 : 1);
+    // Larger so day-1 camera still reads them across the meadow
+    duck.scale.setScalar(i === 1 ? 1.35 : i === 3 ? 1.1 : 1.55);
     group.add(duck);
     ducks.push({
       mesh: duck,
-      phase: i * 2.1,
-      radius: 5.5 + i * 2.2,
-      speed: 0.18 + i * 0.04,
+      phase: i * 1.7,
+      homeRadius: 1.6 + i * 0.55,
+      speed: 0.11 + i * 0.025,
+      // 0 stays near shore; 1 explores the open basin as streak grows
+      roamBias: i === 0 ? 0.15 : i === 1 ? 0.35 : i === 2 ? 0.7 : 1,
     });
   }
   return { group, ducks };
 }
 
 function updateLakeDucks(
-  ducks: Array<{ mesh: THREE.Group; phase: number; radius: number; speed: number }>,
+  ducks: Array<{ mesh: THREE.Group; phase: number; homeRadius: number; speed: number; roamBias: number }>,
   elapsed: number,
+  streak: number,
 ) {
-  for (const d of ducks) {
-    const ang = elapsed * d.speed + d.phase;
-    const x = LAKE.x + Math.cos(ang) * d.radius * 0.55;
-    const z = LAKE.z + Math.sin(ang) * d.radius * 0.42;
-    d.mesh.position.set(x, WATER_Y + 0.08 + Math.sin(elapsed * 2.2 + d.phase) * 0.02, z);
-    d.mesh.rotation.y = -ang + Math.PI / 2;
-    d.mesh.rotation.z = Math.sin(elapsed * 2.4 + d.phase) * 0.06;
+  // Day 1: hug the camera-facing shore. Later: unlock the wider lake.
+  const explore = smoothstep(1, 14, Math.max(0, streak));
+  // SW bank — closest to the day-1 meadow camera (base ~z=46 looking toward ~z=18)
+  const nearX = LAKE.x - LAKE.rx * 0.72;
+  const nearZ = LAKE.z - LAKE.rz * 0.28;
+
+  for (let i = 0; i < ducks.length; i += 1) {
+    const d = ducks[i]!;
+    const localAng = elapsed * d.speed + d.phase;
+    const homeX = nearX + Math.cos(localAng) * d.homeRadius;
+    const homeZ = nearZ + Math.sin(localAng * 0.9) * (d.homeRadius * 0.65);
+
+    const farAng = elapsed * d.speed * 0.55 + d.phase + 0.8;
+    const farR = 6 + i * 2.4;
+    const farX = LAKE.x + Math.cos(farAng) * farR * 0.55;
+    const farZ = LAKE.z + Math.sin(farAng) * farR * 0.4;
+
+    const roam = Math.min(1, explore * d.roamBias);
+    const x = lerp(homeX, farX, roam);
+    const z = lerp(homeZ, farZ, roam);
+    d.mesh.position.set(x, WATER_Y + 0.1 + Math.sin(elapsed * 1.4 + d.phase) * 0.015, z);
+    const facing = Math.atan2(
+      roam > 0.5 ? -Math.sin(farAng) * farR * 0.4 : -Math.sin(localAng) * d.homeRadius * 0.65,
+      roam > 0.5 ? -Math.cos(farAng) * farR * 0.55 : -Math.cos(localAng) * d.homeRadius,
+    );
+    d.mesh.rotation.y = facing + Math.PI / 2;
+    d.mesh.rotation.z = Math.sin(elapsed * 1.6 + d.phase) * 0.04;
+    // Always show a few near shore; all four once you have a streak
+    d.mesh.visible = streak >= 1 || i < 3;
   }
 }
 
@@ -1108,60 +1433,191 @@ function yawBillboardPines(mesh: THREE.InstancedMesh, bases: Float32Array, camX:
   mesh.instanceMatrix.needsUpdate = true;
 }
 
+function rockMaterial(tint: string, wet = false): THREE.MeshStandardMaterial {
+  return new THREE.MeshStandardMaterial({
+    color: new THREE.Color(tint),
+    roughness: wet ? 0.55 : 0.94,
+    metalness: wet ? 0.12 : 0.04,
+  });
+}
+
+/** Irregular boulder from a few squashed polyhedra. */
+function makeBoulder(seed: number, size: number, wet: boolean): THREE.Group {
+  const g = new THREE.Group();
+  const tints = wet
+    ? ["#4a524c", "#3d4742", "#556058", "#3a423c"]
+    : ["#6e756c", "#7a8074", "#5e665c", "#8a8678", "#6a7064"];
+  const mats = tints.map((c) => rockMaterial(c, wet));
+  const parts = 2 + Math.floor(hash2(seed, 3) * 2.5);
+  for (let p = 0; p < parts; p += 1) {
+    const mat = mats[Math.floor(hash2(seed, 10 + p) * mats.length)!]!;
+    const geo =
+      hash2(seed, 20 + p) > 0.45
+        ? new THREE.DodecahedronGeometry(size * (0.55 + hash2(seed, 30 + p) * 0.5), 0)
+        : new THREE.IcosahedronGeometry(size * (0.5 + hash2(seed, 31 + p) * 0.45), 0);
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(
+      (hash2(seed, 40 + p) - 0.5) * size * 0.7,
+      (hash2(seed, 50 + p) - 0.35) * size * 0.25,
+      (hash2(seed, 60 + p) - 0.5) * size * 0.7,
+    );
+    mesh.rotation.set(hash2(seed, 70 + p) * 6, hash2(seed, 71 + p) * 6, hash2(seed, 72 + p) * 6);
+    mesh.scale.set(
+      0.85 + hash2(seed, 80 + p) * 0.5,
+      0.45 + hash2(seed, 81 + p) * 0.4,
+      0.9 + hash2(seed, 82 + p) * 0.45,
+    );
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    g.add(mesh);
+  }
+  // Moss patch on dry rocks
+  if (!wet && hash2(seed, 90) > 0.55) {
+    const moss = new THREE.Mesh(
+      new THREE.SphereGeometry(size * 0.28, 6, 5),
+      new THREE.MeshStandardMaterial({ color: new THREE.Color("#4a6a3e"), roughness: 1 }),
+    );
+    moss.scale.set(1.2, 0.35, 1);
+    moss.position.set(0, size * 0.22, 0);
+    g.add(moss);
+  }
+  return g;
+}
+
 function buildShoreRocks(): THREE.Group {
   const g = new THREE.Group();
-  const rockMat = new THREE.MeshStandardMaterial({
-    color: new THREE.Color("#6a7168"),
-    roughness: 0.92,
-    metalness: 0.05,
+
+  // Soft wet bank ring just outside the waterline
+  const bankMat = new THREE.MeshStandardMaterial({
+    color: new THREE.Color("#6b6354"),
+    roughness: 0.98,
+    metalness: 0,
   });
-  for (let i = 0; i < 14; i += 1) {
-    const ang = (i / 14) * Math.PI * 2 + hash2(i, 20) * 0.2;
-    const r = 0.92 + hash2(i, 21) * 0.18;
+  const wetMat = new THREE.MeshStandardMaterial({
+    color: new THREE.Color("#4a5248"),
+    roughness: 0.7,
+    metalness: 0.08,
+  });
+  for (let i = 0; i < 36; i += 1) {
+    const ang = (i / 36) * Math.PI * 2;
+    const r = 0.98 + hash2(i, 5) * 0.08;
     const x = LAKE.x + Math.cos(ang) * LAKE.rx * r;
     const z = LAKE.z + Math.sin(ang) * LAKE.rz * r;
-    const y = Math.max(heightAt(x, z), WATER_Y + 0.05);
-    const rock = new THREE.Mesh(
-      new THREE.DodecahedronGeometry(0.35 + hash2(i, 22) * 0.55, 0),
-      rockMat,
-    );
-    rock.position.set(x, y + 0.1, z);
-    rock.rotation.set(hash2(i, 23), hash2(i, 24), hash2(i, 25));
-    rock.scale.set(1, 0.55 + hash2(i, 26) * 0.5, 1.1);
-    rock.castShadow = false;
-    rock.receiveShadow = true;
-    g.add(rock);
+    const y = Math.max(heightAt(x, z), WATER_Y + 0.02);
+    const patch = new THREE.Mesh(new THREE.CircleGeometry(0.85 + hash2(i, 6) * 0.7, 8), i % 3 === 0 ? wetMat : bankMat);
+    patch.rotation.x = -Math.PI / 2;
+    patch.position.set(x, y + 0.01, z);
+    patch.receiveShadow = true;
+    g.add(patch);
   }
+
+  // Pebbles / cobbles clustered along the near (camera) shore
+  for (let i = 0; i < 28; i += 1) {
+    const alongShore = i / 27;
+    // Favor west bank (toward meadow) + a thinner scatter elsewhere
+    const preferNear = i < 18;
+    const ang = preferNear
+      ? Math.PI * 0.85 + alongShore * Math.PI * 0.55 + (hash2(i, 11) - 0.5) * 0.25
+      : (i / 28) * Math.PI * 2 + hash2(i, 12) * 0.4;
+    const r = 0.88 + hash2(i, 13) * 0.22;
+    const x = LAKE.x + Math.cos(ang) * LAKE.rx * r;
+    const z = LAKE.z + Math.sin(ang) * LAKE.rz * r;
+    const y = Math.max(heightAt(x, z), WATER_Y + 0.04);
+    const wet = y < WATER_Y + 0.35;
+    const size = preferNear ? 0.35 + hash2(i, 14) * 0.7 : 0.28 + hash2(i, 14) * 0.45;
+    const boulder = makeBoulder(i * 17, size, wet);
+    boulder.position.set(x, y, z);
+    boulder.rotation.y = hash2(i, 15) * Math.PI * 2;
+    g.add(boulder);
+  }
+
+  // A few half-submerged stones just inside the waterline
+  for (let i = 0; i < 8; i += 1) {
+    const ang = Math.PI * 0.9 + (i / 7) * Math.PI * 0.5 + hash2(i, 40) * 0.15;
+    const r = 0.72 + hash2(i, 41) * 0.12;
+    const x = LAKE.x + Math.cos(ang) * LAKE.rx * r;
+    const z = LAKE.z + Math.sin(ang) * LAKE.rz * r;
+    const stone = makeBoulder(200 + i * 9, 0.4 + hash2(i, 42) * 0.35, true);
+    stone.position.set(x, WATER_Y - 0.05, z);
+    stone.rotation.y = hash2(i, 43) * 4;
+    g.add(stone);
+  }
+
   return g;
 }
 
 function buildDock(): THREE.Group {
   const g = new THREE.Group();
-  const wood = new THREE.MeshStandardMaterial({
-    color: new THREE.Color("#8a6238"),
-    roughness: 0.88,
-    metalness: 0,
-  });
-  const dark = new THREE.MeshStandardMaterial({
-    color: new THREE.Color("#5a3d22"),
-    roughness: 0.9,
-  });
-  const deck = new THREE.Mesh(new THREE.BoxGeometry(7.2, 0.18, 1.6), wood);
-  deck.position.set(LAKE.x - LAKE.rx * 0.78, WATER_Y + 0.35, LAKE.z - 1);
-  deck.rotation.y = 0.35;
-  deck.castShadow = true;
-  deck.receiveShadow = true;
-  g.add(deck);
-  for (let i = 0; i < 4; i += 1) {
-    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.1, 1.4, 6), dark);
-    post.position.set(
-      deck.position.x + Math.cos(0.35) * (i * 1.7 - 2.4),
-      WATER_Y + 0.1,
-      deck.position.z + Math.sin(0.35) * (i * 1.7 - 2.4) + (i % 2 === 0 ? 0.55 : -0.55),
+  const plankMats = [
+    new THREE.MeshStandardMaterial({ color: new THREE.Color("#8b6a3f"), roughness: 0.9 }),
+    new THREE.MeshStandardMaterial({ color: new THREE.Color("#7a5a34"), roughness: 0.92 }),
+    new THREE.MeshStandardMaterial({ color: new THREE.Color("#9a7348"), roughness: 0.88 }),
+  ];
+  const postMat = new THREE.MeshStandardMaterial({ color: new THREE.Color("#4a3220"), roughness: 0.95 });
+  const ropeMat = new THREE.MeshStandardMaterial({ color: new THREE.Color("#c4b08a"), roughness: 0.85 });
+
+  const yaw = 0.32;
+  const dockX = LAKE.x - LAKE.rx * 0.82;
+  const dockZ = LAKE.z - 0.6;
+  const cos = Math.cos(yaw);
+  const sin = Math.sin(yaw);
+
+  // Shore ramp → short pier into the water
+  const plankCount = 11;
+  const plankLen = 1.55;
+  const plankW = 0.62;
+  const plankGap = 0.06;
+  for (let i = 0; i < plankCount; i += 1) {
+    const along = i * (plankW + plankGap) - 3.2;
+    const y = WATER_Y + 0.42 + (i < 3 ? (3 - i) * 0.06 : 0); // slight rise toward shore
+    const plank = new THREE.Mesh(
+      new THREE.BoxGeometry(plankLen, 0.1, plankW - 0.02),
+      plankMats[i % plankMats.length]!,
     );
-    post.castShadow = true;
-    g.add(post);
+    plank.position.set(dockX + cos * along, y, dockZ + sin * along);
+    plank.rotation.y = yaw;
+    // Slight warp / wear
+    plank.rotation.z = (hash2(i, 50) - 0.5) * 0.03;
+    plank.castShadow = true;
+    plank.receiveShadow = true;
+    g.add(plank);
   }
+
+  // Support posts + caps
+  for (let i = 0; i < 5; i += 1) {
+    const along = i * 1.55 - 2.9;
+    for (const side of [-0.62, 0.62]) {
+      const px = dockX + cos * along - sin * side;
+      const pz = dockZ + sin * along + cos * side;
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.09, 1.55, 7), postMat);
+      post.position.set(px, WATER_Y + 0.15, pz);
+      post.castShadow = true;
+      g.add(post);
+      const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.08, 7), postMat);
+      cap.position.set(px, WATER_Y + 0.95, pz);
+      g.add(cap);
+    }
+  }
+
+  // Simple rope rail along one side
+  for (let i = 0; i < 4; i += 1) {
+    const a0 = i * 1.55 - 2.9;
+    const a1 = a0 + 1.55;
+    const side = 0.62;
+    const x0 = dockX + cos * a0 - sin * side;
+    const z0 = dockZ + sin * a0 + cos * side;
+    const x1 = dockX + cos * a1 - sin * side;
+    const z1 = dockZ + sin * a1 + cos * side;
+    const dx = x1 - x0;
+    const dz = z1 - z0;
+    const len = Math.hypot(dx, dz);
+    const rope = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, len, 5), ropeMat);
+    rope.position.set((x0 + x1) / 2, WATER_Y + 0.82, (z0 + z1) / 2);
+    rope.rotation.z = Math.PI / 2;
+    rope.rotation.y = -Math.atan2(dz, dx);
+    g.add(rope);
+  }
+
   return g;
 }
 
@@ -1988,6 +2444,35 @@ function syncGrove(world: WorldRef, streak: number) {
 
 /* ---------------- component ---------------- */
 
+type TimeOfDayPreset = "auto" | "night" | "dawn" | "day" | "golden" | "dusk";
+
+const TIME_PRESET_HOURS: Record<Exclude<TimeOfDayPreset, "auto">, number> = {
+  night: 23,
+  dawn: 6.25,
+  day: 12,
+  golden: 19,
+  dusk: 19.75,
+};
+
+const TIME_PRESET_LABELS: Record<TimeOfDayPreset, string> = {
+  auto: "Auto",
+  night: "Night",
+  dawn: "Dawn",
+  day: "Day",
+  golden: "Golden",
+  dusk: "Dusk",
+};
+
+const WEATHER_PRESET_LABELS: Record<WeatherKind | "auto", string> = {
+  auto: "Auto",
+  sunny: "Sunny",
+  cloudy: "Cloudy",
+  rain: "Rain",
+  snow: "Snow",
+};
+
+const STREAK_PRESETS = [0, 1, 3, 7, 14, 30, 60, 100] as const;
+
 export function StreakGrove3D({
   active = true,
   weatherCity = "",
@@ -1998,6 +2483,8 @@ export function StreakGrove3D({
   level,
   title,
   goalMet,
+  testMode = false,
+  showHeader = true,
 }: {
   active?: boolean;
   /** Optional city override from Setup — empty means IP auto. */
@@ -2009,25 +2496,46 @@ export function StreakGrove3D({
   level: number;
   title: string;
   goalMet: boolean;
+  /** Temporary: preview toggles only when TEST MODE is on. */
+  testMode?: boolean;
+  /** When false, parent renders the title/streak chrome so the forest can lazy-load alone. */
+  showHeader?: boolean;
 }) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const worldRef = useRef<WorldRef | null>(null);
   const groveControlsRef = useRef<{ resize: () => void; syncLoop: () => void } | null>(null);
-  const streakRef = useRef(streak);
-  streakRef.current = streak;
+  const [webglFailed, setWebglFailed] = useState(false);
+
+  // —— Temporary preview toggles (only while TEST MODE is on) ——
+  const [weatherOverride, setWeatherOverride] = useState<WeatherKind | "auto">("auto");
+  const [timePreset, setTimePreset] = useState<TimeOfDayPreset>("auto");
+  const [streakOverride, setStreakOverride] = useState<number | null>(null);
+  const displayStreak = testMode && streakOverride != null ? streakOverride : streak;
+
+  const streakRef = useRef(displayStreak);
+  streakRef.current = displayStreak;
   const activeRef = useRef(active);
   activeRef.current = active;
-  const [webglFailed, setWebglFailed] = useState(false);
-  const streakAtRisk = streak > 0 && sentToday === 0;
-  const overflow = Math.max(0, streak - MAX_TREES_3D);
+  const streakAtRisk = displayStreak > 0 && sentToday === 0 && !(testMode && streakOverride != null);
+  const overflow = Math.max(0, displayStreak - MAX_TREES_3D);
 
   // Live weather via /api/weather — IP by default; optional city override from Setup
   const [autoWeather, setAutoWeather] = useState<WeatherKind>("sunny");
   const [weatherPlace, setWeatherPlace] = useState<string | null>(null);
   const [weatherTempC, setWeatherTempC] = useState<number | null>(null);
   const tempUnit = tempUnitProp ?? readTempUnit();
-  const weatherRef = useRef<WeatherKind>(autoWeather);
-  weatherRef.current = autoWeather;
+  const activeWeather: WeatherKind =
+    testMode && weatherOverride !== "auto" ? weatherOverride : autoWeather;
+  const weatherRef = useRef<WeatherKind>(activeWeather);
+  weatherRef.current = activeWeather;
+
+  // Drop preview overrides when TEST MODE turns off
+  useEffect(() => {
+    if (testMode) return;
+    setWeatherOverride("auto");
+    setTimePreset("auto");
+    setStreakOverride(null);
+  }, [testMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2052,9 +2560,17 @@ export function StreakGrove3D({
     // Re-fetch when Setup city changes, and again when Grow becomes visible
   }, [weatherCity, active]);
 
+  // Sync hour override used by dayNightFactors / applyWeather
   useEffect(() => {
-    worldRef.current?.applyWeather(autoWeather);
-  }, [autoWeather]);
+    const w = window as { __groveHourOverride?: number };
+    if (!testMode || timePreset === "auto") delete w.__groveHourOverride;
+    else w.__groveHourOverride = TIME_PRESET_HOURS[timePreset];
+    worldRef.current?.applyWeather(weatherRef.current);
+  }, [timePreset, testMode]);
+
+  useEffect(() => {
+    worldRef.current?.applyWeather(activeWeather);
+  }, [activeWeather]);
 
   const weatherTemp = weatherTempC != null ? formatWeatherTemp(weatherTempC, tempUnit) : null;
 
@@ -2169,10 +2685,13 @@ export function StreakGrove3D({
 
     const lakeDucks = buildLakeDucks();
     scene.add(lakeDucks.group);
-    updateLakeDucks(lakeDucks.ducks, 0);
+    updateLakeDucks(lakeDucks.ducks, 0, streakRef.current);
 
     const sunSprite = makeSunSprite();
     scene.add(sunSprite);
+
+    const stars = buildStars();
+    scene.add(stars.obj);
 
     const cloudLayouts = [
       { x: -110, y: 48, z: -168, sx: 110, sy: 34, o: 0.42 },
@@ -2303,9 +2822,11 @@ export function StreakGrove3D({
       });
     });
     let cloudYOffCur = 0;
+    let starBaseOpacity = 0;
+    let fireflyNightMul = 1;
 
     const applyWeather = (kind: WeatherKind) => {
-      const p = WEATHER_PRESETS[kind];
+      const { preset: p, nightT } = resolveWeatherPreset(kind);
       (skyMat.uniforms.uZenith!.value as THREE.Color).set(p.zenith);
       (skyMat.uniforms.uHorizon!.value as THREE.Color).set(p.horizon);
       (skyMat.uniforms.uGround!.value as THREE.Color).set(p.ground);
@@ -2318,13 +2839,37 @@ export function StreakGrove3D({
       sun.color.set(p.sunColor);
       sun.intensity = p.sunI;
       hemi.intensity = p.hemiI;
+      hemi.color.set(p.hemiSky);
+      hemi.groundColor.set(p.hemiGround);
       fill.intensity = p.fillI;
       rim.intensity = p.rimI;
       scene.environmentIntensity = p.envI;
+
+      // Sun slides to the moon position at night — the sky disc, glow sprite
+      // and key light all follow so shadows stay coherent.
+      const lightDir = SUN_DIR.clone().lerp(MOON_DIR, nightT).normalize();
+      (skyMat.uniforms.uSunDir!.value as THREE.Vector3).copy(lightDir);
+      (waterMat.uniforms.uSunDir!.value as THREE.Vector3).copy(lightDir);
+      // Keep the shadow-casting light higher than the visual moon, otherwise the
+      // grazing angle drops nearly all terrain into shadow and the night goes black.
+      const litDir = lightDir.clone();
+      litDir.y = Math.max(litDir.y, 0.2 + nightT * 0.25);
+      litDir.normalize();
+      sun.position.copy(litDir).multiplyScalar(140);
+      sunSprite.position.copy(lightDir).multiplyScalar(270);
+
       const sMat = sunSprite.material as THREE.SpriteMaterial;
       sMat.opacity = p.sunSpriteOpacity;
+      // Cool the glow sprite toward moonlight at night (texture itself is warm)
+      sMat.color.setRGB(1, 1, 1).lerp(new THREE.Color("#9fc0ee"), nightT);
       sunSprite.visible = p.sunSpriteOpacity > 0.01;
       sunSprite.scale.setScalar(p.sunSpriteScale);
+
+      starBaseOpacity = p.starO;
+      stars.mat.opacity = p.starO;
+      stars.obj.visible = p.starO > 0.02;
+      fireflyNightMul = 1 + nightT * 0.9;
+
       // Keep the lake matched to sky / mood
       (waterMat.uniforms.uSkyZenith!.value as THREE.Color).set(p.zenith);
       (waterMat.uniforms.uSkyHorizon!.value as THREE.Color).set(p.horizon);
@@ -2332,23 +2877,30 @@ export function StreakGrove3D({
       if (kind === "rain") {
         (waterMat.uniforms.uDeep!.value as THREE.Color).set("#152836");
         (waterMat.uniforms.uShallow!.value as THREE.Color).set("#3a6470");
-        waterMat.uniforms.uWaveMul!.value = 1.35;
-        waterMat.uniforms.uGlitter!.value = 0.35;
+        waterMat.uniforms.uWaveMul!.value = 0.7;
+        waterMat.uniforms.uGlitter!.value = 0.25;
       } else if (kind === "snow") {
         (waterMat.uniforms.uDeep!.value as THREE.Color).set("#243848");
         (waterMat.uniforms.uShallow!.value as THREE.Color).set("#6a8694");
-        waterMat.uniforms.uWaveMul!.value = 0.45;
-        waterMat.uniforms.uGlitter!.value = 0.55;
+        waterMat.uniforms.uWaveMul!.value = 0.2;
+        waterMat.uniforms.uGlitter!.value = 0.4;
       } else if (kind === "cloudy") {
         (waterMat.uniforms.uDeep!.value as THREE.Color).set("#1c3848");
         (waterMat.uniforms.uShallow!.value as THREE.Color).set("#4a7a88");
-        waterMat.uniforms.uWaveMul!.value = 0.85;
-        waterMat.uniforms.uGlitter!.value = 0.5;
+        waterMat.uniforms.uWaveMul!.value = 0.35;
+        waterMat.uniforms.uGlitter!.value = 0.4;
       } else {
         (waterMat.uniforms.uDeep!.value as THREE.Color).set("#1a3d4e");
         (waterMat.uniforms.uShallow!.value as THREE.Color).set("#4f8f9c");
-        waterMat.uniforms.uWaveMul!.value = 1;
-        waterMat.uniforms.uGlitter!.value = 1;
+        waterMat.uniforms.uWaveMul!.value = 0.45;
+        waterMat.uniforms.uGlitter!.value = 0.75;
+      }
+      // Night water: darken toward ink, keep a thin moon glitter
+      if (nightT > 0) {
+        (waterMat.uniforms.uDeep!.value as THREE.Color).lerp(new THREE.Color("#0a1420"), nightT * 0.85);
+        (waterMat.uniforms.uShallow!.value as THREE.Color).lerp(new THREE.Color("#1e3448"), nightT * 0.85);
+        waterMat.uniforms.uGlitter!.value =
+          (waterMat.uniforms.uGlitter!.value as number) * (1 - nightT * 0.45);
       }
       for (let i = 0; i < cloudSprites.length; i += 1) {
         const L = cloudLayouts[i]!;
@@ -2450,7 +3002,7 @@ export function StreakGrove3D({
         if (pineBillboards && frame % 3 === 0) {
           yawBillboardPines(pineBillboards.mesh, pineBillboards.bases, camera.position.x, camera.position.z);
         }
-        updateLakeDucks(lakeDucks.ducks, elapsed);
+        updateLakeDucks(lakeDucks.ducks, elapsed, streakRef.current);
       }
 
       const world = worldRef.current;
@@ -2496,8 +3048,16 @@ export function StreakGrove3D({
         arr.needsUpdate = true;
       }
 
+      // Gentle star twinkle at night
+      if (stars.obj.visible && !reducedMotion && frame % 2 === 0) {
+        stars.mat.opacity = starBaseOpacity * (0.82 + 0.18 * Math.sin(elapsed * 0.9));
+      }
+
       const liveStreak = streakRef.current;
-      fireflyMat.opacity = liveStreak > 0 && !reducedMotion ? 0.35 + Math.sin(elapsed * 1.6) * 0.2 : 0;
+      fireflyMat.opacity =
+        liveStreak > 0 && !reducedMotion
+          ? (0.35 + Math.sin(elapsed * 1.6) * 0.2) * fireflyNightMul
+          : 0;
       if (liveStreak > 0 && !reducedMotion && frame % 3 === 0) {
         const arr = fireflyGeo.attributes.position as THREE.BufferAttribute;
         for (let i = 0; i < fireflyCount; i += 1) {
@@ -2530,8 +3090,16 @@ export function StreakGrove3D({
         console.error("[StreakGrove3D] force render failed", err);
       }
     };
+    (window as unknown as { __groveApplyWeather?: (k?: WeatherKind) => void }).__groveApplyWeather = (k) => {
+      applyWeather(k ?? weatherRef.current);
+    };
     const onVisibility = () => syncLoop();
     document.addEventListener("visibilitychange", onVisibility);
+
+    // Re-resolve day/night each minute so dawn / dusk drift in while the tab is open
+    const dayNightTimer = window.setInterval(() => {
+      if (activeRef.current && !document.hidden) applyWeather(weatherRef.current);
+    }, 60_000);
 
     groveControlsRef.current = {
       resize,
@@ -2542,6 +3110,7 @@ export function StreakGrove3D({
       cancelled = true;
       groveControlsRef.current = null;
       worldRef.current = null;
+      window.clearInterval(dayNightTimer);
       document.removeEventListener("visibilitychange", onVisibility);
       ro.disconnect();
       renderer.setAnimationLoop(null);
@@ -2586,28 +3155,151 @@ export function StreakGrove3D({
   useEffect(() => {
     const world = worldRef.current;
     if (!world) return;
-    world.plant(streak);
-  }, [streak]);
+    world.plant(displayStreak);
+  }, [displayStreak]);
 
   if (webglFailed) {
     return (
       <StreakGrove
-        streak={streak}
+        streak={displayStreak}
         bestStreak={bestStreak}
         sentToday={sentToday}
         level={level}
         title={title}
         goalMet={goalMet}
+        hideHeader={!showHeader}
       />
     );
   }
 
   const weatherLabel = [weatherTemp, weatherPlace].filter(Boolean).join(" · ");
+  const previewing =
+    testMode &&
+    (weatherOverride !== "auto" || timePreset !== "auto" || streakOverride != null);
+
+  const forest = (
+    <>
+      {testMode && (
+        <div className="grove-debug-panel" aria-label="Temporary grove preview controls">
+          <div className="grove-debug-row">
+            <span className="grove-debug-label">Weather</span>
+            <div className="grove-debug-toggles">
+              {(["auto", "sunny", "cloudy", "rain", "snow"] as const).map((w) => (
+                <button
+                  key={w}
+                  type="button"
+                  className={weatherOverride === w ? "active" : undefined}
+                  onClick={() => setWeatherOverride(w)}
+                >
+                  {WEATHER_PRESET_LABELS[w]}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="grove-debug-row">
+            <span className="grove-debug-label">Time</span>
+            <div className="grove-debug-toggles">
+              {(["auto", "night", "dawn", "day", "golden", "dusk"] as const).map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  className={timePreset === t ? "active" : undefined}
+                  onClick={() => setTimePreset(t)}
+                >
+                  {TIME_PRESET_LABELS[t]}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="grove-debug-row">
+            <span className="grove-debug-label">Streak</span>
+            <div className="grove-debug-toggles">
+              <button
+                type="button"
+                className={streakOverride == null ? "active" : undefined}
+                onClick={() => setStreakOverride(null)}
+              >
+                Live ({streak})
+              </button>
+              {STREAK_PRESETS.map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  className={streakOverride === n ? "active" : undefined}
+                  onClick={() => setStreakOverride(n)}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
+            <label className="grove-debug-slider">
+              <input
+                type="range"
+                min={0}
+                max={120}
+                value={displayStreak}
+                onChange={(e) => setStreakOverride(Number(e.target.value))}
+              />
+              <strong>{displayStreak}</strong>
+            </label>
+          </div>
+          {previewing && (
+            <button
+              type="button"
+              className="grove-debug-reset"
+              onClick={() => {
+                setWeatherOverride("auto");
+                setTimePreset("auto");
+                setStreakOverride(null);
+              }}
+            >
+              Reset all to live
+            </button>
+          )}
+        </div>
+      )}
+
+      <div
+        ref={mountRef}
+        className="village-canvas grove-canvas-3d"
+        style={{ aspectRatio: "900 / 460", position: "relative", overflow: "hidden", background: "#8eb4d4" }}
+      >
+        {weatherLabel && (
+          <div className="grove-weather-badge" aria-live="polite">
+            <WeatherKindIcon kind={activeWeather} className="grove-weather-icon" title={activeWeather} />
+            <div className="grove-weather-copy">
+              <strong>{weatherTemp ?? "—"}</strong>
+              {weatherPlace && <span>{weatherPlace}</span>}
+              {testMode && (weatherOverride !== "auto" || timePreset !== "auto") && (
+                <span className="grove-weather-preview-tag">
+                  {weatherOverride !== "auto" ? weatherOverride : activeWeather}
+                  {timePreset !== "auto" ? ` · ${TIME_PRESET_LABELS[timePreset]}` : ""}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+        {displayStreak === 0 && (
+          <div className="grove-empty-sign">
+            <strong>Bare soil, big plans</strong>
+            <span>Send one email today to plant your first tree</span>
+          </div>
+        )}
+        {overflow > 0 && (
+          <div className="grove-overflow-note">+{overflow} trees deeper in the forest</div>
+        )}
+      </div>
+    </>
+  );
+
+  if (!showHeader) {
+    return forest;
+  }
 
   return (
     <div
       className={`outreach-village streak-grove${goalMet ? " celebrating" : ""}`}
-      aria-label={`Streak grove with ${streak} trees`}
+      aria-label={`Streak grove with ${displayStreak} trees`}
     >
       <div className="village-sky-label">
         <div>
@@ -2618,7 +3310,7 @@ export function StreakGrove3D({
           </p>
           {streakAtRisk && (
             <p className="grove-warning">
-              No sends yet today — send one email to keep {streak === 1 ? "your tree" : `all ${streak} trees`} alive.
+              No sends yet today — send one email to keep {displayStreak === 1 ? "your tree" : `all ${displayStreak} trees`} alive.
             </p>
           )}
         </div>
@@ -2632,37 +3324,18 @@ export function StreakGrove3D({
             <strong>{title}</strong>
             <span>Level {level}</span>
             <span>
-              {streak}-day streak
-              {bestStreak > streak ? ` · best ${bestStreak}` : bestStreak > 1 ? " · personal best" : ""}
+              {displayStreak}-day streak
+              {testMode && streakOverride != null ? " · preview" : ""}
+              {!(testMode && streakOverride != null) && bestStreak > streak
+                ? ` · best ${bestStreak}`
+                : !(testMode && streakOverride != null) && bestStreak > 1
+                  ? " · personal best"
+                  : ""}
             </span>
           </div>
         </div>
       </div>
-
-      <div
-        ref={mountRef}
-        className="village-canvas grove-canvas-3d"
-        style={{ aspectRatio: "900 / 460", position: "relative", overflow: "hidden", background: "#8eb4d4" }}
-      >
-        {weatherLabel && (
-          <div className="grove-weather-badge" aria-live="polite">
-            <WeatherKindIcon kind={autoWeather} className="grove-weather-icon" title={autoWeather} />
-            <div className="grove-weather-copy">
-              <strong>{weatherTemp ?? "—"}</strong>
-              {weatherPlace && <span>{weatherPlace}</span>}
-            </div>
-          </div>
-        )}
-        {streak === 0 && (
-          <div className="grove-empty-sign">
-            <strong>Bare soil, big plans</strong>
-            <span>Send one email today to plant your first tree</span>
-          </div>
-        )}
-        {overflow > 0 && (
-          <div className="grove-overflow-note">+{overflow} trees deeper in the forest</div>
-        )}
-      </div>
+      {forest}
     </div>
   );
 }
