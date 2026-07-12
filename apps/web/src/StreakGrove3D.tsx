@@ -1878,6 +1878,39 @@ function animateTreeParts(root: THREE.Object3D, elapsed: number, delta: number) 
       if (mat?.opacity != null) {
         mat.opacity = 0.45 + Math.sin(elapsed * 2 + phase) * 0.3;
       }
+    } else if (kind === "glowpulse") {
+      const mat = mesh.material as THREE.SpriteMaterial;
+      const base = (mesh.userData.baseOpacity as number) ?? 0.5;
+      if (mat?.opacity != null) {
+        mat.opacity = base * (0.72 + Math.sin(elapsed * 2.6 + phase) * 0.28);
+      }
+    } else if (kind === "rising") {
+      // Ember / spore / spark columns (THREE.Points)
+      const pts = obj as unknown as THREE.Points;
+      const attr = pts.geometry.attributes.position as THREE.BufferAttribute;
+      const speeds = mesh.userData.speeds as Float32Array;
+      const seeds = mesh.userData.seeds as Float32Array;
+      const botY = (mesh.userData.botY as number) ?? 1;
+      const topY = (mesh.userData.topY as number) ?? 4;
+      for (let i = 0; i < attr.count; i += 1) {
+        let y = attr.getY(i) + delta * speeds[i]!;
+        if (y > topY) y = botY;
+        attr.setXYZ(
+          i,
+          attr.getX(i) + Math.sin(elapsed * 2.4 + seeds[i]! * 7) * delta * 0.22,
+          y,
+          attr.getZ(i),
+        );
+      }
+      attr.needsUpdate = true;
+      const mat = pts.material as THREE.PointsMaterial;
+      if (mat?.opacity != null) {
+        mat.opacity = 0.65 + Math.sin(elapsed * 5 + phase) * 0.2;
+      }
+    } else if (kind === "firelight") {
+      const light = obj as unknown as THREE.PointLight;
+      const base = (mesh.userData.baseIntensity as number) ?? 1;
+      light.intensity = base * (0.82 + Math.sin(elapsed * 13 + phase) * 0.12 + Math.sin(elapsed * 31 + phase * 2.7) * 0.06);
     }
   });
 }
@@ -1904,7 +1937,8 @@ function makeThumbScene(speciesId: Species): {
 
 /** One-shot WebGL snapshot of the exact grove mesh for field-guide cards. */
 export function renderSpeciesThumbnail(speciesId: string): string {
-  const cacheKey = `${speciesId}@myst1`;
+  // Bump the version suffix whenever a species' look changes so cards re-render.
+  const cacheKey = `${speciesId}@fx2`;
   const cached = thumbCache.get(cacheKey);
   if (cached) return cached;
   if (!SPECIES_POOL.includes(speciesId as Species)) {
@@ -2163,6 +2197,92 @@ function addConeTiers(
     cone.receiveShadow = true;
     g.add(cone);
   }
+}
+
+/* ---- shared FX helpers for the species graphics pass ---- */
+
+/** Cached soft radial glow textures, keyed by #rrggbb (shared across sprites). */
+const glowTexCache = new Map<string, THREE.CanvasTexture>();
+
+function glowTexture(hex: string): THREE.CanvasTexture {
+  let tex = glowTexCache.get(hex);
+  if (tex) return tex;
+  const c = document.createElement("canvas");
+  c.width = 64;
+  c.height = 64;
+  const ctx = c.getContext("2d")!;
+  const grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grad.addColorStop(0, `${hex}ff`);
+  grad.addColorStop(0.35, `${hex}88`);
+  grad.addColorStop(1, `${hex}00`);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 64, 64);
+  tex = new THREE.CanvasTexture(c);
+  glowTexCache.set(hex, tex);
+  return tex;
+}
+
+/** Additive halo sprite — the cheap "this thing emits light" trick. */
+function makeGlow(hex: string, size: number, opacity: number, pulse = true): THREE.Sprite {
+  const mat = new THREE.SpriteMaterial({
+    map: glowTexture(hex),
+    transparent: true,
+    opacity,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  const sprite = new THREE.Sprite(mat);
+  sprite.scale.setScalar(size);
+  if (pulse) {
+    sprite.userData.animate = "glowpulse";
+    sprite.userData.phase = Math.random() * Math.PI * 2;
+    sprite.userData.baseOpacity = opacity;
+  }
+  return sprite;
+}
+
+/** Rising particle column (embers / spores / sparks) animated in animateTreeParts. */
+function makeRisingParticles(
+  hex: string,
+  count: number,
+  radius: number,
+  botY: number,
+  topY: number,
+  size: number,
+  seed: number,
+): THREE.Points {
+  const rand = mulberry32(seed);
+  const pos = new Float32Array(count * 3);
+  const speeds = new Float32Array(count);
+  const seeds = new Float32Array(count);
+  for (let i = 0; i < count; i += 1) {
+    const a = rand() * Math.PI * 2;
+    const r = Math.sqrt(rand()) * radius;
+    pos[i * 3] = Math.cos(a) * r;
+    pos[i * 3 + 1] = botY + rand() * (topY - botY);
+    pos[i * 3 + 2] = Math.sin(a) * r;
+    speeds[i] = 0.35 + rand() * 0.55;
+    seeds[i] = rand() * Math.PI * 2;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  const mat = new THREE.PointsMaterial({
+    color: new THREE.Color(hex),
+    size,
+    transparent: true,
+    opacity: 0.85,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    sizeAttenuation: true,
+  });
+  const pts = new THREE.Points(geo, mat);
+  pts.userData.animate = "rising";
+  pts.userData.phase = rand() * Math.PI * 2;
+  pts.userData.speeds = speeds;
+  pts.userData.seeds = seeds;
+  pts.userData.botY = botY;
+  pts.userData.topY = topY;
+  return pts;
 }
 
 function buildTreeMesh(species: Species, seed: number): THREE.Group {
@@ -2798,6 +2918,13 @@ function ageStage(age: number): 0 | 1 | 2 {
 function disposeTreeObject(root: THREE.Object3D) {
   root.traverse((obj) => {
     const mesh = obj as THREE.Mesh;
+    // Sprites share one global geometry across ALL sprite instances (three.js
+    // internal) — disposing it would corrupt the sun/cloud sprites too.
+    if ((obj as THREE.Sprite).isSprite) {
+      const sm = (obj as THREE.Sprite).material;
+      if (sm) sm.dispose(); // glow textures are cached/shared and survive material dispose
+      return;
+    }
     if (mesh.geometry) mesh.geometry.dispose();
     const m = mesh.material as THREE.Material | undefined;
     if (m && m !== blobMat && m !== trunkMat && m !== birchTrunkMat && m !== cedarTrunkMat) m.dispose();
