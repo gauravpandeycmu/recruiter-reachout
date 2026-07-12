@@ -46,10 +46,56 @@ WebGL fallback.
 - No true screen-space reflections / volumetric god rays yet.
 - Grass is crossed-quad billboards, not grounded cards with wind shader.
 
-## Next session
+## Next session — START HERE (written 2026-07-12, ~10pm, at 5h limit)
 
+### State when we stopped
+- Everything of OURS is committed. Latest grove commit: `b91bf92` (weather/time audit:
+  env-map re-bake, readable night presets, night-only fireflies). Working tree also has
+  ANOTHER AGENT's uncommitted WIP (main.tsx `rescheduleQueueItemId` scheduler UI,
+  apps/api scheduler files) — it has its own typecheck errors; NOT ours, don't fix,
+  don't commit their files. Commit grove files individually (`git add <file>`).
+- `GroveTreeFieldGuide.tsx` + `groveTreeGuide.ts` are NEW and untracked — they are the
+  in-app tree catalog ("field guide", rendered from main.tsx ~line 4918). Ids in
+  `groveTreeGuide.ts` must stay in sync with the `Species` union in StreakGrove3D.tsx.
+
+### The task the user asked for next
+User brief (verbatim intent): they LIKE the current tree species — make them
+"graphically more better", explicitly calling out the fire tree ("fire is something
+cool"). And: **whenever tree visuals change, update the tree catalog** (field guide)
+to match — its colors/copy/previews must reflect the new looks.
+
+Concretely:
+1. Read the 32-species `Species` union (StreakGrove3D.tsx ~line 1629) and
+   `buildTreeMesh` species branches (~line 2100-2500). Fantasy species already exist:
+   flametree 🔥, crystal, candyfloss, stormtree, heartwood, auroratree, spiraltree,
+   ghosttree, bubbletree, moontree, fungicap, voidgate, soulbloom.
+2. Graphics upgrade pass, per species — biggest wins:
+   - **flametree first** (user favorite): it already has layered teardrop flames +
+     `userData` flicker hook (~line 2322). Add: emissive material (`emissive` +
+     `emissiveIntensity`), an additive glow sprite at the crown, rising ember
+     particles (THREE.Points, additive, tiny drift loop), and a warm PointLight
+     (cheap, one per flametree, cap count) so it lights nearby ground at night.
+   - crystal → `MeshPhysicalMaterial` (transmission/ior/clearcoat) + subtle sparkle
+     sprite; ghosttree → transparent + fresnel-ish rim (or opacity 0.55 + soft sprite);
+     moontree/auroratree/soulbloom → emissive pulses tied to the day/night factor
+     (they should GLOW at night — pairs beautifully with the new night presets);
+     stormtree → tiny lightning flash timer; bubbletree → transparent spheres.
+   - Normal trees: per-vertex color jitter is in; consider slight roughness variation
+     and canopy silhouette polish only if cheap.
+3. **Update the catalog in lockstep**: `groveTreeGuide.ts` `colors: [a, b]` swatches +
+   any copy that describes looks; check how `GroveTreeFieldGuide.tsx` renders entries
+   (it may need new fields like `glow: true`). Keep `GroveTreeId` ≡ `Species`.
+4. Perf guardrails: flametree effects animate in the existing rAF loop (see
+   `treeStates` / `userData` flicker); keep per-frame allocations zero; cap
+   PointLights (e.g. only nearest 4 flametrees); respect `reducedMotion`.
+5. Verify with the TEST MODE preview toggles (streak 30/60/100 to spawn many species,
+   Night + each weather) — see "Verification workflow gotchas" section below for the
+   embedded-pane spoofs. Typecheck: expect main.tsx errors from the other agent's WIP;
+   grove files must stay clean. Commit grove files only.
+
+### Older backlog (still valid, lower priority)
 1. Optionally wire Fable-exported glTF trees into `buildTreeMesh`.
-2. Commit when user is happy with the vista quality pass.
+2. True reflections / volumetric rays remain known gaps (see above).
 
 ## Weather / time-of-day audit (2026-07-11 evening session)
 
