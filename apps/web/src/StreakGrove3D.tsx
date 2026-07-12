@@ -2672,12 +2672,28 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     }
   } else if (species === "auroratree") {
     g.add(makeTrunk(0.07, 0.14, 2.0, birchTrunkMat));
+    // Polar glow crown + rising star sparkle
+    const polarGlow = makeGlow("#4dffd2", 3.3, 0.3);
+    polarGlow.position.set(0, 3.1, 0);
+    g.add(polarGlow);
+    g.add(makeRisingParticles("#bfffe8", 9, 0.9, 2.0, 4.6, 0.055, seed + 37));
     for (let i = 0; i < 6; i += 1) {
+      // S-curved ribbon: displace plane columns sideways along the height
+      const rh = 2.2 + rand() * 0.6;
+      const geo = new THREE.PlaneGeometry(0.35, rh, 1, 8);
+      const pos = geo.attributes.position as THREE.BufferAttribute;
+      const wob = 0.55 + rand() * 0.3;
+      for (let v = 0; v < pos.count; v += 1) {
+        const yv = pos.getY(v);
+        pos.setX(v, pos.getX(v) + Math.sin((yv / rh) * Math.PI * 2 + i) * 0.16 * wob);
+        pos.setZ(v, Math.cos((yv / rh) * Math.PI * 1.5 + i * 1.3) * 0.1 * wob);
+      }
+      geo.computeVertexNormals();
       const ribbon = new THREE.Mesh(
-        new THREE.PlaneGeometry(0.35, 2.2 + rand() * 0.6),
+        geo,
         new THREE.MeshStandardMaterial({
-          color: new THREE.Color(i % 2 === 0 ? "#00e5a8" : "#7b61ff"),
-          emissive: new THREE.Color(i % 2 === 0 ? "#00c896" : "#5a40e0"),
+          color: new THREE.Color(i % 3 === 0 ? "#00e5a8" : i % 3 === 1 ? "#7b61ff" : "#37d0ff"),
+          emissive: new THREE.Color(i % 3 === 0 ? "#00c896" : i % 3 === 1 ? "#5a40e0" : "#1aa8e0"),
           emissiveIntensity: 0.9,
           roughness: 0.3,
           transparent: true,

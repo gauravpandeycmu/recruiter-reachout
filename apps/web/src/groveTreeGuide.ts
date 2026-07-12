@@ -125,7 +125,7 @@ export const GROVE_TREE_GUIDE: GroveTreeGuideEntry[] = [
     id: "auroratree",
     name: "Aurora Tree",
     colors: ["#00e5a8", "#7b61ff"],
-    fact: "Northern lights with a trunk. Ribbons wave like they’re DJing the night sky.",
+    fact: "Northern lights with a trunk. Teal-violet-cyan ribbons curl like real curtains of sky, shedding star sparkle.",
   },
   {
     id: "spiraltree",
