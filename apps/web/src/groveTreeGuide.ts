@@ -101,7 +101,7 @@ export const GROVE_TREE_GUIDE: GroveTreeGuideEntry[] = [
     id: "crystal",
     name: "Crystal Tree",
     colors: ["#4ad0ff", "#e8ffff"],
-    fact: "Ice shards that somehow grow. Looks like a loading screen for winter, but permanent.",
+    fact: "Actual glass shards, slowly rotating, catching light like a chandelier that unionized. Frost shimmer included.",
   },
   {
     id: "candyfloss",

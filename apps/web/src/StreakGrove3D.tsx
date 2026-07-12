@@ -2544,27 +2544,47 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
       g.add(fire);
     }
   } else if (species === "crystal") {
-    // Icy shard canopy — geometric, not blobby
-    const iceTrunk = new THREE.MeshStandardMaterial({ color: new THREE.Color("#c8d8e8"), roughness: 0.4 });
+    // Icy shard canopy — real glass now: transmissive faceted shards on a slow spin
+    const iceTrunk = new THREE.MeshStandardMaterial({ color: new THREE.Color("#c8d8e8"), roughness: 0.35, metalness: 0.15 });
     g.add(makeTrunk(0.07, 0.14, 1.9, iceTrunk));
+    const crown = new THREE.Group();
+    crown.position.y = 2.75;
+    crown.userData.animate = "voidspin"; // stately rotation, slower than "spin"
     for (let i = 0; i < 9; i += 1) {
+      const big = rand() > 0.5;
       const shard = new THREE.Mesh(
         new THREE.OctahedronGeometry(0.45 + rand() * 0.35, 0),
-        new THREE.MeshStandardMaterial({
-          color: new THREE.Color(rand() > 0.5 ? "#7ae0ff" : "#e8ffff"),
+        new THREE.MeshPhysicalMaterial({
+          color: new THREE.Color(big ? "#9fe8ff" : "#e8ffff"),
           emissive: new THREE.Color("#3aa0ff"),
-          emissiveIntensity: 0.22,
-          roughness: 0.2,
-          metalness: 0.35,
+          emissiveIntensity: 0.18,
+          roughness: 0.06,
+          metalness: 0.05,
+          transmission: 0.75,
+          thickness: 0.6,
+          ior: 1.55,
           transparent: true,
-          opacity: 0.88,
+          opacity: 0.96,
         }),
       );
-      shard.position.set((rand() - 0.5) * 1.8, 2.1 + rand() * 1.5, (rand() - 0.5) * 1.8);
-      shard.rotation.set(rand() * Math.PI, rand() * Math.PI, rand() * Math.PI);
+      shard.scale.y = 1.25 + rand() * 0.5; // elongated crystals, not dice
+      shard.position.set((rand() - 0.5) * 1.7, (rand() - 0.5) * 1.4, (rand() - 0.5) * 1.7);
+      shard.rotation.set(rand() * 0.6 - 0.3, rand() * Math.PI, rand() * 0.6 - 0.3);
       shard.castShadow = false;
-      g.add(shard);
+      crown.add(shard);
     }
+    g.add(crown);
+    // Cold halo + prismatic sparkle glints
+    const iceGlow = makeGlow("#7ae0ff", 3.1, 0.3);
+    iceGlow.position.set(0, 2.8, 0);
+    g.add(iceGlow);
+    for (let i = 0; i < 3; i += 1) {
+      const spark = makeGlow(i === 1 ? "#ffffff" : "#b8f0ff", 0.55, 0.8);
+      spark.position.set((rand() - 0.5) * 1.8, 2.1 + rand() * 1.5, (rand() - 0.5) * 1.8);
+      g.add(spark);
+    }
+    // Frost shimmer drifting up through the shards
+    g.add(makeRisingParticles("#d8f6ff", 8, 0.9, 1.6, 4.1, 0.06, seed + 17));
   } else if (species === "candyfloss") {
     // Pastel cotton-candy clouds on a thin stick
     g.add(makeTrunk(0.05, 0.1, 2.2, birchTrunkMat));
