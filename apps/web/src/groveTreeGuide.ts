@@ -155,7 +155,7 @@ export const GROVE_TREE_GUIDE: GroveTreeGuideEntry[] = [
     id: "fungicap",
     name: "Fungi Cap",
     colors: ["#c45c2a", "#f0d090"],
-    fact: "Not a tree. Don’t @ us. Giant mushroom energy — sits in the grove anyway because it paid rent.",
+    fact: "Not a tree. Don’t @ us. Now with glowing teal gills, drifting spores, and two mushroomlings paying half rent.",
   },
   {
     id: "voidgate",

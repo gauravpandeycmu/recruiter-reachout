@@ -2929,6 +2929,46 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
       spot.position.set(Math.cos(a) * 0.7, 2.15 + rand() * 0.25, Math.sin(a) * 0.7);
       g.add(spot);
     }
+    // Bioluminescent gills glowing under the cap rim
+    const gills = new THREE.Mesh(
+      new THREE.TorusGeometry(1.0, 0.16, 8, 24),
+      new THREE.MeshStandardMaterial({
+        color: new THREE.Color("#3ee6c4"),
+        emissive: new THREE.Color("#18c9a4"),
+        emissiveIntensity: 0.85,
+        roughness: 0.5,
+      }),
+    );
+    gills.rotation.x = Math.PI / 2;
+    gills.position.y = 1.78;
+    gills.castShadow = false;
+    gills.userData.animate = "voidspark"; // soft glow breathing
+    gills.userData.phase = 2.4;
+    gills.userData.baseY = gills.position.y;
+    g.add(gills);
+    const gillGlow = makeGlow("#3ee6c4", 2.4, 0.3);
+    gillGlow.position.set(0, 1.7, 0);
+    g.add(gillGlow);
+    // Spores sift down from under the cap
+    g.add(makeRisingParticles("#c8f5d8", 12, 1.0, 0.15, 1.7, 0.05, seed + 59, true));
+    // Mushroomlings sheltering at the base
+    for (let i = 0; i < 2; i += 1) {
+      const mini = new THREE.Group();
+      const mStem = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.05, 0.07, 0.28, 6),
+        new THREE.MeshStandardMaterial({ color: new THREE.Color("#e8d8b8"), roughness: 0.9 }),
+      );
+      mStem.position.y = 0.14;
+      const mCap = new THREE.Mesh(
+        new THREE.SphereGeometry(0.16, 8, 6, 0, Math.PI * 2, 0, Math.PI * 0.55),
+        new THREE.MeshStandardMaterial({ color: new THREE.Color("#d4703a"), roughness: 0.85 }),
+      );
+      mCap.position.y = 0.3;
+      mini.add(mStem, mCap);
+      const a = rand() * Math.PI * 2;
+      mini.position.set(Math.cos(a) * (0.75 + rand() * 0.3), 0, Math.sin(a) * (0.75 + rand() * 0.3));
+      g.add(mini);
+    }
   } else if (species === "voidgate") {
     // Mystical portal canopy — a dark ring that drinks the light
     const pillar = new THREE.Mesh(
