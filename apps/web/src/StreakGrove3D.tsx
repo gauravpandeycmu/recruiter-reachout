@@ -2317,6 +2317,23 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     const s3 = makeBlob(0.55, species, seed + 4, 0.6);
     s3.position.set(0.15, 3.25, -0.1);
     g.add(main, s1, s2, s3);
+    // Golden fans flutter down year-round
+    const gold = makeRisingParticles("#ffd94a", 8, 1.3, 0.25, 3.1, 0.08, seed + 67, true);
+    (gold.material as THREE.PointsMaterial).blending = THREE.NormalBlending;
+    g.add(gold);
+    const goldRing = new THREE.Mesh(
+      new THREE.CircleGeometry(1.0, 14),
+      new THREE.MeshStandardMaterial({
+        color: new THREE.Color("#c9a327"),
+        roughness: 1,
+        transparent: true,
+        opacity: 0.4,
+      }),
+    );
+    goldRing.rotation.x = -Math.PI / 2;
+    goldRing.position.y = 0.02;
+    goldRing.receiveShadow = true;
+    g.add(goldRing);
   } else if (species === "acacia") {
     g.add(makeTrunk(0.08, 0.16, 2.4, trunkMat));
     // Flat umbrella crown
@@ -2400,6 +2417,23 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     const s3 = makeBlob(0.6, species, seed + 4, 0.8);
     s3.position.set(0.1, 3.4, -0.1);
     g.add(main, s1, s2, s3);
+    // Purple rain: petals sift down and carpet the ground
+    const petals = makeRisingParticles("#c084f0", 10, 1.5, 0.2, 3.3, 0.08, seed + 71, true);
+    (petals.material as THREE.PointsMaterial).blending = THREE.NormalBlending;
+    g.add(petals);
+    const carpet = new THREE.Mesh(
+      new THREE.CircleGeometry(1.3, 14),
+      new THREE.MeshStandardMaterial({
+        color: new THREE.Color("#7a4fb0"),
+        roughness: 1,
+        transparent: true,
+        opacity: 0.42,
+      }),
+    );
+    carpet.rotation.x = -Math.PI / 2;
+    carpet.position.y = 0.02;
+    carpet.receiveShadow = true;
+    g.add(carpet);
   } else if (species === "araucaria") {
     g.add(makeTrunk(0.1, 0.2, 2.6, trunkMat));
     // Monkey-puzzle: stacked geometric discs
