@@ -3228,6 +3228,31 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     const s2 = makeBlob(0.65, "dogwood", seed + 3, 0.9);
     s2.position.set(-0.65, 1.9, -0.15);
     g.add(main, s1, s2);
+    // Four-bract dogwood flowers with a blush center
+    for (let i = 0; i < 7; i += 1) {
+      const flower = new THREE.Group();
+      const bractMat = new THREE.MeshStandardMaterial({ color: new THREE.Color("#ffffff"), roughness: 0.6 });
+      for (let p = 0; p < 4; p += 1) {
+        const bract = new THREE.Mesh(new THREE.SphereGeometry(0.07, 5, 5), bractMat);
+        bract.scale.set(1.4, 0.3, 0.8);
+        const pa = (p / 4) * Math.PI * 2;
+        bract.position.set(Math.cos(pa) * 0.09, 0, Math.sin(pa) * 0.09);
+        bract.rotation.y = -pa;
+        bract.castShadow = false;
+        flower.add(bract);
+      }
+      const center = new THREE.Mesh(
+        new THREE.SphereGeometry(0.035, 5, 5),
+        new THREE.MeshStandardMaterial({ color: new THREE.Color("#e8a0b8"), roughness: 0.7 }),
+      );
+      center.castShadow = false;
+      flower.add(center);
+      const a = rand() * Math.PI * 2;
+      const r = 0.55 + rand() * 0.65;
+      flower.position.set(Math.cos(a) * r, 1.95 + rand() * 0.75, Math.sin(a) * r);
+      flower.rotation.set((rand() - 0.5) * 0.5, rand() * Math.PI, (rand() - 0.5) * 0.5);
+      g.add(flower);
+    }
   } else if (species === "magnolia") {
     g.add(makeTrunk(0.1, 0.22, 1.6, trunkMat));
     const main = makeBlob(1.4, species, seed + 1, 0.88);
@@ -3237,6 +3262,28 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     const s2 = makeBlob(0.75, species, seed + 3);
     s2.position.set(-0.7, 2.1, -0.15);
     g.add(main, s1, s2);
+    // Oversized goblet blooms sitting proud of the canopy
+    for (let i = 0; i < 6; i += 1) {
+      const bloom = new THREE.Group();
+      const cupMat = new THREE.MeshStandardMaterial({
+        color: new THREE.Color(rand() > 0.5 ? "#fff4ec" : "#ffe4f0"),
+        roughness: 0.55,
+      });
+      for (let p = 0; p < 3; p += 1) {
+        const petal = new THREE.Mesh(new THREE.SphereGeometry(0.11, 6, 6), cupMat);
+        petal.scale.set(1, 1.5, 0.45);
+        const pa = (p / 3) * Math.PI * 2;
+        petal.position.set(Math.cos(pa) * 0.06, 0.06, Math.sin(pa) * 0.06);
+        petal.rotation.y = -pa;
+        petal.rotation.x = 0.35;
+        petal.castShadow = false;
+        bloom.add(petal);
+      }
+      const a = rand() * Math.PI * 2;
+      const r = 0.7 + rand() * 0.7;
+      bloom.position.set(Math.cos(a) * r, 2.5 + rand() * 0.75, Math.sin(a) * r);
+      g.add(bloom);
+    }
   } else if (species === "plum") {
     g.add(makeTrunk(0.08, 0.18, 1.5, trunkMat));
     const main = makeBlob(1.2, species, seed + 1, 0.92);
@@ -3246,6 +3293,22 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     const s2 = makeBlob(0.65, species, seed + 3);
     s2.position.set(-0.65, 1.95, -0.15);
     g.add(main, s1, s2);
+    // Dusky plums hanging in the shade
+    for (let i = 0; i < 5; i += 1) {
+      const fruit = new THREE.Mesh(
+        new THREE.SphereGeometry(0.085, 7, 7),
+        new THREE.MeshStandardMaterial({
+          color: new THREE.Color("#4a1a5e"),
+          roughness: 0.3,
+          emissive: new THREE.Color("#2a0d38"),
+          emissiveIntensity: 0.3,
+        }),
+      );
+      fruit.scale.y = 1.15;
+      fruit.position.set((rand() - 0.5) * 1.8, 1.6 + rand() * 1.0, (rand() - 0.5) * 1.8);
+      fruit.castShadow = false;
+      g.add(fruit);
+    }
   } else {
     // oak / maple / redmaple — rounded broad canopies
     const isMaple = species === "maple" || species === "redmaple";
