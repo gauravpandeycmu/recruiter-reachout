@@ -149,7 +149,7 @@ export const GROVE_TREE_GUIDE: GroveTreeGuideEntry[] = [
     id: "moontree",
     name: "Moon Tree",
     colors: ["#f0e6c8", "#fff8e0"],
-    fact: "Glowing lunar orbs for fruit. Perfect night light if your streak prefers evening sends.",
+    fact: "Grows full moons AND crescents, each with its own halo. The grove's night light — moon dust drifts up after dark.",
   },
   {
     id: "fungicap",

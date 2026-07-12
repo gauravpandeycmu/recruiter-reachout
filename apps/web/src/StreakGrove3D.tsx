@@ -2750,8 +2750,9 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
   } else if (species === "moontree") {
     g.add(makeTrunk(0.08, 0.16, 2.1, trunkMat));
     for (let i = 0; i < 6; i += 1) {
+      const r = 0.35 + rand() * 0.2;
       const moon = new THREE.Mesh(
-        new THREE.SphereGeometry(0.35 + rand() * 0.2, 10, 10),
+        new THREE.SphereGeometry(r, 12, 12),
         new THREE.MeshStandardMaterial({
           color: new THREE.Color("#fff6d8"),
           emissive: new THREE.Color("#ffe9a8"),
@@ -2766,7 +2767,26 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
       moon.userData.phase = a;
       moon.userData.baseY = moon.position.y;
       g.add(moon);
+      // Every other orb is a crescent — a shadow sphere tucked into one side
+      if (i % 2 === 1) {
+        const shade = new THREE.Mesh(
+          new THREE.SphereGeometry(r * 0.94, 12, 12),
+          new THREE.MeshStandardMaterial({ color: new THREE.Color("#141b2e"), roughness: 1 }),
+        );
+        shade.position.set(r * 0.38, 0, r * 0.22);
+        shade.castShadow = false;
+        moon.add(shade);
+      } else {
+        // Full moons get a personal halo
+        const halo = makeGlow("#ffeebb", r * 3.2, 0.45);
+        moon.add(halo);
+      }
     }
+    // Crown-wide silver glow + drifting moon dust
+    const lunarGlow = makeGlow("#f5ecd0", 3.2, 0.3);
+    lunarGlow.position.set(0, 2.75, 0);
+    g.add(lunarGlow);
+    g.add(makeRisingParticles("#fff2c8", 8, 1.0, 1.7, 4.3, 0.055, seed + 29));
   } else if (species === "fungicap") {
     // Giant mushroom — unmistakable silhouette
     const stem = new THREE.Mesh(
