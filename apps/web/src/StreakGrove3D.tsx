@@ -353,13 +353,13 @@ const NIGHT_PRESETS: Record<WeatherKind, WeatherPreset> = {
     fogDensity: 0.0056,
     clear: "#1b2a4a",
     sunColor: "#c2d4f0",
-    sunI: 1.1,
-    hemiI: 0.62,
-    hemiSky: "#50688f",
-    hemiGround: "#2a3628",
-    fillI: 0.18,
+    sunI: 1.2,
+    hemiI: 0.74,
+    hemiSky: "#5a739c",
+    hemiGround: "#303e2e",
+    fillI: 0.2,
     rimI: 0.16,
-    envI: 0.32,
+    envI: 0.36,
     exposure: 1.02,
     sunSpriteOpacity: 0.8,
     sunSpriteScale: 20,
@@ -370,27 +370,29 @@ const NIGHT_PRESETS: Record<WeatherKind, WeatherPreset> = {
     cloudYOff: 0,
     cloudColor: "#3c4c6c",
     mistMul: 0.8,
-    mistColor: "#26385a",
-    terrainTint: "#7886a0",
+    mistColor: "#2e4266",
+    terrainTint: "#8b98b2",
     starO: 0.95,
   },
-  // Overcast night — heavy lid of cloud, faint diffuse moon
+  // Overcast night — heavy lid of cloud, faint diffuse moon.
+  // Deliberately brighter than real life: the grove must stay readable
+  // (game-style "moonlight ambient floor"), especially on the dark app theme.
   cloudy: {
-    zenith: "#182130",
-    horizon: "#2e3a4c",
-    ground: "#1c2430",
-    fogColor: "#263243",
-    fogDensity: 0.0072,
-    clear: "#212d3e",
-    sunColor: "#9cb0ca",
-    sunI: 0.32,
-    hemiI: 0.58,
-    hemiSky: "#3a4c64",
-    hemiGround: "#242e26",
-    fillI: 0.18,
+    zenith: "#1f2a3c",
+    horizon: "#3d4d64",
+    ground: "#28323e",
+    fogColor: "#33425a",
+    fogDensity: 0.0068,
+    clear: "#2a374a",
+    sunColor: "#aabdd6",
+    sunI: 0.58,
+    hemiI: 0.88,
+    hemiSky: "#4d6484",
+    hemiGround: "#3e4c3e",
+    fillI: 0.28,
     rimI: 0,
-    envI: 0.24,
-    exposure: 0.95,
+    envI: 0.34,
+    exposure: 1.0,
     sunSpriteOpacity: 0.07,
     sunSpriteScale: 42,
     sunDiscColor: "#a8b6ca",
@@ -398,29 +400,30 @@ const NIGHT_PRESETS: Record<WeatherKind, WeatherPreset> = {
     cloudMul: 1.6,
     cloudScaleMul: 1.3,
     cloudYOff: -5,
-    cloudColor: "#344052",
+    cloudColor: "#42506a",
     mistMul: 1.15,
-    mistColor: "#2a3a4e",
-    terrainTint: "#606c7e",
+    mistColor: "#3a4c66",
+    terrainTint: "#98a2b4",
     starO: 0.22,
   },
-  // Night rain — darkest mode, but ridge and lake stay readable
+  // Night rain — still the darkest mode, but the grove, ridge and lake must
+  // remain readable silhouettes (raised ambient floor, not pitch black)
   rain: {
-    zenith: "#141a24",
-    horizon: "#28323e",
-    ground: "#181e26",
-    fogColor: "#232d39",
-    fogDensity: 0.0102,
-    clear: "#1f2833",
-    sunColor: "#7e8ca0",
-    sunI: 0.22,
-    hemiI: 0.46,
-    hemiSky: "#31404f",
-    hemiGround: "#202824",
-    fillI: 0.15,
+    zenith: "#1a2230",
+    horizon: "#36424f",
+    ground: "#242c36",
+    fogColor: "#2f3c4c",
+    fogDensity: 0.0098,
+    clear: "#28323f",
+    sunColor: "#8ea0b8",
+    sunI: 0.48,
+    hemiI: 0.74,
+    hemiSky: "#41546a",
+    hemiGround: "#38443a",
+    fillI: 0.24,
     rimI: 0,
-    envI: 0.16,
-    exposure: 0.9,
+    envI: 0.28,
+    exposure: 0.97,
     sunSpriteOpacity: 0,
     sunSpriteScale: 26,
     sunDiscColor: "#7e8a9a",
@@ -428,10 +431,10 @@ const NIGHT_PRESETS: Record<WeatherKind, WeatherPreset> = {
     cloudMul: 2.1,
     cloudScaleMul: 1.4,
     cloudYOff: -14,
-    cloudColor: "#2a343f",
+    cloudColor: "#394556",
     mistMul: 1.15,
-    mistColor: "#242f3b",
-    terrainTint: "#525e6c",
+    mistColor: "#324150",
+    terrainTint: "#8792a2",
     starO: 0.06,
   },
   // Snowy night — snow bounces moonlight, so it stays surprisingly bright
@@ -443,8 +446,8 @@ const NIGHT_PRESETS: Record<WeatherKind, WeatherPreset> = {
     fogDensity: 0.0086,
     clear: "#324058",
     sunColor: "#d0dcf0",
-    sunI: 0.5,
-    hemiI: 0.78,
+    sunI: 0.56,
+    hemiI: 0.9,
     hemiSky: "#546a8c",
     hemiGround: "#46505e",
     fillI: 0.24,
@@ -460,8 +463,8 @@ const NIGHT_PRESETS: Record<WeatherKind, WeatherPreset> = {
     cloudYOff: -9,
     cloudColor: "#38445a",
     mistMul: 1.2,
-    mistColor: "#2e3c54",
-    terrainTint: "#8894a8",
+    mistColor: "#3a4a66",
+    terrainTint: "#9aa6ba",
     starO: 0.3,
   },
 };
@@ -2807,15 +2810,54 @@ export function StreakGrove3D({
       });
     });
 
-    // Frame 3: env map + shadows (heaviest GPU alloc)
+    // Frame 3: env map + shadows (heaviest GPU alloc).
+    // The env map is a PMREM bake of the sky — it must be RE-baked whenever the
+    // sky mood changes (weather / day-night), otherwise materials keep ambient
+    // light from the mount-time sky (e.g. a permanent night env when the tab
+    // was opened in the evening, which made every daytime preview look gloomy).
+    let envSkyMat: THREE.ShaderMaterial | null = null;
+    let envSkyScene: THREE.Scene | null = null;
+    let envSig = "";
+    const envSignature = () => {
+      const u = skyMat.uniforms;
+      return [
+        (u.uZenith!.value as THREE.Color).getHexString(),
+        (u.uHorizon!.value as THREE.Color).getHexString(),
+        (u.uGround!.value as THREE.Color).getHexString(),
+        (u.uSunGlow!.value as number).toFixed(2),
+      ].join("|");
+    };
+    const bakeEnv = () => {
+      if (!pmrem) pmrem = new THREE.PMREMGenerator(renderer);
+      if (!envSkyMat || !envSkyScene) {
+        envSkyMat = skyMat.clone();
+        envSkyScene = new THREE.Scene();
+        envSkyScene.add(new THREE.Mesh(new THREE.SphereGeometry(50, 24, 14), envSkyMat));
+      }
+      // Sync the bake sky with the live sky before rendering the cubemap
+      const dst = envSkyMat.uniforms;
+      const src = skyMat.uniforms;
+      (dst.uZenith!.value as THREE.Color).copy(src.uZenith!.value as THREE.Color);
+      (dst.uHorizon!.value as THREE.Color).copy(src.uHorizon!.value as THREE.Color);
+      (dst.uGround!.value as THREE.Color).copy(src.uGround!.value as THREE.Color);
+      (dst.uSunColor!.value as THREE.Color).copy(src.uSunColor!.value as THREE.Color);
+      dst.uSunGlow!.value = src.uSunGlow!.value;
+      (dst.uSunDir!.value as THREE.Vector3).copy(src.uSunDir!.value as THREE.Vector3);
+      const nextRT = pmrem.fromScene(envSkyScene, 0.04);
+      envRT?.dispose();
+      envRT = nextRT;
+      scene.environment = envRT.texture;
+      envSig = envSignature();
+    };
+    const rebakeEnvIfStale = () => {
+      // Only once the deferred first bake has happened (pmrem exists), and only
+      // when the sky actually changed — a PMREM bake is too heavy for no-ops.
+      if (pmrem && envSig !== envSignature()) bakeEnv();
+    };
     afterPaint(() => {
       afterPaint(() => {
         afterPaint(() => {
-          pmrem = new THREE.PMREMGenerator(renderer);
-          const skyScene = new THREE.Scene();
-          skyScene.add(new THREE.Mesh(new THREE.SphereGeometry(50, 24, 14), skyMat.clone()));
-          envRT = pmrem.fromScene(skyScene, 0.04);
-          scene.environment = envRT.texture;
+          bakeEnv();
           renderer.shadowMap.enabled = true;
           sun.castShadow = true;
         });
@@ -2868,7 +2910,8 @@ export function StreakGrove3D({
       starBaseOpacity = p.starO;
       stars.mat.opacity = p.starO;
       stars.obj.visible = p.starO > 0.02;
-      fireflyNightMul = 1 + nightT * 0.9;
+      // Fireflies are a dusk/night thing — keep them nearly invisible at noon
+      fireflyNightMul = 0.15 + nightT * 1.6;
 
       // Keep the lake matched to sky / mood
       (waterMat.uniforms.uSkyZenith!.value as THREE.Color).set(p.zenith);
@@ -2928,6 +2971,8 @@ export function StreakGrove3D({
         worldRef.current.weatherSunI = p.sunI;
         worldRef.current.sunSpriteScale = p.sunSpriteScale;
       }
+      // Ambient (PMREM) light must follow the sky we just configured
+      rebakeEnvIfStale();
     };
 
     const plant = (nextStreak: number) => {
@@ -3125,6 +3170,11 @@ export function StreakGrove3D({
       });
       envRT?.dispose();
       pmrem?.dispose();
+      envSkyScene?.traverse((obj) => {
+        const mesh = obj as THREE.Mesh;
+        if (mesh.isMesh) mesh.geometry.dispose();
+      });
+      envSkyMat?.dispose();
       renderer.dispose();
       if (renderer.domElement.parentElement === mount) mount.removeChild(renderer.domElement);
     };

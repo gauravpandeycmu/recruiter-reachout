@@ -50,3 +50,35 @@ WebGL fallback.
 
 1. Optionally wire Fable-exported glTF trees into `buildTreeMesh`.
 2. Commit when user is happy with the vista quality pass.
+
+## Weather / time-of-day audit (2026-07-11 evening session)
+
+Audited all weather (sunny/cloudy/rain/snow) × time (day/night/dawn/golden/dusk) modes
+after the user reported "cloudy at night is not really visible". Findings + fixes:
+
+1. **Root bug — stale environment map.** `scene.environment` was PMREM-baked ONCE from
+   the mount-time sky and never re-baked, so a grove opened at night kept night ambient
+   forever (all day/dawn previews looked gloomy, and vice versa). Fixed: `bakeEnv()` +
+   `rebakeEnvIfStale()` — applyWeather re-bakes when the sky signature (zenith/horizon/
+   ground/sunGlow) changes. Bake sky uniforms are synced from the live skyMat each time.
+2. **Night presets crushed to black.** Night stacked dark lights × dark terrainTint ×
+   low exposure multiplicatively; on the dark app theme, cloudy/rain night were
+   illegible (measured grove band ≈ [4,7,7] RGB). Raised the "moonlight ambient floor"
+   (hemi/sun/fill/env intensity, terrainTint, fog/horizon colors) on all four
+   NIGHT_PRESETS — strongest on cloudy and rain. Night still reads as night, but trees,
+   lake, and ridge stay readable silhouettes.
+3. **Fireflies showed at noon.** `fireflyNightMul` now `0.15 + nightT * 1.6` (was
+   `1 + nightT * 0.9`) so they're a dusk/night effect.
+
+### Verification workflow gotchas (embedded browser pane)
+- The pane reports `document.hidden === true`, which correctly pauses the render loop —
+  spoof with `Object.defineProperty(document, 'hidden', {get: () => false})` + dispatch
+  `visibilitychange`, EVERY page reload.
+- Pane screenshots can show stale compositor frames; ground truth = `drawImage(canvas)`
+  readback right after `window.__groveForceRender()`, or pin the frame as a fixed
+  `<img>` overlay and screenshot that.
+- Preview toggles only render when the `testMode` prop is true (TEST MODE setting). For
+  audits, temporarily hardcode it in main.tsx — and revert.
+- Async JS loops that outlive a timed-out tool call keep mutating
+  `__groveHourOverride` — keep audit calls atomic (one self-contained IIFE).
+- Another agent's HMR edits reload the page constantly; reinstall helpers per call.
