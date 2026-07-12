@@ -2305,6 +2305,17 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
       { r: 0.72, h: 1.4, y: 3.6 },
       { r: 0.42, h: 0.95, y: 4.25 },
     ]);
+    // Pinecones dangling from the lower tiers
+    const coneMat = new THREE.MeshStandardMaterial({ color: new THREE.Color("#6a4a26"), roughness: 0.9 });
+    for (let i = 0; i < 3; i += 1) {
+      const pinecone = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.18, 6), coneMat);
+      const a = rand() * Math.PI * 2;
+      const r = 0.7 + rand() * 0.5;
+      pinecone.position.set(Math.cos(a) * r, 1.55 + rand() * 0.9, Math.sin(a) * r);
+      pinecone.rotation.x = Math.PI; // hang point-down
+      pinecone.castShadow = false;
+      g.add(pinecone);
+    }
   } else if (species === "ginkgo") {
     g.add(makeTrunk(0.09, 0.2, 2.0, trunkMat));
     // Golden fan canopy — irregular bright lobes
@@ -3171,6 +3182,19 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     g.add(b1, b2, b3);
   } else if (species === "aspen") {
     g.add(makeTrunk(0.05, 0.1, 2.7, birchTrunkMat));
+    // Aspen "eyes" on the pale bark
+    const eyeMat = new THREE.MeshStandardMaterial({ color: new THREE.Color("#3a352c"), roughness: 0.9 });
+    for (let i = 0; i < 2; i += 1) {
+      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.045, 6, 6), eyeMat);
+      eye.scale.set(1, 1.6, 0.4);
+      const ea = rand() * Math.PI * 2;
+      const ey = 0.8 + i * 0.9 + rand() * 0.3;
+      const er = lerp(0.1, 0.05, ey / 2.7);
+      eye.position.set(Math.cos(ea) * er, ey, Math.sin(ea) * er);
+      eye.rotation.y = ea;
+      eye.castShadow = false;
+      g.add(eye);
+    }
     const b1 = makeBlob(0.72, species, seed + 1, 1.15);
     b1.position.set(0.12, 2.95, 0);
     const b2 = makeBlob(0.55, species, seed + 2, 1.1);
@@ -3178,14 +3202,26 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     const b3 = makeBlob(0.48, species, seed + 3, 1.2);
     b3.position.set(0.28, 3.35, -0.12);
     g.add(b1, b2, b3);
+    // The famous quaking shimmer — tiny glints among the leaves
+    for (let i = 0; i < 3; i += 1) {
+      const glint = makeGlow("#f4ffc8", 0.4, 0.6);
+      glint.position.set((rand() - 0.5) * 1.3, 2.5 + rand() * 1.1, (rand() - 0.5) * 1.1);
+      g.add(glint);
+    }
   } else if (species === "poplar") {
     g.add(makeTrunk(0.07, 0.14, 3.4, trunkMat));
-    // Tall columnar canopy
+    // Tall columnar canopy with a bright leader at the very top
     for (let i = 0; i < 5; i += 1) {
       const b = makeBlob(0.55 - i * 0.05, species, seed + i, 1.45);
       b.position.set((rand() - 0.5) * 0.25, 2.2 + i * 0.55, (rand() - 0.5) * 0.25);
       g.add(b);
     }
+    const leader = makeBlob(0.28, species, seed + 9, 1.6);
+    leader.position.set(0, 4.6, 0);
+    leader.userData.animate = "bob";
+    leader.userData.phase = rand() * Math.PI * 2;
+    leader.userData.baseY = 4.6;
+    g.add(leader);
   } else if (species === "apple") {
     g.add(makeTrunk(0.1, 0.24, 1.55, trunkMat));
     const main = makeBlob(1.35, species, seed + 1, 0.95);
