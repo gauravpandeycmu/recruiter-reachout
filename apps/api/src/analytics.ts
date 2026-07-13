@@ -33,7 +33,10 @@ export function buildAnalyticsSummary(
   const goal = store.getAnalyticsGoalSettings();
   const tzOffsetMinutes = options.tzOffsetMinutes ?? -new Date().getTimezoneOffset();
   const candidateById = new Map(candidates.map((candidate) => [candidate.id, candidate] as const));
-  const daily = buildDailyBuckets(candidates, events, candidateById, 14, localDate, tzOffsetMinutes);
+  // 26 weeks of buckets: the Pace chart slices the last 14 client-side, while the
+  // contribution garden / weekday rhythm need the long window. Week/today stats
+  // below look buckets up by date, so the wider window doesn't affect them.
+  const daily = buildDailyBuckets(candidates, events, candidateById, 182, localDate, tzOffsetMinutes);
 
   const todayBucket = daily.find((d) => d.date === localDate) ?? emptyDay(localDate);
   const weekDates = lastNDates(7, localDate);

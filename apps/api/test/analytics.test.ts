@@ -50,6 +50,14 @@ describe("analytics", () => {
     expect(utc.today.discovered).toBe(0);
   });
 
+  it("returns 26 weeks of daily buckets for the contribution garden, ending today", async () => {
+    const store = await freshStore();
+    const summary = buildAnalyticsSummary(store, "2026-07-12", { tzOffsetMinutes: 0 });
+    expect(summary.daily).toHaveLength(182);
+    expect(summary.daily.at(-1)?.date).toBe("2026-07-12");
+    expect(summary.cumulativeSends).toHaveLength(182);
+  });
+
   it("celebrates when daily company schedule goal is met and not yet celebrated", async () => {
     const store = await freshStore();
     store.setAnalyticsGoalSettings({

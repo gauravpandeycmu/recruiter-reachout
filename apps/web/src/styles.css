@@ -7704,3 +7704,149 @@ html[data-theme="dark"] .passion-toggle-knob {
   background: #e8eef6;
 }
 
+
+/* ---- Contribution garden (Grove analytics) ---- */
+.garden-card {
+  margin-top: 16px;
+}
+
+.garden-wrap {
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.garden-svg {
+  display: block;
+}
+
+.garden-month,
+.garden-day-label {
+  font-size: 9px;
+  fill: var(--muted);
+}
+
+.garden-cell {
+  stroke: rgba(0, 0, 0, 0.06);
+  stroke-width: 1;
+}
+
+.garden-cell.soil { fill: color-mix(in srgb, var(--line) 55%, transparent); }
+.garden-cell.sprout { fill: #b9dcae; }
+.garden-cell.leaf1 { fill: #7cc06e; }
+.garden-cell.leaf2 { fill: #479a48; }
+.garden-cell.leaf3 { fill: #24702f; }
+
+html[data-theme="dark"] .garden-cell { stroke: rgba(255, 255, 255, 0.05); }
+html[data-theme="dark"] .garden-cell.soil { fill: rgba(148, 163, 190, 0.14); }
+html[data-theme="dark"] .garden-cell.sprout { fill: #3a5a34; }
+html[data-theme="dark"] .garden-cell.leaf1 { fill: #4d7d44; }
+html[data-theme="dark"] .garden-cell.leaf2 { fill: #63a457; }
+html[data-theme="dark"] .garden-cell.leaf3 { fill: #86cf74; }
+
+.garden-bloom {
+  fill: #f273a4;
+  stroke: rgba(255, 255, 255, 0.85);
+  stroke-width: 0.8;
+  pointer-events: none;
+}
+
+.garden-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.garden-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.garden-cell-chip {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  display: inline-block;
+}
+
+.garden-cell-chip.soil { background: color-mix(in srgb, var(--line) 55%, transparent); }
+.garden-cell-chip.sprout { background: #b9dcae; }
+.garden-cell-chip.leaf1 { background: #7cc06e; }
+.garden-cell-chip.leaf2 { background: #479a48; }
+.garden-cell-chip.leaf3 { background: #24702f; }
+.garden-cell-chip.bloom { background: #f273a4; border-radius: 50%; }
+
+html[data-theme="dark"] .garden-cell-chip.soil { background: rgba(148, 163, 190, 0.14); }
+html[data-theme="dark"] .garden-cell-chip.sprout { background: #3a5a34; }
+html[data-theme="dark"] .garden-cell-chip.leaf1 { background: #4d7d44; }
+html[data-theme="dark"] .garden-cell-chip.leaf2 { background: #63a457; }
+html[data-theme="dark"] .garden-cell-chip.leaf3 { background: #86cf74; }
+
+/* ---- Weekday rhythm ---- */
+.weekday-rhythm {
+  margin-top: 14px;
+  border-top: 1px dashed var(--line);
+  padding-top: 10px;
+}
+
+.weekday-headline {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.weekday-headline strong {
+  color: var(--accent);
+}
+
+.weekday-bars {
+  height: 64px;
+}
+
+.hourly-bar-fill.weekday-best {
+  background: linear-gradient(180deg, #e9a13b, #c97f18);
+}
+
+/* ---- Company bubbles ---- */
+.bubble-chart-wrap {
+  overflow: hidden;
+}
+
+.bubble-chart {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.bubble {
+  cursor: pointer;
+}
+
+.bubble circle {
+  opacity: 0.82;
+  transition: opacity 140ms ease, stroke-width 140ms ease;
+  stroke: rgba(255, 255, 255, 0.55);
+  stroke-width: 1;
+}
+
+.bubble:hover circle,
+.bubble:focus-visible circle {
+  opacity: 1;
+  stroke-width: 2.5;
+}
+
+.bubble-name {
+  fill: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+.bubble-count {
+  fill: rgba(255, 255, 255, 0.85);
+  font-size: 10px;
+  pointer-events: none;
+}

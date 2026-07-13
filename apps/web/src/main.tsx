@@ -604,6 +604,239 @@ function DonutChart({
   );
 }
 
+/**
+ * Six months of days as garden plots — bare soil → sprout → leaf by emails sent,
+ * with a blossom marker on days the daily goal was met. Sibling of the streak grove:
+ * the grove shows the run you're on, the garden shows every day you ever showed up.
+ */
+function ContributionGarden({
+  daily,
+  goal,
+}: {
+  daily: Array<{ date: string; sent: number; scheduledCompanies: number }>;
+  goal: number;
+}) {
+  const cell = 13;
+  const gap = 3;
+  const top = 18;
+  const left = 30;
+  const first = daily[0];
+  if (!first) return null;
+  const firstDow = (new Date(`${first.date}T00:00:00`).getDay() + 6) % 7; // 0 = Monday
+  const cells: Array<{ date: string; sent: number; scheduled: number } | null> = [
+    ...Array.from({ length: firstDow }, () => null),
+    ...daily.map((d) => ({ date: d.date, sent: d.sent, scheduled: d.scheduledCompanies })),
+  ];
+  const weeks: Array<typeof cells> = [];
+  for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, i + 7));
+  const width = left + weeks.length * (cell + gap);
+  const height = top + 7 * (cell + gap);
+  const monthLabels: Array<{ x: number; label: string }> = [];
+  let lastMonth = "";
+  weeks.forEach((week, w) => {
+    const firstDay = week.find((d) => d != null);
+    if (!firstDay) return;
+    const month = firstDay.date.slice(0, 7);
+    if (month !== lastMonth) {
+      lastMonth = month;
+      monthLabels.push({
+        x: left + w * (cell + gap),
+        label: new Date(`${firstDay.date}T00:00:00`).toLocaleString(undefined, { month: "short" }),
+      });
+    }
+  });
+  const classFor = (day: { sent: number; scheduled: number }): string => {
+    if (day.sent >= 6) return "leaf3";
+    if (day.sent >= 3) return "leaf2";
+    if (day.sent >= 1) return "leaf1";
+    // Scheduled-only days stay faintly alive — the streak counts them, so the
+    // garden shouldn't show bare soil in the middle of a living run.
+    if (day.scheduled > 0) return "sprout";
+    return "soil";
+  };
+  return (
+    <div className="garden-wrap">
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        width={width}
+        height={height}
+        className="garden-svg"
+        role="img"
+        aria-label="Daily sending activity for the last six months"
+      >
+        {monthLabels.map((m) => (
+          <text key={`${m.label}-${m.x}`} className="garden-month" x={m.x} y={11}>
+            {m.label}
+          </text>
+        ))}
+        {["Mon", "Wed", "Fri"].map((label, i) => (
+          <text key={label} className="garden-day-label" x={0} y={top + (i * 2 + 0) * (cell + gap) + cell - 3}>
+            {label}
+          </text>
+        ))}
+        {weeks.map((week, w) =>
+          week.map((day, dow) => {
+            if (!day) return null;
+            const x = left + w * (cell + gap);
+            const y = top + dow * (cell + gap);
+            const goalMet = goal > 0 && day.scheduled >= goal;
+            return (
+              <g key={day.date}>
+                <rect
+                  className={`garden-cell ${classFor(day)}`}
+                  x={x}
+                  y={y}
+                  width={cell}
+                  height={cell}
+                  rx={3}
+                >
+                  <title>
+                    {`${day.date}: ${day.sent} sent · ${day.scheduled} companies scheduled${goalMet ? " · goal met 🌸" : ""}`}
+                  </title>
+                </rect>
+                {goalMet && <circle className="garden-bloom" cx={x + cell - 3.4} cy={y + 3.4} r={2.1} />}
+              </g>
+            );
+          }),
+        )}
+      </svg>
+      <div className="garden-legend">
+        <span><i className="garden-cell-chip soil" /> quiet</span>
+        <span><i className="garden-cell-chip sprout" /> scheduled</span>
+        <span><i className="garden-cell-chip leaf1" /> 1–2 sent</span>
+        <span><i className="garden-cell-chip leaf2" /> 3–5</span>
+        <span><i className="garden-cell-chip leaf3" /> 6+</span>
+        <span><i className="garden-cell-chip bloom" /> goal met</span>
+      </div>
+    </div>
+  );
+}
+
+const WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
+/** Mon–Sun totals of emails actually sent, with a one-line personality headline. */
+function WeekdayRhythm({ daily }: { daily: Array<{ date: string; sent: number }> }) {
+  const totals = [0, 0, 0, 0, 0, 0, 0];
+  for (const day of daily) {
+    const dow = (new Date(`${day.date}T00:00:00`).getDay() + 6) % 7;
+    totals[dow]! += day.sent;
+  }
+  const max = Math.max(1, ...totals);
+  const total = totals.reduce((a, b) => a + b, 0);
+  const bestIdx = totals.indexOf(Math.max(...totals));
+  return (
+    <div className="weekday-rhythm">
+      <p className="weekday-headline">
+        {total === 0 ? (
+          "No sends yet — every weekday is up for grabs."
+        ) : (
+          <>You&apos;re a <strong>{WEEKDAY_NAMES[bestIdx]}</strong> sender.</>
+        )}
+      </p>
+      <div className="hourly-bars weekday-bars" aria-label="Emails sent by weekday">
+        {totals.map((value, i) => (
+          <div
+            className="hourly-bar"
+            key={WEEKDAY_NAMES[i]}
+            title={`${WEEKDAY_NAMES[i]} · ${value} emails sent`}
+          >
+            <div
+              className={`hourly-bar-fill${i === bestIdx && total > 0 ? " weekday-best" : ""}`}
+              style={{ height: `${Math.max(value > 0 ? 8 : 0, Math.round((value / max) * 100))}%` }}
+            />
+            <small>{WEEKDAY_NAMES[i]!.slice(0, 3)}</small>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const BUBBLE_PALETTE = ["#3f8f4a", "#3d7ab5", "#b5762a", "#7a5fb5", "#2a8f8a", "#b55a6e", "#5a8a2a", "#4a6a9a"];
+
+/**
+ * Packed company bubbles — one circle per company, area scaled by emails
+ * actually SENT (never scheduled). Greedy spiral packing, largest at center.
+ */
+function CompanyBubbles({
+  companies,
+  onOpen,
+}: {
+  companies: Array<{ companyName: string; sent: number; peopleContacted: number; lastSentAt?: string }>;
+  onOpen: (companyName: string) => void;
+}) {
+  const rows = companies
+    .filter((row) => row.sent > 0)
+    .slice()
+    .sort((a, b) => b.sent - a.sent)
+    .slice(0, 18);
+  if (rows.length === 0) {
+    return <p className="hint">No sends yet — bubbles appear once the first email goes out.</p>;
+  }
+  const W = 560;
+  const H = 300;
+  const maxSent = Math.max(...rows.map((row) => row.sent));
+  const radiusFor = (sent: number) => 17 + Math.sqrt(sent / maxSent) * 41;
+  const placed: Array<{ x: number; y: number; r: number; row: (typeof rows)[number] }> = [];
+  for (const row of rows) {
+    const r = radiusFor(row.sent);
+    let x = W / 2;
+    let y = H / 2;
+    if (placed.length > 0) {
+      let angle = placed.length * 2.399963;
+      let radius = 4;
+      for (let step = 0; step < 900; step += 1) {
+        radius += 1.4;
+        angle += 0.32;
+        x = W / 2 + Math.cos(angle) * radius * 1.5;
+        y = H / 2 + Math.sin(angle) * radius * 0.72;
+        const fits =
+          placed.every((p) => Math.hypot(p.x - x, p.y - y) >= p.r + r + 3) &&
+          x - r > 2 && x + r < W - 2 && y - r > 2 && y + r < H - 2;
+        if (fits) break;
+      }
+    }
+    placed.push({ x, y, r, row });
+  }
+  return (
+    <div className="bubble-chart-wrap">
+      <svg viewBox={`0 0 ${W} ${H}`} className="bubble-chart" role="img" aria-label="Companies sized by emails sent">
+        {placed.map((p, i) => (
+          <g
+            key={p.row.companyName}
+            className="bubble"
+            onClick={() => onOpen(p.row.companyName)}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") onOpen(p.row.companyName);
+            }}
+          >
+            <title>
+              {`${p.row.companyName} · ${p.row.sent} sent · ${p.row.peopleContacted} people${p.row.lastSentAt ? ` · last ${formatActivityAt(p.row.lastSentAt)}` : ""}`}
+            </title>
+            <circle cx={p.x} cy={p.y} r={p.r} fill={BUBBLE_PALETTE[i % BUBBLE_PALETTE.length]} />
+            {p.r >= 30 ? (
+              <>
+                <text className="bubble-name" x={p.x} y={p.y - 2} textAnchor="middle">
+                  {p.row.companyName.length > 13 ? `${p.row.companyName.slice(0, 12)}…` : p.row.companyName}
+                </text>
+                <text className="bubble-count" x={p.x} y={p.y + 13} textAnchor="middle">
+                  {p.row.sent}
+                </text>
+              </>
+            ) : p.r >= 21 ? (
+              <text className="bubble-name" x={p.x} y={p.y + 4} textAnchor="middle">
+                {p.row.companyName.slice(0, Math.max(3, Math.floor(p.r / 4.2)))}
+              </text>
+            ) : null}
+          </g>
+        ))}
+      </svg>
+    </div>
+  );
+}
+
 /** Radial streak dial — current run vs personal best (not a bar chart). */
 function StreakRingGraphic({
   current,
@@ -4938,10 +5171,10 @@ function App() {
                       <span><i className="legend-company" /> Companies reached</span>
                     </div>
                     <div className="trend-bars trend-bars-triple" aria-label="Companies scheduled, emails found, and companies reached per day">
-                      {analytics.daily.map((day) => {
+                      {analytics.daily.slice(-14).map((day) => {
                         const max = Math.max(
                           1,
-                          ...analytics.daily.map((d) =>
+                          ...analytics.daily.slice(-14).map((d) =>
                             Math.max(d.scheduledCompanies, d.discovered, d.companiesReached),
                           ),
                         );
@@ -4988,48 +5221,37 @@ function App() {
                   </section>
                 </div>
 
+                <section className="panel analytics-card garden-card">
+                  <div className="setup-section-head">
+                    <div>
+                      <p className="eyebrow">Garden</p>
+                      <h2>Contribution garden</h2>
+                      <p className="hint">
+                        Six months, one plot per day — greener with every email sent, a blossom when the daily goal was met.
+                      </p>
+                    </div>
+                  </div>
+                  <ContributionGarden daily={analytics.daily} goal={analytics.goalProgress.goal} />
+                </section>
+
                 <section className="panel analytics-card companies-card">
                   <div className="setup-section-head">
                     <div>
                       <p className="eyebrow">Map</p>
                       <h2>Companies you&apos;ve reached</h2>
-                      <p className="hint">Click a company to open it in History.</p>
+                      <p className="hint">Bubble size = emails actually sent. Click one to open it in History.</p>
                     </div>
                   </div>
                   {analytics.companies.filter((row) => row.sent > 0).length > 0 ? (
                     <>
-                      <div className="company-bars" aria-label="Sends by company">
-                        {(() => {
-                          const sentRows = analytics.companies.filter((row) => row.sent > 0).slice(0, 10);
-                          const maxSent = Math.max(1, ...sentRows.map((row) => row.sent));
-                          return sentRows.map((row) => (
-                            <button
-                              type="button"
-                              className="company-bar-row"
-                              key={row.companyName}
-                              onClick={() => {
-                                setTab("history");
-                                setHistoryQuery("");
-                                setExpandedCompanies(new Set([row.companyName]));
-                              }}
-                            >
-                              <span className="company-bar-label">
-                                <strong>{row.companyName}</strong>
-                                <small>
-                                  {row.peopleContacted} people · {row.sent} sent
-                                  {row.lastSentAt ? ` · ${formatActivityAt(row.lastSentAt)}` : ""}
-                                </small>
-                              </span>
-                              <span className="company-bar-track">
-                                <span
-                                  className="company-bar-fill"
-                                  style={{ width: `${Math.max(8, Math.round((row.sent / maxSent) * 100))}%` }}
-                                />
-                              </span>
-                            </button>
-                          ));
-                        })()}
-                      </div>
+                      <CompanyBubbles
+                        companies={analytics.companies}
+                        onOpen={(companyName) => {
+                          setTab("history");
+                          setHistoryQuery("");
+                          setExpandedCompanies(new Set([companyName]));
+                        }}
+                      />
                       <div className="table-wrap analytics-company-table">
                         <table>
                           <thead>
@@ -5093,17 +5315,12 @@ function App() {
                 <div className="stat-row fun-stats fun-stats-bright">
                   <div className="stat accent"><strong>{formatCompact(analytics.usage.jobrightLookups)}</strong><span>Jobright lookups</span></div>
                   <div className="stat"><strong>{analytics.usage.jobrightEmailsFound}</strong><span>Emails via Jobright</span></div>
-                  <div className="stat"><strong>{analytics.usage.salesqlEmailsFound}</strong><span>Emails via SalesQL</span></div>
                   <div className="stat"><strong>{formatCompact(analytics.usage.geminiCalls)}</strong><span>Gemini calls{analytics.usage.geminiCallsEstimated ? "*" : ""}</span></div>
                   <div className="stat"><strong>{formatCompact(analytics.usage.charactersGenerated)}</strong><span>Chars generated</span></div>
                   <div className="stat"><strong>{analytics.usage.linkedInCaptureSaves}</strong><span>LinkedIn captures</span></div>
                   <div className="stat"><strong>{analytics.usage.profilesSaved}</strong><span>Profiles saved</span></div>
-                  <div className="stat"><strong>{analytics.usage.resumesUploaded}</strong><span>Resumes</span></div>
-                  <div className="stat"><strong>{analytics.usage.emailSamples}</strong><span>Voice samples</span></div>
                   <div className="stat"><strong>{analytics.usage.activeDays}</strong><span>Active send days</span></div>
                   <div className="stat"><strong>{analytics.usage.avgSendsPerActiveDay}</strong><span>Avg sends / day</span></div>
-                  <div className="stat"><strong>{analytics.goalProgress.sendStreak}</strong><span>Current streak</span></div>
-                  <div className="stat"><strong>{analytics.goalProgress.longestSendStreak}</strong><span>Best streak</span></div>
                 </div>
                 {analytics.usage.geminiCallsEstimated && (
                   <p className="hint">* Gemini calls estimated from older saved drafts before live tracking.</p>
@@ -5115,28 +5332,21 @@ function App() {
                       <div>
                         <p className="eyebrow">Rhythm</p>
                         <h2>When you schedule</h2>
-                        <p className="hint">Hour of day you clicked Schedule.</p>
+                        <p className="hint">Hour of day you clicked Schedule — and your weekday of choice.</p>
                       </div>
                     </div>
                     <HourlySendsChart hourly={analytics.hourly} />
+                    <WeekdayRhythm daily={analytics.daily} />
                   </section>
 
                   <section className="panel analytics-card mix-card">
                     <div className="setup-section-head">
                       <div>
                         <p className="eyebrow">Mix</p>
-                        <h2>Batch &amp; queue</h2>
+                        <h2>Send queue</h2>
                       </div>
                     </div>
                     <div className="donut-row">
-                      <DonutChart
-                        title="Active batch"
-                        slices={[
-                          { label: "Ready", value: analytics.activeBatch.readyToSend, color: "#3f8f4a" },
-                          { label: "Looking up", value: analytics.activeBatch.pendingDiscovery, color: "#3d7ab5" },
-                          { label: "Not found", value: analytics.activeBatch.notFound, color: "#c4785a" },
-                        ]}
-                      />
                       <DonutChart
                         title="Send queue"
                         slices={[
