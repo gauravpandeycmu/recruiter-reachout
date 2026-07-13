@@ -47,6 +47,22 @@ describe("bounce parsing", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("records soft bounces without creating a suppression entry", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-soft-bounce-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    const parsed = parseBounceMessage("Temporary failure for soft@example.com 4.2.2 mailbox full");
+    const event = applyBounce(store, parsed, "soft-1");
+
+    expect(event.kind).toBe("soft");
+    expect(event.suppressionCreated).toBe(false);
+    expect(store.listSuppressions()).toHaveLength(0);
+    expect(store.listBounces()).toHaveLength(1);
+    expect(store.listEvents().some((item) => item.type === "bounce")).toBe(true);
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("extracts text from Gmail payload bodies", () => {
     const text = Buffer.from("Hard bounce for jane@example.com").toString("base64url");
     expect(parseGmailMessageText({ payload: { body: { data: text } } })).toContain("jane@example.com");

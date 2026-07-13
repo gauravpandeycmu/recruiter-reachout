@@ -7,6 +7,7 @@ import {
   resumeTint,
   stripTestModePrefix,
   summarizeUpcomingSends,
+  filterScheduledTabItems,
 } from "./sendHelpers.js";
 
 function upcoming(overrides: Partial<UpcomingSendView> & Pick<UpcomingSendView, "queueItemId" | "candidateId" | "fullName" | "scheduledFor">): UpcomingSendView {
@@ -201,5 +202,35 @@ describe("stripTestModePrefix", () => {
     expect(stripTestModePrefix("[TEST MODE] Hello Jane")).toBe("Hello Jane");
     expect(stripTestModePrefix("[test mode] Hello Jane")).toBe("Hello Jane");
     expect(stripTestModePrefix("Hello Jane")).toBe("Hello Jane");
+  });
+});
+
+describe("filterScheduledTabItems", () => {
+  it("hides send_now jobs from the Scheduled tab", () => {
+    const items = [
+      upcoming({
+        queueItemId: "q1",
+        candidateId: "c1",
+        fullName: "Later",
+        scheduledFor: "2026-07-11T12:00:00.000Z",
+        jobMode: "schedule",
+      }),
+      upcoming({
+        queueItemId: "q2",
+        candidateId: "c2",
+        fullName: "Now",
+        scheduledFor: "2026-07-11T12:01:00.000Z",
+        jobMode: "send_now",
+      }),
+      upcoming({
+        queueItemId: "q3",
+        candidateId: "c3",
+        fullName: "Also later",
+        scheduledFor: "2026-07-11T13:00:00.000Z",
+      }),
+    ];
+    const filtered = filterScheduledTabItems(items);
+    expect(filtered.map((item) => item.queueItemId)).toEqual(["q1", "q3"]);
+    expect(groupUpcomingByCompany(filtered).map(([company]) => company)).toEqual(["Acme"]);
   });
 });

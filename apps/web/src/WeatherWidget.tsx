@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { getWeather, type WeatherCondition, WeatherIpLocationUnavailableError } from "./api";
-import { WeatherKindIcon } from "./WeatherKindIcon";
+import { WeatherKindIcon, weatherKindLabel } from "./WeatherKindIcon";
 import {
   formatWeatherTemp,
   type GroveWeatherKind,
@@ -35,6 +35,7 @@ export function PreciseLocationSetup() {
   const [place, setPlace] = useState<string | null>(null);
   const [tempC, setTempC] = useState<number | null>(null);
   const [kind, setKind] = useState<GroveWeatherKind>("sunny");
+  const [isDay, setIsDay] = useState(true);
   const [source, setSource] = useState<"ip" | "precise" | "city" | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
 
@@ -52,6 +53,7 @@ export function PreciseLocationSetup() {
         setPlace(shortLocationLabel(snapshot.locationLabel));
         setTempC(snapshot.temperatureC);
         setKind(mapCondition(snapshot.condition));
+        setIsDay(snapshot.isDay);
         setSource(snapshot.locationSource);
         setState("ready");
       } catch (error) {
@@ -155,10 +157,16 @@ export function PreciseLocationSetup() {
       {state === "loading" && <p className="hint">Checking weather…</p>}
       {state === "ready" && tempC != null && (
         <p className="ok grove-weather-preview">
-          <WeatherKindIcon kind={kind} className="grove-weather-preview-icon" title={kind} />
+          <WeatherKindIcon
+            kind={kind}
+            isDay={isDay}
+            className="grove-weather-preview-icon"
+            title={weatherKindLabel(kind, isDay)}
+          />
           <span>
             {formatWeatherTemp(tempC, tempUnit)}
             {place ? ` · ${place}` : ""}
+            {` · ${weatherKindLabel(kind, isDay)}`}
             {source === "city" ? " · your city" : " · auto"}
           </span>
         </p>

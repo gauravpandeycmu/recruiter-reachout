@@ -1,22 +1,23 @@
-import { useEffect, useMemo, useState } from "react";
-import { GROVE_TREE_GUIDE } from "./groveTreeGuide";
+import { useEffect, useMemo, useRef, useState, memo, type CSSProperties } from "react";
+import { buildExpandedVisible } from "./groveFieldGuideLayout";
+import { GROVE_TREE_GUIDE, type GroveTreeGuideEntry } from "./groveTreeGuide";
 
-const COLLAPSED_COUNT = 8;
+type Grove3DModule = typeof import("./StreakGrove3D");
 
-function GroveTreeThumb({ speciesId, unlocked }: { speciesId: string; unlocked: boolean }) {
+let grove3dModulePromise: Promise<Grove3DModule> | null = null;
+
+function loadGrove3D(): Promise<Grove3DModule> {
+  if (!grove3dModulePromise) grove3dModulePromise = import("./StreakGrove3D");
+  return grove3dModulePromise;
+}
+
+function GroveTreeThumb({ speciesId, live }: { speciesId: string; live: boolean }) {
   const [src, setSrc] = useState<string | null>(null);
-  const [live, setLive] = useState(false);
-  const [LiveThumb, setLiveThumb] = useState<null | typeof import("./StreakGrove3D").LiveSpeciesThumb>(
-    null,
-  );
+  const [LiveThumb, setLiveThumb] = useState<null | Grove3DModule["LiveSpeciesThumb"]>(null);
 
   useEffect(() => {
-    if (!unlocked) {
-      setSrc(null);
-      return;
-    }
     let cancelled = false;
-    void import("./StreakGrove3D").then((mod) => {
+    void loadGrove3D().then((mod) => {
       if (cancelled) return;
       setLiveThumb(() => mod.LiveSpeciesThumb);
       const url = mod.renderSpeciesThumbnail(speciesId);
@@ -25,20 +26,10 @@ function GroveTreeThumb({ speciesId, unlocked }: { speciesId: string; unlocked: 
     return () => {
       cancelled = true;
     };
-  }, [speciesId, unlocked]);
-
-  if (!unlocked) {
-    return <div className="grove-guide-thumb is-locked" aria-hidden="true" />;
-  }
+  }, [speciesId]);
 
   return (
-    <div
-      className="grove-guide-thumb-wrap"
-      onMouseEnter={() => setLive(true)}
-      onMouseLeave={() => setLive(false)}
-      onFocus={() => setLive(true)}
-      onBlur={() => setLive(false)}
-    >
+    <div className="grove-guide-thumb-wrap">
       {src ? (
         <img
           className={`grove-guide-thumb${live ? " is-idle-hidden" : ""}`}
@@ -55,7 +46,41 @@ function GroveTreeThumb({ speciesId, unlocked }: { speciesId: string; unlocked: 
   );
 }
 
-export function GroveTreeFieldGuide({
+function GroveGuideCard({
+  tree,
+  unlocked,
+  revealIndex = 0,
+}: {
+  tree: GroveTreeGuideEntry;
+  unlocked: boolean;
+  /** Stagger index for expand extras (0 = no delay). */
+  revealIndex?: number;
+}) {
+  const [live, setLive] = useState(false);
+
+  return (
+    <article
+      className={`grove-guide-card${unlocked ? " unlocked" : " locked"}`}
+      style={revealIndex > 0 ? ({ "--guide-reveal-i": revealIndex } as CSSProperties) : undefined}
+      aria-label={unlocked ? `${tree.name}: unlocked` : "Locked tree: not grown yet"}
+      onMouseEnter={() => setLive(true)}
+      onMouseLeave={() => setLive(false)}
+      onFocus={() => setLive(true)}
+      onBlur={() => setLive(false)}
+    >
+      <GroveTreeThumb speciesId={tree.id} live={live} />
+      <div className="grove-guide-copy">
+        <div className="grove-guide-title-row">
+          <h3>{unlocked ? tree.name : "???"}</h3>
+          <span className="grove-guide-state">{unlocked ? "Grown" : "Locked"}</span>
+        </div>
+        <p>{unlocked ? tree.fact : "Keep the streak alive — this one’s still hiding in the fog."}</p>
+      </div>
+    </article>
+  );
+}
+
+export const GroveTreeFieldGuide = memo(function GroveTreeFieldGuide({
   unlocked,
   bestUnlockDays = 0,
   testMode = false,
@@ -67,6 +92,7 @@ export function GroveTreeFieldGuide({
   testMode?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const headRef = useRef<HTMLDivElement | null>(null);
   const total = GROVE_TREE_GUIDE.length;
 
   const effectiveUnlocked = useMemo(() => {
@@ -74,7 +100,6 @@ export function GroveTreeFieldGuide({
     return new Set(GROVE_TREE_GUIDE.map((tree) => tree.id));
   }, [testMode, unlocked]);
 
-  const unlockedCount = GROVE_TREE_GUIDE.filter((tree) => effectiveUnlocked.has(tree.id)).length;
   const realUnlockedCount = GROVE_TREE_GUIDE.filter((tree) => unlocked.has(tree.id)).length;
 
   const sorted = useMemo(() => {
@@ -83,53 +108,78 @@ export function GroveTreeFieldGuide({
     return [...grown, ...locked];
   }, [effectiveUnlocked]);
 
+  const { head, rest } = useMemo(
+    () => buildExpandedVisible(sorted, effectiveUnlocked),
+    [sorted, effectiveUnlocked],
+  );
+
   const showAll = testMode || expanded;
-  const visible = showAll ? sorted : sorted.slice(0, COLLAPSED_COUNT);
-  const hiddenCount = testMode ? 0 : Math.max(0, sorted.length - COLLAPSED_COUNT);
+  const extras = testMode ? sorted : rest;
+  const headCards = testMode ? [] : head;
+  const hiddenCount = testMode ? 0 : rest.length;
+  const showExpandToggle = !testMode && (hiddenCount > 0 || expanded);
 
   return (
-    <section className="analytics-section grove-guide-section">
-      <div className="analytics-section-head">
+    <section className={`analytics-section grove-guide-section${showAll ? " is-expanded" : ""}`}>
+      <div ref={headRef} className="analytics-section-head grove-guide-head">
         <div>
           <p className="eyebrow">Field guide</p>
           <h2>Trees you can grow</h2>
           <p className="hint">
             {testMode
               ? `TEST MODE — previewing all ${total} species (not saved to your collection; real progress is ${realUnlockedCount} of ${total}).`
-              : `Each streak day plants a tree — which species is a roll of the dice (repeats welcome). Collect the full catalog by day 100. Unlocks follow your best streak${
-                  bestUnlockDays > 0
-                    ? ` (best ${bestUnlockDays} day${bestUnlockDays === 1 ? "" : "s"})`
-                    : ""
-                } and stay collected even if the live grove resets. ${unlockedCount} of ${total} collected.`}
+              : `Each streak day plants one tree in the grove. All ${total} unlock by day 100 of your best streak.`}
           </p>
         </div>
       </div>
-      <div className="grove-guide-grid">
-        {visible.map((tree) => {
-          const isUnlocked = effectiveUnlocked.has(tree.id);
-          return (
-            <article
-              key={tree.id}
-              className={`grove-guide-card${isUnlocked ? " unlocked" : " locked"}`}
-              aria-label={isUnlocked ? `${tree.name}: unlocked` : `${tree.name}: not grown yet`}
-            >
-              <GroveTreeThumb speciesId={tree.id} unlocked={isUnlocked} />
-              <div className="grove-guide-copy">
-                <div className="grove-guide-title-row">
-                  <h3>{isUnlocked ? tree.name : "???"}</h3>
-                  <span className="grove-guide-state">{isUnlocked ? "Grown" : "Locked"}</span>
+
+      {testMode ? (
+        <div className="grove-guide-grid">
+          {sorted.map((tree) => (
+            <GroveGuideCard key={tree.id} tree={tree} unlocked={effectiveUnlocked.has(tree.id)} />
+          ))}
+        </div>
+      ) : (
+        <>
+          <div className="grove-guide-grid">
+            {headCards.map((tree) => (
+              <GroveGuideCard key={tree.id} tree={tree} unlocked={effectiveUnlocked.has(tree.id)} />
+            ))}
+          </div>
+          {extras.length > 0 && (
+            <div className={`grove-guide-extras${expanded ? " is-open" : ""}`} aria-hidden={!expanded}>
+              <div className="grove-guide-extras-inner">
+                <div className="grove-guide-grid grove-guide-grid-extras">
+                  {extras.map((tree, index) => (
+                    <GroveGuideCard
+                      key={tree.id}
+                      tree={tree}
+                      unlocked={effectiveUnlocked.has(tree.id)}
+                      revealIndex={index + 1}
+                    />
+                  ))}
                 </div>
-                <p>{isUnlocked ? tree.fact : "Keep the streak alive — this one’s still hiding in the fog."}</p>
               </div>
-            </article>
-          );
-        })}
-      </div>
-      {hiddenCount > 0 && (
+            </div>
+          )}
+        </>
+      )}
+
+      {showExpandToggle && (
         <button
           type="button"
           className={`grove-guide-expand${expanded ? " is-open" : ""}`}
-          onClick={() => setExpanded((open) => !open)}
+          onClick={() => {
+            if (expanded) {
+              setExpanded(false);
+              // Collapse first, then pin the field-guide title to the top of the viewport.
+              window.setTimeout(() => {
+                headRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+              }, 80);
+            } else {
+              setExpanded(true);
+            }
+          }}
           aria-expanded={expanded}
         >
           <span>{expanded ? "Show fewer trees" : `Show ${hiddenCount} more trees`}</span>
@@ -140,4 +190,4 @@ export function GroveTreeFieldGuide({
       )}
     </section>
   );
-}
+});

@@ -1,6 +1,14 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { memo, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { getWeather, type WeatherCondition } from "./api";
+import {
+  buildPlantingSequence,
+  groveSpeciesCount as catalogSpeciesCount,
+  mulberry32,
+  plantedSpeciesForDays,
+  SPECIES_POOL,
+  type GroveSpecies,
+} from "./grovePlanting";
 import { StreakGrove } from "./StreakGrove";
 import {
   formatWeatherTemp,
@@ -8,7 +16,7 @@ import {
   shortLocationLabel,
   type TempUnit,
 } from "./weatherLocation";
-import { WeatherKindIcon } from "./WeatherKindIcon";
+import { WeatherKindIcon, weatherKindLabel } from "./WeatherKindIcon";
 
 /**
  * Real-time WebGL Streak Grove (see apps/web/GROVE3D.md).
@@ -1626,122 +1634,9 @@ function buildDock(): THREE.Group {
 
 /* ---------------- trees (streak grove) ---------------- */
 
-type Species =
-  | "oak"
-  | "pine"
-  | "birch"
-  | "maple"
-  | "poplar"
-  | "aspen"
-  | "apple"
-  | "dogwood"
-  | "redmaple"
-  | "magnolia"
-  | "plum"
-  | "ginkgo"
-  | "acacia"
-  | "palm"
-  | "baobab"
-  | "bamboo"
-  | "jacaranda"
-  | "araucaria"
-  | "redbud"
-  | "flametree"
-  | "crystal"
-  | "candyfloss"
-  | "stormtree"
-  | "heartwood"
-  | "auroratree"
-  | "spiraltree"
-  | "ghosttree"
-  | "bubbletree"
-  | "moontree"
-  | "fungicap"
-  | "voidgate"
-  | "soulbloom";
-
-function mulberry32(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
+type Species = GroveSpecies;
 
 type Slot3D = { x: number; z: number; species: Species; seed: number };
-
-const SPECIES_POOL: Species[] = [
-  "oak",
-  "pine",
-  "birch",
-  "maple",
-  "poplar",
-  "aspen",
-  "apple",
-  "dogwood",
-  "redmaple",
-  "magnolia",
-  "plum",
-  "ginkgo",
-  "acacia",
-  "palm",
-  "baobab",
-  "bamboo",
-  "jacaranda",
-  "araucaria",
-  "redbud",
-  "flametree",
-  "crystal",
-  "candyfloss",
-  "stormtree",
-  "heartwood",
-  "auroratree",
-  "spiraltree",
-  "ghosttree",
-  "bubbletree",
-  "moontree",
-  "fungicap",
-  "voidgate",
-  "soulbloom",
-];
-
-/** Catalog completes by this streak day; until then plantings look random (dupes ok). */
-const SPECIES_UNLOCK_BY_DAY = 100;
-
-/**
- * Fixed seeded planting order for every grove slot.
- * Days 1–100: ~3 of each species, shuffled — feels random, guarantees the full
- * catalog by day 100. Past 100: more seeded random draws (dupes welcome).
- */
-function buildPlantingSequence(slotCount: number): Species[] {
-  const rand = mulberry32(0x67a7e001);
-  const pool = SPECIES_POOL;
-  const bag: Species[] = [];
-  for (const species of pool) {
-    bag.push(species, species, species);
-  }
-  while (bag.length < SPECIES_UNLOCK_BY_DAY) {
-    bag.push(pool[Math.floor(rand() * pool.length)]!);
-  }
-  for (let i = bag.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(rand() * (i + 1));
-    const tmp = bag[i]!;
-    bag[i] = bag[j]!;
-    bag[j] = tmp;
-  }
-  const sequence: Species[] = [];
-  for (let i = 0; i < slotCount; i += 1) {
-    if (i < SPECIES_UNLOCK_BY_DAY) {
-      sequence.push(bag[i]!);
-    } else {
-      sequence.push(pool[Math.floor(rand() * pool.length)]!);
-    }
-  }
-  return sequence;
-}
 
 function buildSlots3D(): Slot3D[] {
   const slots: Slot3D[] = [];
@@ -1789,16 +1684,14 @@ const MAX_TREES_3D = SLOTS_3D.length;
 
 /** Species planted for a streak length (uses best/current day count). */
 export function plantedSpeciesForStreak(streak: number): Set<string> {
-  const count = Math.min(Math.max(0, Math.floor(streak)), SLOTS_3D.length);
-  const found = new Set<string>();
-  for (let i = 0; i < count; i += 1) {
-    found.add(SLOTS_3D[i]!.species);
-  }
-  return found;
+  return plantedSpeciesForDays(
+    streak,
+    SLOTS_3D.map((slot) => slot.species),
+  );
 }
 
 export function groveSpeciesCount(): number {
-  return SPECIES_POOL.length;
+  return catalogSpeciesCount();
 }
 
 let thumbRenderer: THREE.WebGLRenderer | null = null;
@@ -1973,7 +1866,32 @@ export function renderSpeciesThumbnail(speciesId: string): string {
   return url;
 }
 
-/** Live WebGL tree for field-guide hover — rotates the real mesh, not a flat image. */
+/**
+ * Single shared live-thumb WebGL context. Creating a new renderer per hover
+ * exhausts the browser’s WebGL context limit and kills the main grove canvas.
+ */
+let liveThumbRenderer: THREE.WebGLRenderer | null = null;
+let liveThumbOwner: symbol | null = null;
+
+function getLiveThumbRenderer(): THREE.WebGLRenderer {
+  if (!liveThumbRenderer) {
+    liveThumbRenderer = new THREE.WebGLRenderer({
+      antialias: true,
+      alpha: true,
+      preserveDrawingBuffer: true,
+      powerPreference: "low-power",
+    });
+    liveThumbRenderer.outputColorSpace = THREE.SRGBColorSpace;
+    liveThumbRenderer.setClearColor(0x000000, 0);
+    liveThumbRenderer.setPixelRatio(1);
+    liveThumbRenderer.setSize(112, 128, false);
+    // Keep the GL canvas off-DOM; we blit frames into the card’s 2D canvas.
+    liveThumbRenderer.domElement.style.display = "none";
+  }
+  return liveThumbRenderer;
+}
+
+/** Live field-guide hover preview — shared GL context, blitted to a 2D canvas. */
 export function LiveSpeciesThumb({
   speciesId,
   className,
@@ -1984,27 +1902,35 @@ export function LiveSpeciesThumb({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || !SPECIES_POOL.includes(speciesId as Species)) return;
+    const display = canvasRef.current;
+    if (!display || !SPECIES_POOL.includes(speciesId as Species)) return;
+    const ctx = display.getContext("2d");
+    if (!ctx) return;
+
+    const owner = Symbol("live-thumb");
+    liveThumbOwner = owner;
 
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const renderer = new THREE.WebGLRenderer({
-      canvas,
-      antialias: true,
-      alpha: true,
-      powerPreference: "low-power",
-    });
-    renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.setClearColor(0x000000, 0);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+    const renderer = getLiveThumbRenderer();
     renderer.setSize(112, 128, false);
 
     const { scene, camera, tree } = makeThumbScene(speciesId as Species);
     let raf = 0;
     let last = performance.now();
     const start = last;
+    let running = true;
 
     const tick = (now: number) => {
+      if (!running || liveThumbOwner !== owner) return;
+      if (document.hidden) {
+        raf = 0;
+        return;
+      }
+      // Cap live thumbs ~30fps — plenty smooth, half the GPU blit cost.
+      if (now - last < 32) {
+        raf = requestAnimationFrame(tick);
+        return;
+      }
       const delta = Math.min(0.05, (now - last) / 1000);
       last = now;
       const elapsed = (now - start) / 1000;
@@ -2015,15 +1941,28 @@ export function LiveSpeciesThumb({
         tree.rotation.y = 0.32;
       }
       renderer.render(scene, camera);
+      ctx.clearRect(0, 0, 112, 128);
+      ctx.drawImage(renderer.domElement, 0, 0, 112, 128);
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
 
+    const onVisibility = () => {
+      if (document.hidden || liveThumbOwner !== owner || !running) return;
+      if (!raf) {
+        last = performance.now();
+        raf = requestAnimationFrame(tick);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
     return () => {
+      running = false;
       cancelAnimationFrame(raf);
+      document.removeEventListener("visibilitychange", onVisibility);
+      if (liveThumbOwner === owner) liveThumbOwner = null;
       scene.remove(tree);
       disposeTreeObject(tree);
-      renderer.dispose();
     };
   }, [speciesId]);
 
@@ -3455,6 +3394,11 @@ function buildTreeMesh(species: Species, seed: number): THREE.Group {
     }
   }
   g.rotation.y = rand() * Math.PI * 2;
+  let hasAnimatedParts = false;
+  g.traverse((obj) => {
+    if (obj.userData?.animate) hasAnimatedParts = true;
+  });
+  g.userData.hasAnimatedParts = hasAnimatedParts;
   return g;
 }
 
@@ -3468,6 +3412,7 @@ function buildTreeForAge(species: Species, seed: number, age: number): THREE.Gro
     cone.position.y = 0.32;
     cone.castShadow = true;
     g.add(cone);
+    g.userData.hasAnimatedParts = false;
     return g;
   }
   if (age <= 3) {
@@ -3476,6 +3421,7 @@ function buildTreeForAge(species: Species, seed: number, age: number): THREE.Gro
     const blob = makeBlob(0.58, species, seed + 9);
     blob.position.y = 1.25;
     g.add(blob);
+    g.userData.hasAnimatedParts = false;
     return g;
   }
   return buildTreeMesh(species, seed);
@@ -3654,7 +3600,7 @@ const TIME_PRESET_LABELS: Record<TimeOfDayPreset, string> = {
 
 const WEATHER_PRESET_LABELS: Record<WeatherKind | "auto", string> = {
   auto: "Auto",
-  sunny: "Sunny",
+  sunny: "Clear",
   cloudy: "Cloudy",
   rain: "Rain",
   snow: "Snow",
@@ -3662,7 +3608,7 @@ const WEATHER_PRESET_LABELS: Record<WeatherKind | "auto", string> = {
 
 const STREAK_PRESETS = [0, 1, 3, 7, 14, 30, 60, 100] as const;
 
-export function StreakGrove3D({
+function StreakGrove3DComponent({
   active = true,
   weatherCity = "",
   tempUnit: tempUnitProp,
@@ -3712,11 +3658,18 @@ export function StreakGrove3D({
   const [autoWeather, setAutoWeather] = useState<WeatherKind>("sunny");
   const [weatherPlace, setWeatherPlace] = useState<string | null>(null);
   const [weatherTempC, setWeatherTempC] = useState<number | null>(null);
+  const [weatherIsDay, setWeatherIsDay] = useState(true);
   const tempUnit = tempUnitProp ?? readTempUnit();
   const activeWeather: WeatherKind =
     testMode && weatherOverride !== "auto" ? weatherOverride : autoWeather;
   const weatherRef = useRef<WeatherKind>(activeWeather);
   weatherRef.current = activeWeather;
+
+  // Badge icon: clear + night → moon. Test-mode time presets override the API isDay flag.
+  const badgeIsDay =
+    testMode && timePreset !== "auto"
+      ? timePreset === "dawn" || timePreset === "day" || timePreset === "golden"
+      : weatherIsDay;
 
   // Drop preview overrides when TEST MODE turns off
   useEffect(() => {
@@ -3737,6 +3690,7 @@ export function StreakGrove3D({
         setAutoWeather(weatherFromApiCondition(snapshot.condition));
         setWeatherPlace(shortLocationLabel(snapshot.locationLabel));
         setWeatherTempC(snapshot.temperatureC);
+        setWeatherIsDay(snapshot.isDay);
       } catch (error) {
         console.warn("[StreakGrove3D] weather refresh failed", error);
       }
@@ -3772,7 +3726,8 @@ export function StreakGrove3D({
       const dpr = window.devicePixelRatio || 1;
       renderer = new THREE.WebGLRenderer({
         antialias: dpr < 1.5,
-        powerPreference: "high-performance",
+        // Default preference — avoid forcing the discrete GPU when idle/hybrid.
+        powerPreference: "default",
         // preserveDrawingBuffer costs VRAM bandwidth — keep off
         preserveDrawingBuffer: false,
       });
@@ -4203,8 +4158,9 @@ export function StreakGrove3D({
     const clock = new THREE.Clock();
     let elapsed = 0;
     let frame = 0;
+    let inView = true;
     const loop = () => {
-      if (!activeRef.current || document.hidden) return;
+      if (!activeRef.current || document.hidden || !inView) return;
       const delta = clock.getDelta();
       elapsed += delta;
       frame += 1;
@@ -4250,7 +4206,9 @@ export function StreakGrove3D({
           }
           if (!reducedMotion) {
             t.group.rotation.z = Math.sin(elapsed * 0.85 + t.phase) * 0.014;
-            animateTreeParts(t.group, elapsed, delta);
+            if (t.group.userData.hasAnimatedParts) {
+              animateTreeParts(t.group, elapsed, delta);
+            }
           }
         }
         const pulse = world.goalMet ? 1 + Math.sin(elapsed * 2.2) * 0.03 : 1;
@@ -4259,12 +4217,12 @@ export function StreakGrove3D({
       }
 
       // Weather particles
-      if (rain.obj.visible && !reducedMotion) {
+      if (rain.obj.visible && !reducedMotion && frame % 2 === 0) {
         const arr = rain.obj.geometry.attributes.position as THREE.BufferAttribute;
         for (let i = 0; i < rain.count; i += 1) {
-          let y = arr.getY(i * 2) - delta * 34;
+          let y = arr.getY(i * 2) - delta * 34 * 2;
           if (y < 0) y += 45;
-          const x = arr.getX(i * 2) + delta * 3.5;
+          const x = arr.getX(i * 2) + delta * 3.5 * 2;
           const xw = x > 70 ? x - 140 : x;
           arr.setXYZ(i * 2, xw, y, arr.getZ(i * 2));
           arr.setXYZ(i * 2 + 1, xw + 0.12, y + 0.95, arr.getZ(i * 2 + 1));
@@ -4304,13 +4262,25 @@ export function StreakGrove3D({
     };
 
     const syncLoop = () => {
-      if (activeRef.current && !document.hidden) {
+      if (activeRef.current && !document.hidden && inView) {
         clock.getDelta();
         renderer.setAnimationLoop(loop);
       } else {
         renderer.setAnimationLoop(null);
       }
     };
+    const io =
+      typeof IntersectionObserver !== "undefined"
+        ? new IntersectionObserver(
+            (entries) => {
+              const entry = entries[0];
+              inView = Boolean(entry?.isIntersecting);
+              syncLoop();
+            },
+            { threshold: 0.02, rootMargin: "48px" },
+          )
+        : null;
+    io?.observe(mount);
     syncLoop();
     try {
       if (activeRef.current) loop();
@@ -4331,8 +4301,14 @@ export function StreakGrove3D({
     document.addEventListener("visibilitychange", onVisibility);
 
     // Re-resolve day/night each minute so dawn / dusk drift in while the tab is open
+    let lastDayNightKey = "";
     const dayNightTimer = window.setInterval(() => {
-      if (activeRef.current && !document.hidden) applyWeather(weatherRef.current);
+      if (!activeRef.current || document.hidden || !inView) return;
+      const { nightT } = resolveWeatherPreset(weatherRef.current);
+      const key = `${weatherRef.current}|${Math.round(nightT * 20)}`;
+      if (key === lastDayNightKey) return;
+      lastDayNightKey = key;
+      applyWeather(weatherRef.current);
     }, 60_000);
 
     groveControlsRef.current = {
@@ -4346,6 +4322,7 @@ export function StreakGrove3D({
       worldRef.current = null;
       window.clearInterval(dayNightTimer);
       document.removeEventListener("visibilitychange", onVisibility);
+      io?.disconnect();
       ro.disconnect();
       renderer.setAnimationLoop(null);
       scene.traverse((obj) => {
@@ -4505,13 +4482,20 @@ export function StreakGrove3D({
       >
         {weatherLabel && (
           <div className="grove-weather-badge" aria-live="polite">
-            <WeatherKindIcon kind={activeWeather} className="grove-weather-icon" title={activeWeather} />
+            <WeatherKindIcon
+              kind={activeWeather}
+              isDay={badgeIsDay}
+              className="grove-weather-icon"
+              title={weatherKindLabel(activeWeather, badgeIsDay)}
+            />
             <div className="grove-weather-copy">
               <strong>{weatherTemp ?? "—"}</strong>
               {weatherPlace && <span>{weatherPlace}</span>}
               {testMode && (weatherOverride !== "auto" || timePreset !== "auto") && (
                 <span className="grove-weather-preview-tag">
-                  {weatherOverride !== "auto" ? weatherOverride : activeWeather}
+                  {weatherOverride !== "auto"
+                    ? WEATHER_PRESET_LABELS[weatherOverride]
+                    : weatherKindLabel(activeWeather, badgeIsDay)}
                   {timePreset !== "auto" ? ` · ${TIME_PRESET_LABELS[timePreset]}` : ""}
                 </span>
               )}
@@ -4578,3 +4562,5 @@ export function StreakGrove3D({
     </div>
   );
 }
+
+export const StreakGrove3D = memo(StreakGrove3DComponent);

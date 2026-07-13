@@ -60,9 +60,28 @@ function ipLocationResponse(overrides: Partial<{ success: boolean; latitude: num
 }
 
 /** Routes a mocked fetch by which provider's URL is being hit, like the real network would. */
-function routedFetchMock(handlers: { forecast?: () => Response; geocode?: () => Response; ipLocation?: () => Response }) {
+function routedFetchMock(
+  handlers: {
+    forecast?: () => Response;
+    geocode?: () => Response;
+    reverse?: () => Response;
+    ipLocation?: () => Response;
+  } = {},
+) {
   return vi.fn().mockImplementation((url: string) => {
     if (url.includes("ipwho.is")) return Promise.resolve((handlers.ipLocation ?? ipLocationResponse)());
+    if (url.includes("nominatim.openstreetmap.org/reverse")) {
+      return Promise.resolve(
+        (handlers.reverse ??
+          (() =>
+            new Response(
+              JSON.stringify({
+                address: { city: "Pittsburgh", state: "Pennsylvania", country: "United States" },
+              }),
+              { status: 200 },
+            )))(),
+      );
+    }
     if (url.includes("geocoding-api")) return Promise.resolve((handlers.geocode ?? forecastResponse)());
     return Promise.resolve((handlers.forecast ?? forecastResponse)());
   });
@@ -81,16 +100,15 @@ describe("getWeather", () => {
     const store = new Store(join(directory, "store.sqlite"));
     await store.load();
 
-    const fetchMock = vi.fn().mockResolvedValue(forecastResponse());
+    const fetchMock = routedFetchMock();
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     const snapshot = await getWeather(store, { latitude: 40.4406, longitude: -79.9959 });
 
     expect(snapshot).toMatchObject({ condition: "sunny", temperatureC: 22.3, isDay: true, locationSource: "precise" });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url] = fetchMock.mock.calls[0] as [string];
-    expect(url).toContain("api.open-meteo.com/v1/forecast");
-    expect(url).toContain("latitude=40.4406");
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("api.open-meteo.com/v1/forecast"))).toBe(true);
+    const forecastCall = fetchMock.mock.calls.find(([url]) => String(url).includes("api.open-meteo.com/v1/forecast"));
+    expect(String(forecastCall?.[0])).toContain("latitude=40.4406");
 
     store.close();
     await rm(directory, { recursive: true, force: true });
@@ -101,13 +119,20 @@ describe("getWeather", () => {
     const store = new Store(join(directory, "store.sqlite"));
     await store.load();
 
-    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(forecastResponse()));
+    const fetchMock = routedFetchMock();
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     const first = await getWeather(store, { latitude: 40.44, longitude: -79.99 });
+    const forecastCallsBefore = fetchMock.mock.calls.filter(([url]) =>
+      String(url).includes("api.open-meteo.com/v1/forecast"),
+    ).length;
     const second = await getWeather(store, { latitude: 40.44, longitude: -79.99 });
+    const forecastCallsAfter = fetchMock.mock.calls.filter(([url]) =>
+      String(url).includes("api.open-meteo.com/v1/forecast"),
+    ).length;
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(forecastCallsBefore).toBe(1);
+    expect(forecastCallsAfter).toBe(1);
     expect(second).toEqual(first);
 
     store.close();
@@ -119,7 +144,7 @@ describe("getWeather", () => {
     const store = new Store(join(directory, "store.sqlite"));
     await store.load();
 
-    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(forecastResponse()));
+    const fetchMock = routedFetchMock();
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     await getWeather(store, { latitude: 40.44, longitude: -79.99 });
@@ -130,7 +155,10 @@ describe("getWeather", () => {
 
     await getWeather(store, { latitude: 40.44, longitude: -79.99 });
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const forecastCalls = fetchMock.mock.calls.filter(([url]) =>
+      String(url).includes("api.open-meteo.com/v1/forecast"),
+    );
+    expect(forecastCalls).toHaveLength(2);
 
     store.close();
     await rm(directory, { recursive: true, force: true });

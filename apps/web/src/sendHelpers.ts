@@ -85,3 +85,8 @@ export function isScheduledItemOverdue(item: UpcomingSendView, nowMs = Date.now(
 export function stripTestModePrefix(subject: string): string {
   return subject.replace(/^\[TEST MODE\]\s*/i, "");
 }
+
+/** Scheduled tab hides send-now jobs (those show under Send progress instead). */
+export function filterScheduledTabItems<T extends { jobMode?: string }>(items: T[]): T[] {
+  return items.filter((item) => item.jobMode !== "send_now");
+}

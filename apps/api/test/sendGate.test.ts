@@ -15,6 +15,7 @@ const content: OutreachContent = {
 function candidate(overrides: Partial<RecruiterCandidate> = {}): RecruiterCandidate {
   return {
     id: "candidate-1",
+    isActive: true,
     fullName: "Jane Doe",
     firstName: "Jane",
     email: "jane.doe@example.com",
@@ -104,5 +105,59 @@ describe("send gate", () => {
       allCandidates: [candidate(), candidate({ id: "candidate-2" })],
       gmailReady: true,
     })).toThrow("Duplicate");
+  });
+
+  it("blocks missing resume, missing email, domain suppression, and LinkedIn duplicates", () => {
+    process.env.PUBLIC_TRACKING_BASE_URL = "https://relay.example.com";
+    expect(() =>
+      assertCanSend({
+        candidate: candidate(),
+        content: { ...content, resumePath: undefined, resumes: undefined },
+        suppressions: [],
+        events: [],
+        allCandidates: [candidate()],
+        gmailReady: true,
+      }),
+    ).toThrow(/resume/i);
+
+    expect(() =>
+      assertCanSend({
+        candidate: candidate({ email: undefined }),
+        content,
+        suppressions: [],
+        events: [],
+        allCandidates: [candidate()],
+        gmailReady: true,
+      }),
+    ).toThrow(/email/i);
+
+    expect(() =>
+      assertCanSend({
+        candidate: candidate(),
+        content,
+        suppressions: [{ id: "d", domain: "example.com", reason: "domain block", createdAt: "now" }],
+        events: [],
+        allCandidates: [candidate()],
+        gmailReady: true,
+      }),
+    ).toThrow("suppressed");
+
+    expect(() =>
+      assertCanSend({
+        candidate: candidate({ linkedinUrl: "https://www.linkedin.com/in/jane" }),
+        content,
+        suppressions: [],
+        events: [],
+        allCandidates: [
+          candidate({ linkedinUrl: "https://www.linkedin.com/in/jane" }),
+          candidate({
+            id: "candidate-2",
+            email: "other@example.com",
+            linkedinUrl: "https://www.linkedin.com/in/jane",
+          }),
+        ],
+        gmailReady: true,
+      }),
+    ).toThrow("Duplicate");
   });
 });

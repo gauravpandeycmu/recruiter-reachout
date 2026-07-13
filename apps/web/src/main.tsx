@@ -67,7 +67,15 @@ import {
   resumeTintIndex,
   stripTestModePrefix,
   summarizeUpcomingSends,
+  filterScheduledTabItems,
 } from "./sendHelpers";
+import { appDataPollKey, workerStatusPollKey } from "./pollKeys";
+import {
+  buildSendProgressRows,
+  compactSendChecklist,
+  localYmd,
+} from "./sendProgress";
+import { streakRingMetrics } from "./streakRing";
 import { PreciseLocationSetup } from "./WeatherWidget";
 import {
   readTempUnit,
@@ -108,6 +116,7 @@ type Tab = "send" | "scheduled" | "setup" | "history" | "analytics";
 const SETTLED_STATUSES = new Set(["sent", "opened", "clicked", "bounced", "do_not_contact"]);
 const DISCOVERY_POLL_MS = 2500;
 const IDLE_POLL_MS = 3000;
+const BACKGROUND_POLL_MS = 8000;
 const FOCUS_REFRESH_DEBOUNCE_MS = 400;
 const RECIPIENT_PAGE_SIZE = 5;
 const HISTORY_PEOPLE_PAGE_SIZE = 12;
@@ -160,13 +169,6 @@ function writeUiPrefs(patch: UiPrefs): void {
   } catch {
     // ignore storage failures
   }
-}
-
-function localYmd(date = new Date()): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
 }
 
 function pct(rate: number): string {
@@ -311,52 +313,7 @@ function formatShortWhen(iso: string): string {
   });
 }
 
-type SendProgressRow = {
-  id: string;
-  candidateId: string;
-  name: string;
-  status: "sent" | "failed" | "scheduled" | "sending";
-  scheduledFor: string;
-};
-
-function buildSendProgressRows(
-  queue: Array<{
-    id: string;
-    candidateId: string;
-    status: string;
-    scheduledFor: string;
-  }>,
-  people: RecruiterCandidate[],
-  activeCandidateId?: string,
-): SendProgressRow[] {
-  const byId = new Map(people.map((person) => [person.id, person]));
-  return [...queue]
-    .sort((a, b) => new Date(a.scheduledFor).getTime() - new Date(b.scheduledFor).getTime())
-    .map((item) => {
-      const person = byId.get(item.candidateId);
-      const isSending = activeCandidateId === item.candidateId && item.status === "scheduled";
-      return {
-        id: item.id,
-        candidateId: item.candidateId,
-        name: person?.fullName ?? item.candidateId,
-        status: isSending ? "sending" : (item.status as SendProgressRow["status"]),
-        scheduledFor: item.scheduledFor,
-      };
-    });
-}
-
-/** Compact checklist: a few recent done, current, a couple upcoming — not all 30. */
-function compactSendChecklist(rows: SendProgressRow[]): SendProgressRow[] {
-  if (rows.length <= 6) {
-    return rows;
-  }
-  const sendingIndex = rows.findIndex((row) => row.status === "sending");
-  const nextIndex = rows.findIndex((row) => row.status === "scheduled");
-  const focus = sendingIndex >= 0 ? sendingIndex : nextIndex >= 0 ? nextIndex : rows.length - 1;
-  const start = Math.max(0, focus - 2);
-  const end = Math.min(rows.length, Math.max(focus + 3, start + 5));
-  return rows.slice(start, end);
-}
+type SendProgressRow = import("./sendProgress").SendProgressRow;
 
 function readTrackedSendQueueIds(): string[] {
   try {
@@ -662,16 +619,8 @@ function StreakRingGraphic({
   const cy = size / 2;
   const trackR = 64;
   const bestR = 52;
-  const stroke = 11;
-  const trackC = 2 * Math.PI * trackR;
-  const bestC = 2 * Math.PI * bestR;
-  const ceiling = Math.max(best, current, 5);
-  const currentFrac = Math.min(1, current / ceiling);
-  const bestFrac = Math.min(1, best / ceiling);
-  const currentDash = currentFrac * trackC;
-  const bestDash = bestFrac * bestC;
-  const toBeat = Math.max(0, best - current);
-  const isPersonalBest = current > 0 && current >= best;
+  const metrics = streakRingMetrics(current, best, activityToday);
+  const { currentDash, bestDash, trackC, bestC, isPersonalBest, todayLabel, hint } = metrics;
 
   return (
     <div className="streak-ring-graphic">
@@ -712,18 +661,10 @@ function StreakRingGraphic({
           <span>Best streak</span>
         </div>
         <div className="streak-ring-stat">
-          <strong>{activityToday ? "Secured" : current > 0 ? "At risk" : "Idle"}</strong>
+          <strong>{todayLabel}</strong>
           <span>Today</span>
         </div>
-        <p className="hint">
-          {current === 0
-            ? "Schedule a company batch to plant day one."
-            : isPersonalBest
-              ? "Personal best — keep scheduling to push further."
-              : toBeat === 1
-                ? "One more day to match your best."
-                : `${toBeat} more days to match your best of ${best}.`}
-        </p>
+        <p className="hint">{hint}</p>
       </div>
     </div>
   );
@@ -1132,7 +1073,7 @@ function App() {
   const upcomingSends = state?.upcomingSends ?? [];
   /** Later-dated schedule queue — send-now bumps move to the Send progress bar instead. */
   const scheduledLaterSends = useMemo(
-    () => upcomingSends.filter((item) => item.jobMode !== "send_now"),
+    () => filterScheduledTabItems(upcomingSends),
     [upcomingSends],
   );
   const upcomingSummary = useMemo(() => summarizeUpcomingSends(scheduledLaterSends), [scheduledLaterSends]);
@@ -1228,7 +1169,16 @@ function App() {
   );
 
   const needsFastPoll =
-    pendingCount > 0 || scheduledSendCount > 0 || isSendingPhase || upcomingSends.length > 0 || tab === "scheduled";
+    pendingCount > 0 ||
+    isSendingPhase ||
+    tab === "scheduled" ||
+    (tab === "send" && (scheduledSendCount > 0 || upcomingSends.length > 0));
+
+  const pollMs = needsFastPoll
+    ? DISCOVERY_POLL_MS
+    : tab === "send"
+      ? IDLE_POLL_MS
+      : BACKGROUND_POLL_MS;
 
   const scheduleSummary = useMemo(() => {
     const start = new Date(scheduleStartAt);
@@ -1574,7 +1524,6 @@ function App() {
   }, [footer]);
 
   useEffect(() => {
-    const pollMs = needsFastPoll ? DISCOVERY_POLL_MS : IDLE_POLL_MS;
     const timer = window.setInterval(() => {
       if (document.visibilityState !== "visible") {
         return;
@@ -1582,8 +1531,15 @@ function App() {
       void (async () => {
         try {
           const next = await getState();
-          setState(next);
-          setWorkerStatus(await getWorkerStatus());
+          setState((prev) => {
+            if (prev && appDataPollKey(prev) === appDataPollKey(next)) return prev;
+            return next;
+          });
+          const nextWorker = await getWorkerStatus();
+          setWorkerStatus((prev) => {
+            if (prev && workerStatusPollKey(prev) === workerStatusPollKey(nextWorker)) return prev;
+            return nextWorker;
+          });
           if (pendingCount > 0) {
             setNextDiscovery(await nextDiscoveryCandidate());
           }
@@ -1593,7 +1549,17 @@ function App() {
       })();
     }, pollMs);
     return () => window.clearInterval(timer);
-  }, [needsFastPoll, pendingCount]);
+  }, [pollMs, pendingCount]);
+
+  useEffect(() => {
+    const syncPageVisible = () => {
+      document.documentElement.dataset.pageVisible =
+        document.visibilityState === "visible" ? "true" : "false";
+    };
+    syncPageVisible();
+    document.addEventListener("visibilitychange", syncPageVisible);
+    return () => document.removeEventListener("visibilitychange", syncPageVisible);
+  }, []);
 
   async function saveOutreachContent() {
     await saveContent({ subject, body, footer });
@@ -2398,7 +2364,9 @@ function App() {
         if (!prev || prev.done || prev.leaving) {
           return prev;
         }
-        const percent = Math.max(prev.percent + 0.05, Math.min(99, holding));
+        // Cap at 99 until the mail lands — never use prev+ε as an uncapped floor
+        // (that used to climb past 100% while waiting on a slow generate).
+        const percent = Math.min(99, Math.max(prev.percent, holding));
         return {
           ...prev,
           stepIndex: Math.max(prev.stepIndex, seg.index),
@@ -3264,7 +3232,9 @@ function App() {
                         <div className="discovery-progress-meta">
                           <span className="worker-dot working" />
                           <strong>{generateProgress.steps[generateProgress.stepIndex]?.label ?? "Working"}…</strong>
-                          <span className="generate-progress-percent">{Math.round(generateProgress.percent)}%</span>
+                          <span className="generate-progress-percent">
+                            {Math.min(100, Math.round(generateProgress.percent))}%
+                          </span>
                         </div>
                       )}
                       <div
@@ -3272,10 +3242,13 @@ function App() {
                         role="progressbar"
                         aria-valuemin={0}
                         aria-valuemax={100}
-                        aria-valuenow={Math.round(generateProgress.percent)}
+                        aria-valuenow={Math.min(100, Math.round(generateProgress.percent))}
                         aria-label="Email generation progress"
                       >
-                        <div className="progress-fill" style={{ width: `${generateProgress.percent}%` }} />
+                        <div
+                          className="progress-fill"
+                          style={{ width: `${Math.min(100, generateProgress.percent)}%` }}
+                        />
                       </div>
                       <ol className="generate-step-list">
                         {generateProgress.steps.map((step, index) => {
@@ -4628,15 +4601,26 @@ function App() {
                         type="button"
                         className="history-company-card-main"
                         aria-expanded={expanded}
-                        onClick={() => {
+                        onClick={(event) => {
+                          const name = company.companyName;
+                          const opening = !expandedCompanies.has(name) && !historyQuery.trim();
                           setExpandedCompanies((prev) => {
                             const next = new Set(prev);
-                            if (next.has(company.companyName)) {
-                              next.delete(company.companyName);
+                            if (next.has(name)) {
+                              next.delete(name);
                             } else {
-                              next.add(company.companyName);
+                              next.add(name);
                             }
                             return next;
+                          });
+                          if (!opening) return;
+                          const card = event.currentTarget.closest(".history-company-card");
+                          if (!(card instanceof HTMLElement)) return;
+                          // Let the expand layout settle, then bring the full people list into view.
+                          window.requestAnimationFrame(() => {
+                            window.setTimeout(() => {
+                              card.scrollIntoView({ behavior: "smooth", block: "start" });
+                            }, 80);
                           });
                         }}
                       >

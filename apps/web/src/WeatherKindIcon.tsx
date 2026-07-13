@@ -1,27 +1,56 @@
 import type { GroveWeatherKind } from "./weatherLocation";
 
-/** Compact SVG marks for the four grove weather presets. */
+/** Human label for weather badge / setup preview. */
+export function weatherKindLabel(kind: GroveWeatherKind, _isDay = true): string {
+  if (kind === "sunny") return "Clear";
+  if (kind === "cloudy") return "Cloudy";
+  if (kind === "rain") return "Rain";
+  return "Snow";
+}
+
+/** Compact SVG marks for the four grove weather presets. Clear nights use a moon. */
 export function WeatherKindIcon({
   kind,
+  isDay = true,
   className,
   title,
 }: {
   kind: GroveWeatherKind;
+  /** When false and sky is clear, show a moon instead of a sun. */
+  isDay?: boolean;
   className?: string;
   title?: string;
 }) {
-  const label = title ?? kind;
+  const label = title ?? weatherKindLabel(kind, isDay);
+
+  if (kind === "sunny" && !isDay) {
+    return (
+      <svg
+        className={className ? `${className} grove-weather-moon` : "grove-weather-moon"}
+        viewBox="0 0 24 24"
+        aria-hidden={title ? undefined : true}
+        role={title ? "img" : undefined}
+      >
+        {title ? <title>{label}</title> : null}
+        <path className="grove-weather-moon-body" d="M21 14.5A8.5 8.5 0 0 1 9.5 3 7 7 0 1 0 21 14.5z" />
+        <circle className="grove-weather-moon-crater" cx="17.2" cy="7.2" r="0.7" />
+        <circle className="grove-weather-moon-crater" cx="19.4" cy="10.1" r="0.45" opacity="0.85" />
+      </svg>
+    );
+  }
+
   if (kind === "sunny") {
     return (
       <svg className={className} viewBox="0 0 24 24" aria-hidden={title ? undefined : true} role={title ? "img" : undefined}>
         {title ? <title>{label}</title> : null}
-        <circle cx="12" cy="12" r="4.2" fill="#f0b429" />
-        <g stroke="#f0b429" strokeWidth="1.8" strokeLinecap="round">
-          <path d="M12 2.8v2.4M12 18.8v2.4M2.8 12h2.4M18.8 12h2.4M5.2 5.2l1.7 1.7M17.1 17.1l1.7 1.7M5.2 18.8l1.7-1.7M17.1 6.9l1.7-1.7" />
+        <circle cx="12" cy="12" r="4" fill="#f0b429" />
+        <g stroke="#f0b429" strokeWidth="2" strokeLinecap="round" fill="none">
+          <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
         </g>
       </svg>
     );
   }
+
   if (kind === "cloudy") {
     return (
       <svg className={className} viewBox="0 0 24 24" aria-hidden={title ? undefined : true} role={title ? "img" : undefined}>
@@ -34,6 +63,7 @@ export function WeatherKindIcon({
       </svg>
     );
   }
+
   if (kind === "rain") {
     return (
       <svg className={className} viewBox="0 0 24 24" aria-hidden={title ? undefined : true} role={title ? "img" : undefined}>
@@ -48,6 +78,7 @@ export function WeatherKindIcon({
       </svg>
     );
   }
+
   return (
     <svg className={className} viewBox="0 0 24 24" aria-hidden={title ? undefined : true} role={title ? "img" : undefined}>
       {title ? <title>{label}</title> : null}

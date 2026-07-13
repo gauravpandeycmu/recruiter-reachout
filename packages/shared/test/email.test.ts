@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_EMAIL_FOOTER, extractFirstName, generateEmailGuesses, renderEmail, textToHtml } from "../src/index.js";
+import {
+  DEFAULT_EMAIL_FOOTER,
+  extractFirstName,
+  footerToHtml,
+  generateEmailGuesses,
+  renderEmail,
+  stripBareJobUrls,
+  textToHtml,
+} from "../src/index.js";
 
 describe("email helpers", () => {
   it("extracts first names from noisy LinkedIn names", () => {
@@ -155,5 +163,21 @@ describe("email helpers", () => {
     expect(rendered.htmlBody).toContain(">778812</a>");
     expect(rendered.body).toContain("778812");
     expect(rendered.body).not.toContain("<a ");
+  });
+
+  it("stripBareJobUrls removes careers URLs from plain text", () => {
+    const cleaned = stripBareJobUrls(
+      "Hi Jane,\n\nSaw https://jobs.acme.com/778812 — reaching out.\n\nThanks",
+      "https://jobs.acme.com/778812",
+    );
+    expect(cleaned).not.toContain("https://jobs.acme.com/778812");
+    expect(cleaned).toContain("reaching out");
+  });
+
+  it("footerToHtml includes signature name and portfolio link", () => {
+    const html = footerToHtml({ ...DEFAULT_EMAIL_FOOTER, enabled: true });
+    expect(html).toContain("Gaurav Pandey");
+    expect(html).toContain('href="https://www.gauravpandey.site/"');
+    expect(html).toContain("#C41230");
   });
 });

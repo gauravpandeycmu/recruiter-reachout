@@ -436,4 +436,67 @@ describe("analytics", () => {
       sent: 0,
     });
   });
+
+  it("tracks company-goal streak separately from outreach sendStreak", async () => {
+    const store = await freshStore();
+    store.setAnalyticsGoalSettings({
+      dailySendGoal: 1,
+      goalMetDates: ["2026-07-07", "2026-07-08"],
+      updatedAt: new Date().toISOString(),
+    });
+    const candidate = store.upsertCandidate(
+      createCandidate({ fullName: "Goal Person", email: "goal@acme.com", company: "Acme" }),
+    );
+    // Meet today's company goal via a schedule-click (queue createdAt).
+    store.upsertSendQueueItem({
+      id: "q-goal-streak",
+      candidateId: candidate.id,
+      email: "goal@acme.com",
+      confidence: "high",
+      status: "scheduled",
+      scheduledFor: "2026-07-20T18:00:00.000Z",
+      createdAt: "2026-07-09T15:00:00.000Z",
+      updatedAt: "2026-07-09T15:00:00.000Z",
+      attempts: 0,
+    });
+
+    const summary = buildAnalyticsSummary(store, "2026-07-09", { tzOffsetMinutes: 0 });
+    expect(summary.goalProgress.sentToday).toBe(1);
+    expect(summary.goalProgress.met).toBe(true);
+    expect(summary.goalProgress.streak).toBe(3);
+    // Outreach streak also counts the schedule click, but the fields stay distinct.
+    expect(summary.goalProgress.sendStreak).toBe(1);
+    expect(summary.goalProgress.activityToday).toBe(true);
+  });
+
+  it("advances motivation titles along the send-event milestone ladder", async () => {
+    const store = await freshStore();
+    const candidate = store.upsertCandidate(
+      createCandidate({ fullName: "Milestone", email: "m@acme.com", company: "Acme" }),
+    );
+    expect(buildAnalyticsSummary(store, "2026-07-09", { tzOffsetMinutes: 0 }).motivation.title).toBe(
+      "Bare meadow",
+    );
+
+    store.addEvent({
+      ...createEvent(candidate.id, "send"),
+      createdAt: "2026-07-09T12:00:00.000Z",
+    });
+    expect(buildAnalyticsSummary(store, "2026-07-09", { tzOffsetMinutes: 0 }).motivation).toMatchObject({
+      title: "First sprout",
+      level: 2,
+    });
+
+    for (let i = 0; i < 4; i += 1) {
+      store.addEvent({
+        ...createEvent(candidate.id, "send"),
+        id: `send-extra-${i}`,
+        createdAt: `2026-07-0${5 + (i % 3)}T12:00:00.000Z`,
+      });
+    }
+    const gardener = buildAnalyticsSummary(store, "2026-07-09", { tzOffsetMinutes: 0 });
+    expect(gardener.allTime.sent).toBe(5);
+    expect(gardener.motivation.title).toBe("Gardener");
+    expect(gardener.motivation.level).toBe(3);
+  });
 });
