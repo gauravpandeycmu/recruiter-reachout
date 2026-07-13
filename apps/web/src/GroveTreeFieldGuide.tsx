@@ -14,6 +14,7 @@ function loadGrove3D(): Promise<Grove3DModule> {
 function GroveTreeThumb({ speciesId, live }: { speciesId: string; live: boolean }) {
   const [src, setSrc] = useState<string | null>(null);
   const [LiveThumb, setLiveThumb] = useState<null | Grove3DModule["LiveSpeciesThumb"]>(null);
+  const [liveReady, setLiveReady] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -28,11 +29,15 @@ function GroveTreeThumb({ speciesId, live }: { speciesId: string; live: boolean 
     };
   }, [speciesId]);
 
+  useEffect(() => {
+    if (!live) setLiveReady(false);
+  }, [live]);
+
   return (
     <div className="grove-guide-thumb-wrap">
       {src ? (
         <img
-          className={`grove-guide-thumb${live ? " is-idle-hidden" : ""}`}
+          className={`grove-guide-thumb${live && liveReady ? " is-idle-hidden" : ""}`}
           src={src}
           alt=""
           width={112}
@@ -41,7 +46,13 @@ function GroveTreeThumb({ speciesId, live }: { speciesId: string; live: boolean 
       ) : (
         <div className="grove-guide-thumb is-loading" aria-hidden="true" />
       )}
-      {live && LiveThumb ? <LiveThumb speciesId={speciesId} className="grove-guide-thumb is-live" /> : null}
+      {live && LiveThumb ? (
+        <LiveThumb
+          speciesId={speciesId}
+          className="grove-guide-thumb is-live"
+          onFirstFrame={() => setLiveReady(true)}
+        />
+      ) : null}
     </div>
   );
 }

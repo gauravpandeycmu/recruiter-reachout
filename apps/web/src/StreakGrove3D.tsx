@@ -1,4 +1,4 @@
-import React, { memo, useEffect, useRef, useState } from "react";
+import React, { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { getWeather, type WeatherCondition } from "./api";
 import {
@@ -1895,13 +1895,19 @@ function getLiveThumbRenderer(): THREE.WebGLRenderer {
 export function LiveSpeciesThumb({
   speciesId,
   className,
+  onFirstFrame,
 }: {
   speciesId: string;
   className?: string;
+  /** Fires once the first frame is on the canvas — keep the static thumb until then. */
+  onFirstFrame?: () => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const onFirstFrameRef = useRef(onFirstFrame);
+  onFirstFrameRef.current = onFirstFrame;
 
-  useEffect(() => {
+  // Layout effect so the first blit lands before the browser paints (avoids a blank hover frame).
+  useLayoutEffect(() => {
     const display = canvasRef.current;
     if (!display || !SPECIES_POOL.includes(speciesId as Species)) return;
     const ctx = display.getContext("2d");
@@ -1919,6 +1925,29 @@ export function LiveSpeciesThumb({
     let last = performance.now();
     const start = last;
     let running = true;
+    let painted = false;
+
+    const paint = (now: number, animate: boolean) => {
+      const delta = Math.min(0.05, Math.max(0, (now - last) / 1000));
+      last = now;
+      const elapsed = (now - start) / 1000;
+      if (reducedMotion) {
+        tree.rotation.y = 0.32;
+      } else if (animate) {
+        tree.rotation.y += delta * 0.95;
+        animateTreeParts(tree, elapsed, delta);
+      }
+      renderer.render(scene, camera);
+      ctx.clearRect(0, 0, 112, 128);
+      ctx.drawImage(renderer.domElement, 0, 0, 112, 128);
+      if (!painted) {
+        painted = true;
+        onFirstFrameRef.current?.();
+      }
+    };
+
+    // Immediate still matching the static thumb pose — no blank frame under the hover.
+    paint(last, false);
 
     const tick = (now: number) => {
       if (!running || liveThumbOwner !== owner) return;
@@ -1931,18 +1960,7 @@ export function LiveSpeciesThumb({
         raf = requestAnimationFrame(tick);
         return;
       }
-      const delta = Math.min(0.05, (now - last) / 1000);
-      last = now;
-      const elapsed = (now - start) / 1000;
-      if (!reducedMotion) {
-        tree.rotation.y += delta * 0.95;
-        animateTreeParts(tree, elapsed, delta);
-      } else {
-        tree.rotation.y = 0.32;
-      }
-      renderer.render(scene, camera);
-      ctx.clearRect(0, 0, 112, 128);
-      ctx.drawImage(renderer.domElement, 0, 0, 112, 128);
+      paint(now, true);
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);

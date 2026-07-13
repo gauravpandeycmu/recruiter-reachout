@@ -6309,15 +6309,17 @@ html[data-theme="dark"] .grove-weather-moon-crater {
   width: 112px;
 }
 
+.grove-guide-thumb.is-idle-hidden {
+  opacity: 0;
+  pointer-events: none;
+  /* Instant hide only after live canvas has a frame — avoids a blank blink on hover. */
+  transition: none;
+}
+
 .grove-guide-thumb.is-live {
   left: 0;
   position: absolute;
   top: 0;
-}
-
-.grove-guide-thumb.is-idle-hidden {
-  opacity: 0;
-  pointer-events: none;
 }
 
 .grove-guide-thumb.is-loading {
