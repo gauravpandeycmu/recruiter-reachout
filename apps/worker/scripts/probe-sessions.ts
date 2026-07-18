@@ -1,6 +1,6 @@
 /**
- * Fast cookie-based session probe for Setup → Refresh session status.
- * Outputs JSON to stdout. Does not navigate to Gmail/Jobright/LinkedIn.
+ * Silent session probe for Setup → Refresh session status.
+ * Does not open headed login browsers. Outputs JSON to stdout.
  */
 import "../src/loadEnv.js";
 import { probeAllSessionsFast } from "../src/setupSessions.js";
@@ -8,9 +8,8 @@ import { tryPrepareStreakExtension } from "../src/streakExtension.js";
 
 async function main(): Promise<void> {
   const streakPath = tryPrepareStreakExtension(process.env.STREAK_EXTENSION_PATH);
-  const status = await probeAllSessionsFast({
-    gmailExtensionPaths: streakPath ? [streakPath] : undefined,
-  });
+  // Probe without Streak — loading the extension would force a headed Chromium flash.
+  const status = await probeAllSessionsFast();
 
   if (!streakPath && status.gmail.ready) {
     status.gmail.message = `${status.gmail.message} (Streak not installed — install before sending.)`;

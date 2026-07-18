@@ -26,6 +26,8 @@ function baseJob(overrides: Partial<SendJob> = {}): SendJob {
   };
 }
 
+const fakePage = {} as Page;
+
 describe("runSendPass", () => {
   beforeEach(() => {
     vi.mocked(executeSendJob).mockReset();
@@ -37,16 +39,37 @@ describe("runSendPass", () => {
       fetchSendJob: vi.fn(),
       reportWorkerStatus: vi.fn(),
       reportSendResult: vi.fn(),
+      touchSendJob: vi.fn().mockResolvedValue(undefined),
     };
 
     const result = await runSendPass({
       apiClient: apiClient as never,
-      page: {} as Page,
+      getPage: async () => fakePage,
       log: () => {},
     });
 
     expect(result).toEqual({ result: "idle" });
     expect(apiClient.reportSendResult).not.toHaveBeenCalled();
+  });
+
+  it("logs (does not silently swallow) a failed fetchNextSendJob call", async () => {
+    const apiClient = {
+      fetchNextSendJob: vi.fn().mockRejectedValue(new Error("network timeout")),
+      fetchSendJob: vi.fn(),
+      reportWorkerStatus: vi.fn(),
+      reportSendResult: vi.fn(),
+      touchSendJob: vi.fn().mockResolvedValue(undefined),
+    };
+    const logs: string[] = [];
+
+    const result = await runSendPass({
+      apiClient: apiClient as never,
+      getPage: async () => fakePage,
+      log: (message) => logs.push(message),
+    });
+
+    expect(result).toEqual({ result: "idle" });
+    expect(logs.some((message) => /fetchNextSendJob failed/i.test(message))).toBe(true);
   });
 
   it("skips cancelled jobs before Gmail send", async () => {
@@ -60,11 +83,12 @@ describe("runSendPass", () => {
       }),
       reportWorkerStatus: vi.fn().mockResolvedValue(undefined),
       reportSendResult: vi.fn(),
+      touchSendJob: vi.fn().mockResolvedValue(undefined),
     };
 
     const result = await runSendPass({
       apiClient: apiClient as never,
-      page: {} as Page,
+      getPage: async () => fakePage,
       log: () => {},
     });
 
@@ -87,11 +111,12 @@ describe("runSendPass", () => {
       fetchSendJob: vi.fn().mockResolvedValue(job),
       reportWorkerStatus: vi.fn().mockResolvedValue(undefined),
       reportSendResult: vi.fn().mockResolvedValue(undefined),
+      touchSendJob: vi.fn().mockResolvedValue(undefined),
     };
 
     const result = await runSendPass({
       apiClient: apiClient as never,
-      page: {} as Page,
+      getPage: async () => fakePage,
       log: () => {},
     });
 
@@ -113,21 +138,210 @@ describe("runSendPass", () => {
       fetchSendJob: vi.fn().mockResolvedValue(job),
       reportWorkerStatus: vi.fn().mockResolvedValue(undefined),
       reportSendResult: vi.fn().mockResolvedValue(undefined),
+      touchSendJob: vi.fn().mockResolvedValue(undefined),
     };
 
     const result = await runSendPass({
       apiClient: apiClient as never,
-      page: {} as Page,
+      getPage: async () => fakePage,
       log: () => {},
     });
 
-    expect(result).toEqual({ result: "error", jobId: job.id, outcome: "error" });
+    expect(result).toEqual({
+      result: "error",
+      jobId: job.id,
+      outcome: "error",
+      reason: "compose timed out",
+    });
     expect(apiClient.reportSendResult).toHaveBeenCalledWith(job.id, {
       success: false,
       failureReason: "compose timed out",
     });
     expect(apiClient.reportWorkerStatus).toHaveBeenCalledWith(
       expect.objectContaining({ phase: "error" }),
+    );
+  });
+
+  it("retries a failed success report so the job isn't stranded in_progress", async () => {
+    vi.useFakeTimers();
+    try {
+      const job = baseJob();
+      vi.mocked(executeSendJob).mockResolvedValue({ status: "sent" });
+      const reportSendResult = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("API unreachable"))
+        .mockResolvedValueOnce(undefined);
+      const apiClient = {
+        fetchNextSendJob: vi.fn().mockResolvedValue(job),
+        fetchSendJob: vi.fn().mockResolvedValue(job),
+        reportWorkerStatus: vi.fn().mockResolvedValue(undefined),
+        reportSendResult,
+      };
+
+      const pending = runSendPass({
+        apiClient: apiClient as never,
+        getPage: async () => fakePage,
+        log: () => {},
+      });
+      await vi.runAllTimersAsync();
+      const result = await pending;
+
+      expect(result).toEqual({ result: "worked", jobId: job.id, outcome: "sent" });
+      expect(reportSendResult).toHaveBeenCalledTimes(2);
+      expect(reportSendResult).toHaveBeenLastCalledWith(job.id, {
+        success: true,
+        scheduledInGmail: false,
+      });
+      expect(apiClient.reportWorkerStatus).toHaveBeenCalledWith(
+        expect.objectContaining({ phase: "reporting", message: expect.stringContaining("Streak") }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("surfaces a warning when the success report can't be recorded at all", async () => {
+    vi.useFakeTimers();
+    try {
+      const job = baseJob();
+      vi.mocked(executeSendJob).mockResolvedValue({ status: "sent" });
+      const apiClient = {
+        fetchNextSendJob: vi.fn().mockResolvedValue(job),
+        fetchSendJob: vi.fn().mockResolvedValue(job),
+        reportWorkerStatus: vi.fn().mockResolvedValue(undefined),
+        reportSendResult: vi.fn().mockRejectedValue(new Error("API down")),
+        touchSendJob: vi.fn().mockResolvedValue(undefined),
+      };
+
+      const pending = runSendPass({
+        apiClient: apiClient as never,
+        getPage: async () => fakePage,
+        log: () => {},
+      });
+      await vi.runAllTimersAsync();
+      const result = await pending;
+
+      expect(result).toEqual({ result: "worked", jobId: job.id, outcome: "sent" });
+      expect(apiClient.reportSendResult).toHaveBeenCalledTimes(5);
+      expect(apiClient.reportWorkerStatus).toHaveBeenCalledWith(
+        expect.objectContaining({ phase: "reporting", message: expect.stringContaining("check Scheduled") }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries once when the Gmail browser closed before Send", async () => {
+    const job = baseJob();
+    vi.mocked(executeSendJob)
+      .mockResolvedValueOnce({
+        status: "error",
+        reason: "Could not open Gmail Compose: Target page, context or browser has been closed",
+      })
+      .mockResolvedValueOnce({ status: "sent" });
+    const getPage = vi.fn().mockResolvedValue(fakePage);
+    const apiClient = {
+      fetchNextSendJob: vi.fn().mockResolvedValue(job),
+      fetchSendJob: vi.fn().mockResolvedValue(job),
+      reportWorkerStatus: vi.fn().mockResolvedValue(undefined),
+      reportSendResult: vi.fn().mockResolvedValue(undefined),
+      touchSendJob: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const result = await runSendPass({
+      apiClient: apiClient as never,
+      getPage,
+      log: () => {},
+    });
+
+    expect(getPage).toHaveBeenCalledTimes(2);
+    expect(executeSendJob).toHaveBeenCalledTimes(2);
+    expect(result).toEqual({ result: "worked", jobId: job.id, outcome: "sent" });
+  });
+
+  it("treats post-Send page teardown as success and does not re-send", async () => {
+    const job = baseJob();
+    vi.mocked(executeSendJob).mockResolvedValue({
+      status: "error",
+      reason: "page.waitForTimeout: Target page, context or browser has been closed",
+    });
+    const getPage = vi.fn().mockResolvedValue(fakePage);
+    const apiClient = {
+      fetchNextSendJob: vi.fn().mockResolvedValue(job),
+      fetchSendJob: vi.fn().mockResolvedValue(job),
+      reportWorkerStatus: vi.fn().mockResolvedValue(undefined),
+      reportSendResult: vi.fn().mockResolvedValue(undefined),
+      touchSendJob: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const result = await runSendPass({
+      apiClient: apiClient as never,
+      getPage,
+      log: () => {},
+    });
+
+    expect(executeSendJob).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ result: "worked", jobId: job.id, outcome: "sent" });
+    expect(apiClient.reportSendResult).toHaveBeenCalledWith(job.id, {
+      success: true,
+      scheduledInGmail: false,
+    });
+  });
+
+  it("treats send_click_ambiguous as sent and does not retry", async () => {
+    const job = baseJob();
+    vi.mocked(executeSendJob).mockImplementation(async ({ onStage }) => {
+      onStage?.("send_click_ambiguous");
+      return { status: "error", reason: "Target page, context or browser has been closed" };
+    });
+    const apiClient = {
+      fetchNextSendJob: vi.fn().mockResolvedValue(job),
+      fetchSendJob: vi.fn().mockResolvedValue(job),
+      reportWorkerStatus: vi.fn().mockResolvedValue(undefined),
+      reportSendResult: vi.fn().mockResolvedValue(undefined),
+      touchSendJob: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const result = await runSendPass({
+      apiClient: apiClient as never,
+      getPage: async () => fakePage,
+      log: () => {},
+    });
+
+    expect(executeSendJob).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ result: "worked", jobId: job.id, outcome: "sent" });
+    expect(apiClient.reportSendResult).toHaveBeenCalledWith(job.id, {
+      success: true,
+      scheduledInGmail: false,
+    });
+  });
+
+  it("does not auto-retry ambiguous mid-send browser death", async () => {
+    const job = baseJob();
+    vi.mocked(executeSendJob).mockResolvedValue({
+      status: "error",
+      reason: "page.click: Target page, context or browser has been closed",
+    });
+    const apiClient = {
+      fetchNextSendJob: vi.fn().mockResolvedValue(job),
+      fetchSendJob: vi.fn().mockResolvedValue(job),
+      reportWorkerStatus: vi.fn().mockResolvedValue(undefined),
+      reportSendResult: vi.fn().mockResolvedValue(undefined),
+      touchSendJob: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const result = await runSendPass({
+      apiClient: apiClient as never,
+      getPage: async () => fakePage,
+      log: () => {},
+    });
+
+    expect(executeSendJob).toHaveBeenCalledTimes(1);
+    expect(result.result).toBe("error");
+    expect(result.reason).toMatch(/check Gmail Sent/i);
+    expect(apiClient.reportSendResult).toHaveBeenCalledWith(
+      job.id,
+      expect.objectContaining({ success: false }),
     );
   });
 });

@@ -589,6 +589,53 @@ describe("automatic email discovery bookkeeping", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("an automatic SalesQL not_found respects the shared attempts budget instead of parking immediately", async () => {
+    // Regression: an automatic Jobright -> SalesQL fallback miss used to park
+    // the candidate on the very first SalesQL not_found, skipping
+    // MAX_DISCOVERY_ATTEMPTS entirely — asymmetric with Jobright. Only an
+    // explicitly forced SalesQL check should still be a one-shot conclusion.
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const candidate = store.upsertCandidate(
+      createCandidate({ fullName: "Jane Doe", linkedinUrl: "https://linkedin.com/in/jane-doe" }),
+    );
+
+    const first = await recordDiscoveryResult(store, candidate.id, { status: "not_found", provider: "salesql" });
+    expect(first.status).not.toBe("email_not_found");
+    expect(first.discoveryAttempts).toBe(1);
+
+    let updated = first;
+    for (let attempt = 2; attempt <= MAX_DISCOVERY_ATTEMPTS; attempt += 1) {
+      updated = await recordDiscoveryResult(store, candidate.id, { status: "not_found", provider: "salesql" });
+    }
+    expect(updated.status).toBe("email_not_found");
+    expect(updated.discoveryAttempts).toBe(MAX_DISCOVERY_ATTEMPTS);
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("a forced SalesQL not_found still parks immediately (one-shot user action)", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const candidate = store.upsertCandidate(
+      createCandidate({ fullName: "Jane Doe", linkedinUrl: "https://linkedin.com/in/jane-doe" }),
+    );
+    await requestDiscovery(store, candidate.id, { forceSalesql: true });
+
+    const updated = await recordDiscoveryResult(store, candidate.id, { status: "not_found", provider: "salesql" });
+
+    expect(updated.status).toBe("email_not_found");
+    expect(updated.discoveryAttempts).toBe(1);
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("requestSalesqlSweep queues every active candidate still missing an email", async () => {
     const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
     const store = new Store(join(directory, "store.sqlite"));

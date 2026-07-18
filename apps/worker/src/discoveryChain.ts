@@ -4,8 +4,8 @@ import type { DiscoveryOutcome } from "./discoveryOutcome.js";
 
 export interface DiscoveryChainDeps {
   jobrightAdapter: JobrightPageAdapter;
-  /** Lazy factory — only invoked when Jobright returns not_found and quota allows. */
-  createSalesqlAdapter?: () => SalesqlPageAdapter;
+  /** Lazy factory — only invoked when Jobright returns not_found and quota allows (or forceProvider is salesql). */
+  createSalesqlAdapter?: () => SalesqlPageAdapter | Promise<SalesqlPageAdapter>;
   jobrightDryRun: boolean;
   salesqlDryRun: boolean;
   /** When false (quota exhausted or SalesQL disabled), Jobright not_found is final. */
@@ -38,15 +38,15 @@ function mapJobrightOutcome(outcome: Awaited<ReturnType<typeof discoverEmailOnJo
 
 function mapSalesqlOutcome(outcome: Awaited<ReturnType<typeof discoverEmailOnSalesql>>): DiscoveryOutcome {
   if (outcome.status === "found") {
-    return { status: "found", email: outcome.email, provider: "salesql" };
+    return { status: "found", email: outcome.email, provider: "salesql", creditSpent: outcome.creditSpent };
   }
   if (outcome.status === "dry_run") {
     return { status: "dry_run", provider: "salesql" };
   }
   if (outcome.status === "not_found") {
-    return { status: "not_found", provider: "salesql" };
+    return { status: "not_found", provider: "salesql", creditSpent: outcome.creditSpent };
   }
-  return { status: "error", message: outcome.message, provider: "salesql" };
+  return { status: "error", message: outcome.message, provider: "salesql", creditSpent: outcome.creditSpent };
 }
 
 /**
@@ -63,14 +63,14 @@ export async function runDiscoveryChain(
 
   if (deps.forceProvider === "salesql") {
     if (!deps.createSalesqlAdapter) {
-      return { status: "error", message: "SalesQL is not configured.", provider: "salesql" };
+      return { status: "error", message: "SalesQL is not configured.", provider: "salesql", creditSpent: false };
     }
     const allowed = await deps.canUseSalesql();
     if (!allowed) {
-      return { status: "error", message: "SalesQL monthly quota exhausted.", provider: "salesql" };
+      return { status: "error", message: "SalesQL monthly quota exhausted.", provider: "salesql", creditSpent: false };
     }
     log("Forced SalesQL check requested; skipping Jobright.");
-    const forcedOutcome = await discoverEmailOnSalesql(deps.createSalesqlAdapter(), linkedinUrl, {
+    const forcedOutcome = await discoverEmailOnSalesql(await deps.createSalesqlAdapter(), linkedinUrl, {
       dryRun: deps.salesqlDryRun,
       ...deps.salesqlOptions,
     });
@@ -98,7 +98,7 @@ export async function runDiscoveryChain(
   }
 
   log("Jobright not_found; trying SalesQL fallback.");
-  const salesqlOutcome = await discoverEmailOnSalesql(deps.createSalesqlAdapter(), linkedinUrl, {
+  const salesqlOutcome = await discoverEmailOnSalesql(await deps.createSalesqlAdapter(), linkedinUrl, {
     dryRun: deps.salesqlDryRun,
     ...deps.salesqlOptions,
   });

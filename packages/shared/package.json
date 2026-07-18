@@ -9,6 +9,10 @@
     ".": {
       "types": "./src/index.ts",
       "import": "./dist/index.js"
+    },
+    "./auditLog": {
+      "types": "./src/auditLog.ts",
+      "import": "./dist/auditLog.js"
     }
   },
   "scripts": {

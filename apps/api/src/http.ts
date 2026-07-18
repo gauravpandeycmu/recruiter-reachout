@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { audit, sanitizeAuditValue } from "@recruiter/shared/auditLog";
 
 export interface RequestContext {
   req: IncomingMessage;
@@ -24,6 +25,20 @@ export async function readJson(req: IncomingMessage): Promise<unknown> {
     return undefined;
   }
   return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+}
+
+/** Read JSON and append a durable audit line (bodies sanitized). */
+export async function readJsonAudited(
+  req: IncomingMessage,
+  event: string,
+  extra?: Record<string, unknown>,
+): Promise<unknown> {
+  const body = await readJson(req);
+  audit(event, {
+    ...extra,
+    body: body === undefined ? undefined : (sanitizeAuditValue(body) as Record<string, unknown>),
+  });
+  return body;
 }
 
 export function sendJson(res: ServerResponse, statusCode: number, payload: unknown): void {

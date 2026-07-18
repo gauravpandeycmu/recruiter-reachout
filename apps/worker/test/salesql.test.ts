@@ -30,7 +30,8 @@ describe("discoverEmailOnSalesql", () => {
     });
     const outcome = await discoverEmailOnSalesql(adapter, "https://www.linkedin.com/in/jane-doe", { dryRun: false });
 
-    expect(outcome).toEqual({ status: "found", email: "jane@example.com" });
+    // A real Reveal Info click happened — this must count against SalesQL quota.
+    expect(outcome).toEqual({ status: "found", email: "jane@example.com", creditSpent: true });
     expect(adapter.clickRevealInfo).toHaveBeenCalled();
     expect(adapter.closeOverlay).toHaveBeenCalled();
   });
@@ -39,16 +40,23 @@ describe("discoverEmailOnSalesql", () => {
     const adapter = createFakeAdapter({ readRevealedEmail: vi.fn().mockResolvedValue("Already@Example.com") });
     const outcome = await discoverEmailOnSalesql(adapter, "https://www.linkedin.com/in/jane-doe", { dryRun: false });
 
-    expect(outcome).toEqual({ status: "found", email: "already@example.com" });
+    // No Reveal Info click needed — must NOT count against SalesQL quota.
+    expect(outcome).toEqual({ status: "found", email: "already@example.com", creditSpent: false });
     expect(adapter.clickRevealInfo).not.toHaveBeenCalled();
     expect(adapter.closeOverlay).toHaveBeenCalled();
   });
 
-  it("returns not_found when the overlay never appears", async () => {
+  it("returns error (not not_found) when the overlay never appears — inconclusive, not a confirmed miss", async () => {
+    // Regression: the overlay failing to open collapses several distinct,
+    // purely transient causes (badge slow to load, panel toggle glitch,
+    // expired widget login, LinkedIn slowness) — none of them mean "SalesQL
+    // looked and found nothing." Treating this as not_found used to
+    // permanently park the candidate on a session hiccup, without ever
+    // actually checking whether an email exists.
     const adapter = createFakeAdapter({ waitForOverlay: vi.fn().mockResolvedValue({ visible: false }) });
     const outcome = await discoverEmailOnSalesql(adapter, "https://www.linkedin.com/in/jane-doe", { dryRun: false });
 
-    expect(outcome).toEqual({ status: "not_found" });
+    expect(outcome.status).toBe("error");
     expect(adapter.clickRevealInfo).not.toHaveBeenCalled();
   });
 
@@ -69,11 +77,12 @@ describe("discoverEmailOnSalesql", () => {
     });
     const outcome = await discoverEmailOnSalesql(adapter, "https://www.linkedin.com/in/jane-doe", { dryRun: false });
 
-    expect(outcome).toEqual({ status: "not_found" });
+    // A conclusive miss only ever follows a real Reveal Info click.
+    expect(outcome).toEqual({ status: "not_found", creditSpent: true });
   });
 
   it("returns error for an empty LinkedIn URL", async () => {
     const outcome = await discoverEmailOnSalesql(createFakeAdapter(), "", { dryRun: false });
-    expect(outcome).toEqual({ status: "error", message: "LinkedIn URL is required." });
+    expect(outcome).toEqual({ status: "error", message: "LinkedIn URL is required.", creditSpent: false });
   });
 });

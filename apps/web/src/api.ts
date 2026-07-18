@@ -45,6 +45,7 @@ export interface UpcomingSendView {
   subject: string;
   body: string;
   resumeFileName?: string;
+  failureReason?: string;
 }
 
 export interface AppData {
@@ -86,7 +87,33 @@ export interface WorkerStatusView {
 
 const apiBase = import.meta.env.VITE_API_BASE ?? "http://localhost:4000";
 
+/** Fire-and-forget UI audit events (never blocks the UI; never shown to the user). */
+export function auditUi(event: string, data?: Record<string, unknown>): void {
+  if (!event?.trim()) return;
+  void fetch(`${apiBase}/api/audit/events`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ source: "web", event: event.trim(), data }),
+    keepalive: true,
+  }).catch(() => {
+    /* ignore offline / restart */
+  });
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method ?? "GET").toUpperCase();
+  if (method !== "GET" && method !== "OPTIONS" && !path.startsWith("/api/audit/")) {
+    auditUi("web.api", {
+      method,
+      path,
+      bodyPreview:
+        typeof init?.body === "string"
+          ? init.body.length > 400
+            ? `${init.body.slice(0, 200)}…[len=${init.body.length}]`
+            : init.body
+          : undefined,
+    });
+  }
   const response = await fetch(`${apiBase}${path}`, {
     ...init,
     headers: {
@@ -97,6 +124,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const payload = (await response.json()) as T | { error: string };
   if (!response.ok) {
     const maybeError = payload as { error?: string };
+    auditUi("web.api_error", { method, path, error: maybeError.error ?? "Request failed." });
     throw new Error(maybeError.error ?? "Request failed.");
   }
   return payload as T;
@@ -259,6 +287,24 @@ export function clearActiveCandidates(): Promise<{ archived: RecruiterCandidate[
   return request<{ archived: RecruiterCandidate[] }>("/api/candidates/active", { method: "DELETE" });
 }
 
+export function reactivateCandidates(candidateIds: string[]): Promise<{ reactivated: RecruiterCandidate[] }> {
+  return request<{ reactivated: RecruiterCandidate[] }>("/api/candidates/reactivate", {
+    method: "POST",
+    body: JSON.stringify({ candidateIds }),
+  });
+}
+
+export function replaceActiveFromHistory(candidateIds: string[]): Promise<{
+  archived: RecruiterCandidate[];
+  activated: RecruiterCandidate[];
+  cancelled: { jobsCancelled: number; queueCancelled: number };
+}> {
+  return request("/api/candidates/replace-active-from-history", {
+    method: "POST",
+    body: JSON.stringify({ candidateIds }),
+  });
+}
+
 export function previewEmail(id: string): Promise<RenderedEmail> {
   return request<RenderedEmail>(`/api/candidates/${id}/preview`);
 }
@@ -327,12 +373,46 @@ export interface ScheduleSendsInput {
 export function scheduleSends(input: ScheduleSendsInput): Promise<{
   queued: SendQueueItem[];
   rejected: Array<{ candidateId: string; reason: string }>;
-  shifted: Array<{ candidateId: string; original: string; shiftedTo: string; reason: string }>;
+  shifted: Array<{
+    candidateId: string;
+    original: string;
+    shiftedTo: string;
+    reason: string;
+    company?: string;
+  }>;
   jobFailures?: Array<{ candidateId: string; queueItemId: string; reason: string }>;
   jobs: unknown[];
   archived?: RecruiterCandidate[];
 }> {
   return request("/api/send-queue/schedule", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function addPersonToScheduledBatch(input: {
+  company: string;
+  email: string;
+  fullName?: string;
+  linkedinUrl?: string;
+  resumeId?: string;
+  intervalMinutes?: number;
+}): Promise<{
+  candidate: RecruiterCandidate;
+  upcoming?: UpcomingSendView;
+  scheduledFor: string;
+  intervalMinutes: number;
+  enrichQueued: boolean;
+  jobs: unknown[];
+  shifted?: Array<{
+    candidateId: string;
+    original: string;
+    shiftedTo: string;
+    reason: string;
+    company?: string;
+  }>;
+}> {
+  return request("/api/send-queue/add-person", {
     method: "POST",
     body: JSON.stringify(input),
   });
@@ -348,12 +428,43 @@ export function cancelScheduledSends(input: {
   });
 }
 
+export function pausePendingSends(input: {
+  queueItemIds: string[];
+}): Promise<{ jobsCancelled: number; queueCancelled: number; reactivated: RecruiterCandidate[] }> {
+  return request("/api/send-queue/pause", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function resumePausedSends(input: {
+  queueItemIds: string[];
+  startAt?: string;
+  intervalMinutes?: number;
+  resumeId?: string;
+}): Promise<{ resumed: number; jobs: Array<{ id: string; candidateId: string }> }> {
+  return request("/api/send-queue/resume-paused", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
 export function rescheduleQueuedSend(input: {
   queueItemId: string;
   scheduledFor?: string;
   sendNow?: boolean;
 }): Promise<UpcomingSendView | undefined> {
   return request("/api/send-queue/reschedule", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function rescheduleCompanyBatch(input: {
+  queueItemIds: string[];
+  startAt: string;
+}): Promise<{ updated: number; upcoming: UpcomingSendView[] }> {
+  return request("/api/send-queue/reschedule-company", {
     method: "POST",
     body: JSON.stringify(input),
   });

@@ -15,10 +15,15 @@
     "open:login": "tsx scripts/open-login.ts",
     "probe:sessions": "tsx scripts/probe-sessions.ts",
     "smoke:gmail": "tsx scripts/smoke-gmail.ts",
+    "e2e:test-mode-send": "tsx scripts/e2e-test-mode-send.ts",
+    "prove:gmail-compose": "tsx scripts/prove-gmail-compose.ts",
     "install:streak": "tsx scripts/install-streak.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:live": "LIVE_PLAYWRIGHT=1 JOBRIGHT_DRY_RUN=false vitest run test/live --sequence.concurrent=false",
+    "test:live:jobright": "LIVE_PLAYWRIGHT=1 JOBRIGHT_DRY_RUN=false vitest run test/live/jobrightFindEmail",
+    "test:live:gmail": "LIVE_PLAYWRIGHT=1 vitest run test/live/gmailTestModeSend"
   },
   "dependencies": {
     "@recruiter/shared": "2.0.0",

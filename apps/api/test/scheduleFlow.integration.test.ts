@@ -180,6 +180,22 @@ describe("schedule flow integration", () => {
     expect(listUpcomingSends(store)).toHaveLength(1);
   });
 
+  it("does not create two jobs when scheduleSends races itself for the same candidate", async () => {
+    const jane = await seedReadyCandidate("Jane Recruiter", "Acme", "jane@acme.com");
+    const startAt = new Date(Date.now() + 60 * 60_000).toISOString();
+
+    // Simulate a double-click / client retry firing two overlapping schedule
+    // calls for the same candidate before either has written a job.
+    const [first, second] = await Promise.all([
+      scheduleSends(store, { candidateIds: [jane.id], startAt, intervalMinutes: 12, mode: "schedule" }),
+      scheduleSends(store, { candidateIds: [jane.id], startAt, intervalMinutes: 12, mode: "schedule" }),
+    ]);
+
+    expect(first.jobs.length + second.jobs.length).toBe(1);
+    const jobsForCandidate = store.listSendJobs().filter((job) => job.candidateId === jane.id);
+    expect(jobsForCandidate).toHaveLength(1);
+  });
+
   it("cancels a single scheduled send by queue item id", async () => {
     const jane = await seedReadyCandidate("Jane Recruiter", "Acme", "jane@acme.com");
     const bob = await seedReadyCandidate("Bob Recruiter", "Acme", "bob@acme.com");
@@ -201,7 +217,7 @@ describe("schedule flow integration", () => {
     expect(cancelled.jobsCancelled).toBe(1);
     expect(listUpcomingSends(store)).toHaveLength(1);
     expect(listUpcomingSends(store)[0]?.fullName).toBe("Bob Recruiter");
-    expect(store.getSendQueueItem(janeQueueId)?.status).toBe("paused");
+    expect(store.getSendQueueItem(janeQueueId)?.status).toBe("failed");
   });
 
   it("stopping an active send-now session does not cancel other future scheduled sends", async () => {
@@ -231,7 +247,7 @@ describe("schedule flow integration", () => {
 
     expect(cancelled.queueCancelled).toBe(1);
     expect(cancelled.jobsCancelled).toBe(1);
-    expect(store.getSendQueueItem(nowQueueId)?.status).toBe("paused");
+    expect(store.getSendQueueItem(nowQueueId)?.status).toBe("failed");
     expect(store.getSendQueueItem(laterQueueId)?.status).toBe("scheduled");
     expect(listUpcomingSends(store)).toHaveLength(1);
     expect(listUpcomingSends(store)[0]?.fullName).toBe("Later Recruiter");
@@ -498,6 +514,46 @@ describe("schedule flow integration", () => {
     const retried = await retryFailedSends(store, { queueItemIds: [queueId] });
     expect(retried.retried).toBe(1);
     expect(store.getSendQueueItem(queueId)?.status).toBe("scheduled");
+  });
+
+  it("reuses a hard-cancelled job's id on retry instead of creating a second job", async () => {
+    // Mirrors the real cancel flow (cancelScheduledSendsForBatch always
+    // passes terminal:true, so a cancelled queue item lands here as
+    // status:"failed" — retryFailedSends is the actual reachable "retry a
+    // cancelled send" path). A cancelled job can still physically complete in
+    // Gmail after the cancel lands; if retry created a brand-new job instead
+    // of reusing this one, the candidate could end up sent twice once the
+    // original attempt finishes.
+    const jane = await seedReadyCandidate("Jane Recruiter", "Acme", "jane@acme.com");
+    const startAt = new Date(Date.now() + 60 * 60_000).toISOString();
+    const scheduled = await scheduleSends(store, {
+      candidateIds: [jane.id],
+      startAt,
+      intervalMinutes: 12,
+      mode: "schedule",
+    });
+    const queueId = scheduled.queued[0]!.id;
+    const originalJob = scheduled.jobs[0]!;
+    store.upsertSendJob({
+      ...originalJob,
+      status: "failed",
+      failureReason: "Cancelled by user",
+      updatedAt: new Date().toISOString(),
+    });
+    store.upsertSendQueueItem({
+      ...store.getSendQueueItem(queueId)!,
+      status: "failed",
+      failureReason: "Cancelled by user",
+      updatedAt: new Date().toISOString(),
+    });
+
+    const retried = await retryFailedSends(store, { queueItemIds: [queueId] });
+    expect(retried.retried).toBe(1);
+
+    const jobsForQueueItem = store.listSendJobs().filter((job) => job.queueItemId === queueId);
+    expect(jobsForQueueItem).toHaveLength(1);
+    expect(jobsForQueueItem[0]?.id).toBe(originalJob.id);
+    expect(jobsForQueueItem[0]?.status).toBe("pending");
   });
 
   it("attaches the explicitly selected resume even when another resume is the default", async () => {

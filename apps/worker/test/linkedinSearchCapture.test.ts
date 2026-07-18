@@ -1,6 +1,20 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
-import { SCRAPE_VISIBLE_PEOPLE, type ScrapedLinkedInProfile } from "../src/linkedinSearchCapture.js";
+import type { Page } from "playwright";
+import { describe, expect, it, vi } from "vitest";
+import { SCRAPE_VISIBLE_PEOPLE, captureCompanyRecruiters, type ScrapedLinkedInProfile } from "../src/linkedinSearchCapture.js";
+
+function fakePage(overrides: {
+  goto?: (url: string) => Promise<void>;
+  url?: () => string;
+  evaluate?: () => Promise<ScrapedLinkedInProfile[]>;
+} = {}): Page {
+  return {
+    goto: vi.fn(overrides.goto ?? (async () => undefined)),
+    url: vi.fn(overrides.url ?? (() => "https://www.linkedin.com/search/results/people/")),
+    mouse: { wheel: vi.fn(async () => undefined) },
+    evaluate: vi.fn(overrides.evaluate ?? (async () => [])),
+  } as unknown as Page;
+}
 
 /** Runs the page.evaluate payload against the jsdom document, like Playwright would. */
 function scrape(): ScrapedLinkedInProfile[] {
@@ -66,5 +80,57 @@ describe("LinkedIn search capture scraper", () => {
 
     const names = scrape().map((r) => r.fullName);
     expect(names).toEqual(["Ada Lovelace", "Grace Hopper", "Alan Turing"]);
+  });
+});
+
+describe("captureCompanyRecruiters", () => {
+  it("keeps profiles captured from earlier pages when a later page fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const page1Profile: ScrapedLinkedInProfile = {
+        fullName: "Ada Lovelace",
+        firstName: "Ada",
+        linkedinUrl: "https://www.linkedin.com/in/ada-lovelace",
+      };
+      let evaluateCalls = 0;
+      const page = fakePage({
+        goto: async (url) => {
+          if (url.includes("page=2")) {
+            throw new Error("net::ERR_CONNECTION_TIMED_OUT");
+          }
+        },
+        evaluate: async () => {
+          evaluateCalls += 1;
+          return [page1Profile];
+        },
+      });
+
+      const resultPromise = captureCompanyRecruiters(page, { companyName: "Acme", pages: 2 });
+      await vi.runAllTimersAsync();
+      const result = await resultPromise;
+
+      expect(result).toEqual([page1Profile]);
+      expect(evaluateCalls).toBe(1);
+      expect(page.goto).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still throws when the very first page fails with nothing captured yet", async () => {
+    vi.useFakeTimers();
+    try {
+      const page = fakePage({
+        url: () => "https://www.linkedin.com/checkpoint/challenge",
+      });
+
+      const resultPromise = captureCompanyRecruiters(page, { companyName: "Acme", pages: 2 });
+      const assertion = expect(resultPromise).rejects.toThrow(/not logged in/i);
+      await vi.runAllTimersAsync();
+      await assertion;
+      expect(page.goto).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

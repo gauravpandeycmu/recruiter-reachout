@@ -1,10 +1,56 @@
 import { describe, expect, it } from "vitest";
-import { atLocalHour, nextMondayAt, nextOccurrence, toDatetimeLocalValue } from "./scheduleTime";
+import { isScheduleForNow } from "./sendHelpers";
+import {
+  atLocalHour,
+  nextMondayAt,
+  nextOccurrence,
+  parseDatetimeLocal,
+  shiftBatchToNewStart,
+  toDatetimeLocalValue,
+} from "./scheduleTime";
 
 describe("scheduleTime", () => {
   it("formats datetime-local values in local time (not UTC)", () => {
     const date = new Date(2026, 6, 9, 8, 30, 0, 0); // Jul 9 2026 08:30 local
     expect(toDatetimeLocalValue(date)).toBe("2026-07-09T08:30");
+  });
+
+  it("parses datetime-local as local wall time", () => {
+    const parsed = parseDatetimeLocal("2026-07-15T08:00");
+    expect(parsed.getFullYear()).toBe(2026);
+    expect(parsed.getMonth()).toBe(6);
+    expect(parsed.getDate()).toBe(15);
+    expect(parsed.getHours()).toBe(8);
+    expect(parsed.getMinutes()).toBe(0);
+  });
+
+  it("rejects garbage datetime-local strings", () => {
+    expect(Number.isNaN(parseDatetimeLocal("not-a-date").getTime())).toBe(true);
+  });
+
+  it("Send-now is only the Now preset — manual datetime always schedules", () => {
+    const now = new Date(2026, 6, 15, 12, 0, 0, 0).getTime();
+    const later = parseDatetimeLocal("2026-07-15T14:00");
+    expect(isScheduleForNow(later, null, now)).toBe(false);
+    const soon = parseDatetimeLocal("2026-07-15T12:00");
+    expect(isScheduleForNow(soon, null, now)).toBe(false);
+    expect(isScheduleForNow(soon, "now", now)).toBe(true);
+  });
+
+  it("shifts a company batch to a new start while keeping spacing", () => {
+    const shifted = shiftBatchToNewStart(
+      [
+        { queueItemId: "a", scheduledFor: "2030-01-01T20:00:00.000Z" },
+        { queueItemId: "b", scheduledFor: "2030-01-01T20:04:00.000Z" },
+        { queueItemId: "c", scheduledFor: "2030-01-01T20:08:00.000Z" },
+      ],
+      new Date("2030-01-02T16:00:00.000Z"),
+    );
+    expect(shifted.map((entry) => entry.scheduledFor)).toEqual([
+      "2030-01-02T16:00:00.000Z",
+      "2030-01-02T16:04:00.000Z",
+      "2030-01-02T16:08:00.000Z",
+    ]);
   });
 
   it("returns today when the target hour has not passed", () => {

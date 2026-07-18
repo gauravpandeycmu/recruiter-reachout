@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { LinkedInCaptureJob } from "@recruiter/shared";
 import type { Store } from "./store.js";
 import { buildLinkedInPeopleSearchUrl } from "./search.js";
+import { isWorkerHeartbeatFresh } from "./sendJobs.js";
 
 export function createLinkedInCaptureJob(
   store: Store,
@@ -11,6 +12,22 @@ export function createLinkedInCaptureJob(
   if (!companyName) {
     throw new Error("Company name is required.");
   }
+
+  // Double-click / client-retry guard, same pattern as
+  // createLinkedInProfileEnrichJob: return the existing job instead of
+  // starting a second real LinkedIn scrape (and a second JobTarget row) for
+  // the same company while one is already pending/in flight.
+  const pendingDup = store
+    .listLinkedInCaptureJobs()
+    .find(
+      (job) =>
+        (job.status === "pending" || job.status === "in_progress") &&
+        job.companyName.trim().toLowerCase() === companyName.toLowerCase(),
+    );
+  if (pendingDup) {
+    return pendingDup;
+  }
+
   const pages = Math.min(3, Math.max(1, Number(input.pages ?? 3) || 3));
   const now = new Date().toISOString();
   const job: LinkedInCaptureJob = {
@@ -25,19 +42,23 @@ export function createLinkedInCaptureJob(
   return store.upsertLinkedInCaptureJob(job);
 }
 
-export function claimNextLinkedInCaptureJob(store: Store): LinkedInCaptureJob | undefined {
-  const now = Date.now();
+export function claimNextLinkedInCaptureJob(store: Store, now: Date = new Date()): LinkedInCaptureJob | undefined {
+  const nowMs = now.getTime();
   const STALE_MS = 10 * 60 * 1000;
+  // A slow-but-alive capture (LinkedIn rate-limiting, a multi-page scrape) can
+  // run past this window without the worker having crashed — reclaiming it in
+  // that case claims the same company a second time and doubles the scrape.
+  const workerLooksAlive = isWorkerHeartbeatFresh(store, now);
   for (const job of store.listLinkedInCaptureJobs()) {
     if (job.status !== "in_progress") {
       continue;
     }
-    const age = now - new Date(job.updatedAt).getTime();
-    if (Number.isFinite(age) && age > STALE_MS) {
+    const age = nowMs - new Date(job.updatedAt).getTime();
+    if (Number.isFinite(age) && age > STALE_MS && !workerLooksAlive) {
       store.upsertLinkedInCaptureJob({
         ...job,
         status: "pending",
-        updatedAt: new Date().toISOString(),
+        updatedAt: now.toISOString(),
       });
     }
   }
@@ -64,6 +85,14 @@ export function completeLinkedInCaptureJob(
   const job = store.getLinkedInCaptureJob(jobId);
   if (!job) {
     return undefined;
+  }
+  // Idempotency guard: a job already resolved as completed must never be
+  // re-completed. Without this, a retried/duplicate result report (e.g. the
+  // worker re-sending its result after a lost HTTP response) can downgrade an
+  // already-successful import — with real candidates already saved — back to
+  // "failed" and wipe savedCount/skippedCount. Same guard as completeSendJob.
+  if (job.status === "completed") {
+    return job;
   }
   return store.upsertLinkedInCaptureJob({
     ...job,

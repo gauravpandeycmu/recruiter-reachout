@@ -62,6 +62,28 @@ describe("discoverEmailOnJobright", () => {
     expect(adapter.closeRevealModal).toHaveBeenCalledTimes(1);
   });
 
+  it("maps toast wait timeout to error (not false not_found)", async () => {
+    const adapter = createFakeAdapter({
+      waitForContactResult: vi.fn().mockResolvedValue({ found: false, timedOut: true }),
+    });
+    const outcome = await discoverEmailOnJobright(adapter, "https://www.linkedin.com/in/jane-doe", {
+      dryRun: false,
+      resultTimeoutMs: 50,
+    });
+    expect(outcome).toEqual({
+      status: "error",
+      message: "Timed out waiting for Jobright contact result.",
+    });
+    expect(adapter.clickConnectNow).not.toHaveBeenCalled();
+  });
+
+  it("defaults resultTimeoutMs to 45s when omitted", async () => {
+    const wait = vi.fn().mockResolvedValue({ found: false });
+    const adapter = createFakeAdapter({ waitForContactResult: wait });
+    await discoverEmailOnJobright(adapter, "https://www.linkedin.com/in/jane-doe", { dryRun: false });
+    expect(wait).toHaveBeenCalledWith(45_000);
+  });
+
   it("catches adapter exceptions (e.g. selector not found after a Jobright layout change) as an error outcome", async () => {
     const adapter = createFakeAdapter({ clickSearch: vi.fn().mockRejectedValue(new Error("Timed out waiting for selector")) });
     const outcome = await discoverEmailOnJobright(adapter, "https://www.linkedin.com/in/jane-doe", { dryRun: false });

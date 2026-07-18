@@ -7,7 +7,7 @@ import type { SalesqlDiscoveryOptions, SalesqlPageAdapter } from "./salesql.js";
 export interface DiscoveryPassDeps {
   apiClient: WorkerApiClient;
   createJobrightAdapter: () => JobrightPageAdapter;
-  createSalesqlAdapter?: () => SalesqlPageAdapter;
+  createSalesqlAdapter?: () => SalesqlPageAdapter | Promise<SalesqlPageAdapter>;
   jobrightDryRun: boolean;
   salesqlDryRun: boolean;
   /** When true, immediately calls the existing /send endpoint right after a successful, non-dry-run discovery. */
@@ -19,6 +19,8 @@ export interface DiscoveryPassDeps {
    * yanked off LinkedIn (aborting orphaned navigations) before the next pass.
    */
   recoverSalesqlPage?: () => Promise<void>;
+  /** After Jobright fill/click failures, re-open the job page so Find Any Email is back. */
+  recoverJobrightPage?: () => Promise<void>;
   log?: (message: string) => void;
 }
 
@@ -31,6 +33,40 @@ export interface DiscoveryPassOutcome {
 
 function isSendable(outcome: DiscoveryOutcome): boolean {
   return outcome.status === "found" && Boolean(outcome.email);
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Report a discovery result with retries. Unlike every other network call in
+ * this pass, an unguarded report here can silently discard a genuine find:
+ * the API already claimed this candidate (discoveryClaimedAt), so a lost
+ * report just leaves it claimed until the stale-claim window lapses — and if
+ * the outcome was "found", the email itself is gone until the next attempt
+ * re-spends the same provider credit. A few spaced retries almost always land
+ * the report before that window opens.
+ */
+async function reportDiscoveryResultWithRetry(
+  apiClient: WorkerApiClient,
+  candidateId: string,
+  outcome: DiscoveryOutcome,
+  log: (message: string) => void,
+): Promise<boolean> {
+  const backoffsMs = [0, 1_000, 3_000, 6_000, 12_000];
+  for (let attempt = 0; attempt < backoffsMs.length; attempt += 1) {
+    if (backoffsMs[attempt]! > 0) await sleep(backoffsMs[attempt]!);
+    try {
+      await apiClient.reportDiscoveryResult(candidateId, outcome);
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log(
+        `Reporting discovery result for candidate ${candidateId} failed (attempt ${attempt + 1}/${backoffsMs.length}): ${message}` +
+          (attempt + 1 < backoffsMs.length ? " — retrying" : " — giving up; claim will lapse and the candidate may be re-attempted"),
+      );
+    }
+  }
+  return false;
 }
 
 async function reportStatus(
@@ -183,6 +219,19 @@ export async function runDiscoveryPass(deps: DiscoveryPassDeps): Promise<Discove
     }
   }
 
+  if (outcome.status === "error" && outcome.provider === "jobright" && deps.recoverJobrightPage) {
+    try {
+      await deps.recoverJobrightPage();
+      log("Recovered Jobright page after error/timeout.");
+    } catch (recoverError) {
+      log(
+        `Jobright page recovery failed: ${
+          recoverError instanceof Error ? recoverError.message : String(recoverError)
+        }`,
+      );
+    }
+  }
+
   await reportStatus(
     deps.apiClient,
     {
@@ -195,8 +244,14 @@ export async function runDiscoveryPass(deps: DiscoveryPassDeps): Promise<Discove
     log,
   );
 
-  await deps.apiClient.reportDiscoveryResult(candidate.id, outcome);
+  const reported = await reportDiscoveryResultWithRetry(deps.apiClient, candidate.id, outcome, log);
   const providerNote = "provider" in outcome && outcome.provider ? ` via ${outcome.provider}` : "";
+  if (!reported) {
+    log(
+      `Could not save discovery result for ${candidate.fullName} (${candidate.id}) after retries — it will stay claimed until the stale-claim window lapses.`,
+    );
+    return { result: "idle", usedSalesql };
+  }
   log(
     `Discovery for ${candidate.fullName} (${candidate.id}): ${outcome.status}${providerNote}${
       outcome.status === "error" ? ` - ${outcome.message}` : ""
@@ -238,5 +293,12 @@ export async function runDiscoveryPass(deps: DiscoveryPassDeps): Promise<Discove
     log,
   );
 
-  return { result: "worked", usedSalesql };
+  return { result: discoveryPassResultForOutcome(outcome), usedSalesql };
+}
+
+/** Exported for unit tests — found → hot loop; everything else → idle backoff. */
+export function discoveryPassResultForOutcome(outcome: DiscoveryOutcome): DiscoveryPassResult {
+  // Found email is hot work; not_found / error / dry_run must not tight-loop the
+  // same candidate every DISCOVERY_DELAY_MS (1.5s) — treat as idle backoff.
+  return outcome.status === "found" ? "worked" : "idle";
 }

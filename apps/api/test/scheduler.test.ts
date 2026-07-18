@@ -48,6 +48,41 @@ describe("send scheduler", () => {
     expect(result.suppressed).toHaveLength(3);
   });
 
+  it("rolls a candidate over to the same wall-clock hour tomorrow across a DST spring-forward (regression)", () => {
+    // Regression: raw millisecond arithmetic (+24h) used to land "tomorrow" an
+    // hour late on the actual US spring-forward day (2026-03-08, clocks jump
+    // 2am -> 3am, so that calendar day has only 23 real hours) — a rolled-over
+    // send silently drifted to 10am instead of the intended 9am.
+    const dayBeforeSpringForward = new Date(2026, 2, 7, 9, 0, 0);
+    const result = scheduleCandidates([candidate(1), candidate(2)], {
+      sendCapPerDay: 1,
+      perHourCap: 5,
+      perDomainCap: 100,
+      startDate: dayBeforeSpringForward,
+    });
+    expect(result.rolledOver).toHaveLength(1);
+    const rolledOverDate = new Date(result.rolledOver[0]!.scheduledFor);
+    expect(rolledOverDate.getDate()).toBe(8);
+    expect(rolledOverDate.getHours()).toBe(9);
+  });
+
+  it("rolls a candidate over to the same wall-clock hour tomorrow across a DST fall-back (regression)", () => {
+    // Same bug, opposite direction: US fall-back (2026-11-01, clocks repeat
+    // 1am-2am, a 25-hour calendar day) used to make +24h land an hour early.
+    const dayBeforeFallBack = new Date(2026, 9, 31, 9, 0, 0);
+    const result = scheduleCandidates([candidate(1), candidate(2)], {
+      sendCapPerDay: 1,
+      perHourCap: 5,
+      perDomainCap: 100,
+      startDate: dayBeforeFallBack,
+    });
+    expect(result.rolledOver).toHaveLength(1);
+    const rolledOverDate = new Date(result.rolledOver[0]!.scheduledFor);
+    expect(rolledOverDate.getMonth()).toBe(10);
+    expect(rolledOverDate.getDate()).toBe(1);
+    expect(rolledOverDate.getHours()).toBe(9);
+  });
+
   it("dedupes across jobs by LinkedIn URL email and normalized name/company", () => {
     const first = candidate(1);
     const duplicateEmail = { ...candidate(2), email: first.email };
@@ -63,7 +98,10 @@ function sendEvent(candidateId: string, createdAt: string): TrackingEvent {
 }
 
 describe("assertWithinPacingCaps", () => {
-  const now = new Date("2026-05-13T12:00:00.000Z");
+  // Constructed via local Date components (not UTC ISO strings) so "same
+  // calendar day"/"same hour" fixtures are correct regardless of which
+  // timezone the test happens to run in.
+  const now = new Date(2026, 4, 13, 12, 0, 0);
   const caps = { dailySendCap: 3, hourlySendCap: 2, domainDailySendCap: 1 };
 
   it("allows sending when under all caps", () => {
@@ -72,26 +110,35 @@ describe("assertWithinPacingCaps", () => {
 
   it("blocks once the daily cap is reached", () => {
     const events = [
-      sendEvent("c1", "2026-05-13T01:00:00.000Z"),
-      sendEvent("c2", "2026-05-13T02:00:00.000Z"),
-      sendEvent("c3", "2026-05-13T03:00:00.000Z"),
+      sendEvent("c1", new Date(2026, 4, 13, 1, 0, 0).toISOString()),
+      sendEvent("c2", new Date(2026, 4, 13, 2, 0, 0).toISOString()),
+      sendEvent("c3", new Date(2026, 4, 13, 3, 0, 0).toISOString()),
     ];
     expect(() => assertWithinPacingCaps(events, [], "new@example.com", caps, now)).toThrow("Daily send limit reached");
   });
 
   it("blocks once the hourly cap is reached even if under the daily cap", () => {
-    const events = [sendEvent("c1", "2026-05-13T11:30:00.000Z"), sendEvent("c2", "2026-05-13T11:45:00.000Z")];
+    const events = [
+      sendEvent("c1", new Date(2026, 4, 13, 11, 30, 0).toISOString()),
+      sendEvent("c2", new Date(2026, 4, 13, 11, 45, 0).toISOString()),
+    ];
     expect(() => assertWithinPacingCaps(events, [], "new@example.com", caps, now)).toThrow("Hourly send limit reached");
   });
 
   it("ignores sends from more than an hour ago for the hourly cap", () => {
-    const events = [sendEvent("c1", "2026-05-13T10:00:00.000Z"), sendEvent("c2", "2026-05-13T10:15:00.000Z")];
+    const events = [
+      sendEvent("c1", new Date(2026, 4, 13, 10, 0, 0).toISOString()),
+      sendEvent("c2", new Date(2026, 4, 13, 10, 15, 0).toISOString()),
+    ];
     expect(() => assertWithinPacingCaps(events, [], "new@example.com", caps, now)).not.toThrow();
   });
 
   it("uses calendar hour buckets when scheduling future sends", () => {
-    const events = [sendEvent("c1", "2026-05-13T11:30:00.000Z"), sendEvent("c2", "2026-05-13T11:45:00.000Z")];
-    const slot = new Date("2026-05-13T12:15:00.000Z");
+    const events = [
+      sendEvent("c1", new Date(2026, 4, 13, 11, 30, 0).toISOString()),
+      sendEvent("c2", new Date(2026, 4, 13, 11, 45, 0).toISOString()),
+    ];
+    const slot = new Date(2026, 4, 13, 12, 15, 0);
     const hourlyCaps = { dailySendCap: 10, hourlySendCap: 2, domainDailySendCap: 10 };
     expect(() => assertWithinPacingCaps(events, [], "new@example.com", hourlyCaps, slot, "calendar")).not.toThrow();
     expect(() => assertWithinPacingCaps(events, [], "new@example.com", hourlyCaps, slot, "rolling")).toThrow(
@@ -113,9 +160,25 @@ describe("assertWithinPacingCaps", () => {
         isActive: true,
       },
     ];
-    const events = [sendEvent("c1", "2026-05-13T09:00:00.000Z")];
+    const events = [sendEvent("c1", new Date(2026, 4, 13, 9, 0, 0).toISOString())];
     expect(() =>
       assertWithinPacingCaps(events, candidates, "new-recruiter@target.com", caps, now),
     ).toThrow("Daily per-domain send limit reached for target.com");
+  });
+
+  it("does not reset the daily cap at UTC midnight when it isn't local midnight (regression)", () => {
+    // Regression: the old implementation compared UTC calendar-day strings, so
+    // a send from earlier the same local day that happened to fall on the
+    // previous UTC date (true for any negative-offset zone, e.g. US Pacific,
+    // for several hours every evening) was silently excluded from "sent
+    // today" — letting a user blow past the daily cap ~2x right around the
+    // UTC-midnight boundary. Both sends below are the same LOCAL calendar day.
+    const morningLocal = new Date(2026, 4, 13, 9, 0, 0);
+    const eveningLocal = new Date(2026, 4, 13, 20, 0, 0);
+    const events = [sendEvent("c1", morningLocal.toISOString())];
+    const tightCaps = { dailySendCap: 1, hourlySendCap: 5, domainDailySendCap: 5 };
+    expect(() => assertWithinPacingCaps(events, [], "new@example.com", tightCaps, eveningLocal)).toThrow(
+      "Daily send limit reached",
+    );
   });
 });

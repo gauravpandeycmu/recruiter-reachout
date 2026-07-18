@@ -28,11 +28,12 @@ describe("scheduleToday legacy autopilot integration", () => {
     name: string,
     email: string,
     confidence: "high" | "medium" | "low" = "high",
+    company = "Acme",
   ) {
     return store.upsertCandidate(
       createCandidate({
         fullName: name,
-        company: "Acme",
+        company,
         email,
         emailCandidates: [{ email, pattern: "first.last", confidence, reason: "test" }],
         status: "email_guessed",
@@ -69,5 +70,42 @@ describe("scheduleToday legacy autopilot integration", () => {
     expect(result.scheduledToday).toHaveLength(1);
     expect(result.scheduledToday[0]?.email).toBe("high@acme.com");
     expect(result.suppressed.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("never assigns the same timestamp to different companies (company-block packing)", async () => {
+    // Regression: the old Math.floor(slot / perHourCap) math truncated every
+    // candidate in the same hour bucket to the exact same scheduledFor,
+    // regardless of company — two different companies could fire at the
+    // literal same instant instead of being serialized into separate blocks.
+    process.env.DAILY_SEND_LIMIT = "20";
+    process.env.HOURLY_SEND_LIMIT = "5";
+    process.env.DOMAIN_DAILY_SEND_LIMIT = "20";
+    const store = await freshStore();
+    seedActive(store, "Acme One", "one@acme.com", "high", "Acme");
+    seedActive(store, "Acme Two", "two@acme.com", "high", "Acme");
+    seedActive(store, "Beta One", "one@beta.com", "high", "Beta");
+    seedActive(store, "Beta Two", "two@beta.com", "high", "Beta");
+
+    const result = await scheduleToday(store);
+    expect(result.scheduledToday).toHaveLength(4);
+    const times = result.scheduledToday.map((item) => new Date(item.scheduledFor).getTime());
+    const uniqueTimes = new Set(times);
+    expect(uniqueTimes.size).toBe(times.length);
+
+    const acmeTimes = result.scheduledToday
+      .filter((item) => item.email.endsWith("@acme.com"))
+      .map((item) => new Date(item.scheduledFor).getTime());
+    const betaTimes = result.scheduledToday
+      .filter((item) => item.email.endsWith("@beta.com"))
+      .map((item) => new Date(item.scheduledFor).getTime());
+    // Company blocks must not interleave: one company's whole block finishes
+    // (with a real gap) before the other company's block starts.
+    const acmeMax = Math.max(...acmeTimes);
+    const betaMin = Math.min(...betaTimes);
+    const acmeMin = Math.min(...acmeTimes);
+    const betaMax = Math.max(...betaTimes);
+    const acmeFirst = acmeMax < betaMin;
+    const betaFirst = betaMax < acmeMin;
+    expect(acmeFirst || betaFirst).toBe(true);
   });
 });

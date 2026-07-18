@@ -1697,6 +1697,10 @@ export function groveSpeciesCount(): number {
 let thumbRenderer: THREE.WebGLRenderer | null = null;
 const thumbCache = new Map<string, string>();
 
+/** Field-guide thumb buffer (CSS displays at 112×128). */
+const THUMB_RENDER_W = 168;
+const THUMB_RENDER_H = 192;
+
 function animateTreeParts(root: THREE.Object3D, elapsed: number, delta: number) {
   root.traverse((obj) => {
     const mesh = obj as THREE.Mesh;
@@ -1816,6 +1820,12 @@ function animateTreeParts(root: THREE.Object3D, elapsed: number, delta: number) 
   });
 }
 
+/** Pose the thumb tree exactly as the live hover loop starts (elapsed = 0). */
+function poseThumbTreeAtStart(tree: THREE.Group) {
+  tree.rotation.y = 0;
+  animateTreeParts(tree, 0, 0);
+}
+
 function makeThumbScene(speciesId: Species): {
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
@@ -1827,10 +1837,10 @@ function makeThumbScene(speciesId: Species): {
   key.position.set(3, 6, 4);
   scene.add(hemi, key);
   const tree = buildTreeMesh(speciesId, 77);
-  tree.rotation.y = 0;
   tree.scale.setScalar(0.85);
+  poseThumbTreeAtStart(tree);
   scene.add(tree);
-  const camera = new THREE.PerspectiveCamera(30, 168 / 192, 0.1, 40);
+  const camera = new THREE.PerspectiveCamera(30, THUMB_RENDER_W / THUMB_RENDER_H, 0.1, 40);
   camera.position.set(0.1, 2.55, 6.6);
   camera.lookAt(0, 2.35, 0);
   return { scene, camera, tree };
@@ -1838,8 +1848,8 @@ function makeThumbScene(speciesId: Species): {
 
 /** One-shot WebGL snapshot of the exact grove mesh for field-guide cards. */
 export function renderSpeciesThumbnail(speciesId: string): string {
-  // Bump the version suffix whenever a species' look changes so cards re-render.
-  const cacheKey = `${speciesId}@fx2`;
+  // Bump whenever thumb lighting, pose, or species look changes so cards re-render.
+  const cacheKey = `${speciesId}@start0`;
   const cached = thumbCache.get(cacheKey);
   if (cached) return cached;
   if (!SPECIES_POOL.includes(speciesId as Species)) {
@@ -1854,7 +1864,7 @@ export function renderSpeciesThumbnail(speciesId: string): string {
     });
     thumbRenderer.outputColorSpace = THREE.SRGBColorSpace;
   }
-  thumbRenderer.setSize(168, 192, false);
+  thumbRenderer.setSize(THUMB_RENDER_W, THUMB_RENDER_H, false);
   thumbRenderer.setPixelRatio(1);
   const { scene, camera, tree } = makeThumbScene(speciesId as Species);
   thumbRenderer.setClearColor(0x000000, 0);
@@ -1884,7 +1894,7 @@ function getLiveThumbRenderer(): THREE.WebGLRenderer {
     liveThumbRenderer.outputColorSpace = THREE.SRGBColorSpace;
     liveThumbRenderer.setClearColor(0x000000, 0);
     liveThumbRenderer.setPixelRatio(1);
-    liveThumbRenderer.setSize(112, 128, false);
+    liveThumbRenderer.setSize(THUMB_RENDER_W, THUMB_RENDER_H, false);
     // Keep the GL canvas off-DOM; we blit frames into the card’s 2D canvas.
     liveThumbRenderer.domElement.style.display = "none";
   }
@@ -1918,7 +1928,7 @@ export function LiveSpeciesThumb({
 
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const renderer = getLiveThumbRenderer();
-    renderer.setSize(112, 128, false);
+    renderer.setSize(THUMB_RENDER_W, THUMB_RENDER_H, false);
 
     const { scene, camera, tree } = makeThumbScene(speciesId as Species);
     let raf = 0;
@@ -1933,13 +1943,17 @@ export function LiveSpeciesThumb({
       const elapsed = (now - start) / 1000;
       if (reducedMotion) {
         tree.rotation.y = 0.32;
+        animateTreeParts(tree, 0, 0);
       } else if (animate) {
         tree.rotation.y += delta * 0.95;
         animateTreeParts(tree, elapsed, delta);
+      } else {
+        // Same pose as renderSpeciesThumbnail / makeThumbScene start.
+        poseThumbTreeAtStart(tree);
       }
       renderer.render(scene, camera);
-      ctx.clearRect(0, 0, 112, 128);
-      ctx.drawImage(renderer.domElement, 0, 0, 112, 128);
+      ctx.clearRect(0, 0, THUMB_RENDER_W, THUMB_RENDER_H);
+      ctx.drawImage(renderer.domElement, 0, 0, THUMB_RENDER_W, THUMB_RENDER_H);
       if (!painted) {
         painted = true;
         onFirstFrameRef.current?.();
@@ -1988,8 +2002,8 @@ export function LiveSpeciesThumb({
     <canvas
       ref={canvasRef}
       className={className ?? "grove-guide-thumb is-live"}
-      width={112}
-      height={128}
+      width={THUMB_RENDER_W}
+      height={THUMB_RENDER_H}
       aria-hidden="true"
     />
   );
@@ -4177,8 +4191,13 @@ function StreakGrove3DComponent({
     let elapsed = 0;
     let frame = 0;
     let inView = true;
-    const loop = () => {
+    let lastFrameMs = 0;
+    // Cap draw rate — ProMotion would otherwise push 120 renders/sec for little gain.
+    const FRAME_INTERVAL_MS = 1000 / 30;
+    const loop = (time = performance.now()) => {
       if (!activeRef.current || document.hidden || !inView) return;
+      if (time - lastFrameMs < FRAME_INTERVAL_MS) return;
+      lastFrameMs = time;
       const delta = clock.getDelta();
       elapsed += delta;
       frame += 1;

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, memo, type CSSProperties } from "react";
 import { buildExpandedVisible } from "./groveFieldGuideLayout";
 import { GROVE_TREE_GUIDE, type GroveTreeGuideEntry } from "./groveTreeGuide";
+import { groveThumbUrl } from "./groveThumbs";
 
 type Grove3DModule = typeof import("./StreakGrove3D");
 
@@ -12,22 +13,19 @@ function loadGrove3D(): Promise<Grove3DModule> {
 }
 
 function GroveTreeThumb({ speciesId, live }: { speciesId: string; live: boolean }) {
-  const [src, setSrc] = useState<string | null>(null);
   const [LiveThumb, setLiveThumb] = useState<null | Grove3DModule["LiveSpeciesThumb"]>(null);
   const [liveReady, setLiveReady] = useState(false);
 
+  // Prefetch the live-thumb module once so the first hover isn’t waiting on the chunk.
   useEffect(() => {
     let cancelled = false;
     void loadGrove3D().then((mod) => {
-      if (cancelled) return;
-      setLiveThumb(() => mod.LiveSpeciesThumb);
-      const url = mod.renderSpeciesThumbnail(speciesId);
-      setSrc(url || null);
+      if (!cancelled) setLiveThumb(() => mod.LiveSpeciesThumb);
     });
     return () => {
       cancelled = true;
     };
-  }, [speciesId]);
+  }, []);
 
   useEffect(() => {
     if (!live) setLiveReady(false);
@@ -35,17 +33,15 @@ function GroveTreeThumb({ speciesId, live }: { speciesId: string; live: boolean 
 
   return (
     <div className="grove-guide-thumb-wrap">
-      {src ? (
-        <img
-          className={`grove-guide-thumb${live && liveReady ? " is-idle-hidden" : ""}`}
-          src={src}
-          alt=""
-          width={112}
-          height={128}
-        />
-      ) : (
-        <div className="grove-guide-thumb is-loading" aria-hidden="true" />
-      )}
+      <img
+        className={`grove-guide-thumb${live && liveReady ? " is-idle-hidden" : ""}`}
+        src={groveThumbUrl(speciesId)}
+        alt=""
+        width={112}
+        height={128}
+        loading="lazy"
+        decoding="async"
+      />
       {live && LiveThumb ? (
         <LiveThumb
           speciesId={speciesId}

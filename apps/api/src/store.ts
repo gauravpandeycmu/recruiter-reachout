@@ -24,6 +24,7 @@ import type {
   TestModeSettings,
   SendJob,
   LinkedInCaptureJob,
+  LinkedInProfileEnrichJob,
   AnalyticsGoalSettings,
   LlmUsageEvent,
   WeatherSnapshot,
@@ -525,6 +526,19 @@ export class Store {
     return this.listJson<LinkedInCaptureJob>("linkedin_capture_jobs");
   }
 
+  upsertLinkedInProfileEnrichJob(job: LinkedInProfileEnrichJob): LinkedInProfileEnrichJob {
+    this.putJson("linkedin_profile_enrich_jobs", job.id, job);
+    return structuredClone(job);
+  }
+
+  getLinkedInProfileEnrichJob(id: string): LinkedInProfileEnrichJob | undefined {
+    return this.getJson<LinkedInProfileEnrichJob>("linkedin_profile_enrich_jobs", id);
+  }
+
+  listLinkedInProfileEnrichJobs(): LinkedInProfileEnrichJob[] {
+    return this.listJson<LinkedInProfileEnrichJob>("linkedin_profile_enrich_jobs");
+  }
+
   setGmailAccount(account: GmailAccount): GmailAccount {
     this.db.prepare("DELETE FROM gmail_accounts").run();
     this.putJson("gmail_accounts", account.id, account);
@@ -745,6 +759,7 @@ export class Store {
       "discovery_settings",
       "send_jobs",
       "linkedin_capture_jobs",
+      "linkedin_profile_enrich_jobs",
       "test_mode_settings",
       "analytics_goal_settings",
       "llm_usage_events",

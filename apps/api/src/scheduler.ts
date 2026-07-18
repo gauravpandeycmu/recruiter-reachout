@@ -29,7 +29,13 @@ export interface ExplicitScheduleInput {
 export interface ExplicitScheduleResult {
   queued: SendQueueItem[];
   rejected: Array<{ candidateId: string; reason: string }>;
-  shifted: Array<{ candidateId: string; original: string; shiftedTo: string; reason: string }>;
+  shifted: Array<{
+    candidateId: string;
+    original: string;
+    shiftedTo: string;
+    reason: string;
+    company?: string;
+  }>;
 }
 
 const defaultConfig = (startDate = new Date()): SchedulerConfig => ({
@@ -84,6 +90,19 @@ export interface PacingCaps {
   domainDailySendCap: number;
 }
 
+/** YYYY-MM-DD in the machine's local timezone (this app runs on the user's own machine). */
+function localYmd(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+/** Local calendar-day + hour bucket, e.g. "2026-05-13T18". */
+function localYmdHour(date: Date): string {
+  return `${localYmd(date)}T${String(date.getHours()).padStart(2, "0")}`;
+}
+
 /**
  * Enforces the same daily/hourly/per-domain caps used by the backlog scheduler
  * against the real, immediate send path (sendCandidate), so automatic/autopilot
@@ -99,15 +118,18 @@ export function assertWithinPacingCaps(
   hourBucketMode: "rolling" | "calendar" = "rolling",
 ): void {
   const sendEvents = events.filter((event) => event.type === "send");
-  const todayPrefix = now.toISOString().slice(0, 10);
-  const sentToday = sendEvents.filter((event) => event.createdAt.startsWith(todayPrefix));
+  // Local calendar day, not the UTC calendar day — a UTC-day boundary rolls
+  // over mid-afternoon/evening for any non-UTC timezone (e.g. ~5-6pm Pacific),
+  // which used to let the daily cap silently reset early and be hit twice.
+  const todayLocal = localYmd(now);
+  const sentToday = sendEvents.filter((event) => localYmd(new Date(event.createdAt)) === todayLocal);
   if (sentToday.length >= caps.dailySendCap) {
     throw new Error(`Daily send limit reached (${caps.dailySendCap}/day).`);
   }
 
   const sentLastHour =
     hourBucketMode === "calendar"
-      ? sendEvents.filter((event) => event.createdAt.slice(0, 13) === now.toISOString().slice(0, 13))
+      ? sendEvents.filter((event) => localYmdHour(new Date(event.createdAt)) === localYmdHour(now))
       : sendEvents.filter((event) => {
           const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
           return new Date(event.createdAt).getTime() >= oneHourAgo.getTime();
@@ -211,16 +233,27 @@ function isSuppressed(email: string, suppressions: SuppressionEntry[]): boolean 
   return suppressions.some((entry) => entry.email === email.toLowerCase() || (domain && entry.domain === domain));
 }
 
+// Local-calendar (setHours/setDate/setMinutes) arithmetic, not raw millisecond
+// deltas — a day isn't always 24h and an hour isn't always 60min of wall-clock
+// time across a DST transition. Raw ms math used to land "tomorrow" or "N
+// hours from now" an hour off (or on the wrong calendar day near midnight) on
+// the days DST actually falls on.
 function addHours(date: Date, hours: number): Date {
-  return new Date(date.getTime() + hours * 60 * 60 * 1000);
+  const result = new Date(date);
+  result.setHours(result.getHours() + hours);
+  return result;
 }
 
 function addDays(date: Date, days: number): Date {
-  return new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
+  const result = new Date(date);
+  result.setDate(result.getDate() + days);
+  return result;
 }
 
 function addMinutes(date: Date, minutes: number): Date {
-  return new Date(date.getTime() + minutes * 60 * 1000);
+  const result = new Date(date);
+  result.setMinutes(result.getMinutes() + minutes);
+  return result;
 }
 
 function withJitter(date: Date, jitterSeconds: number): Date {

@@ -565,12 +565,20 @@ html[data-page-visible="false"] *::after {
   display: grid;
   gap: 16px;
   grid-template-columns: minmax(0, 1fr) minmax(170px, 200px) minmax(150px, 180px);
+  overflow: visible;
 }
 
 .find-panel-hint {
   font-size: 13px;
   line-height: 1.4;
   margin: 0;
+}
+
+.send-streak-wrap {
+  min-height: 0;
+  overflow: visible;
+  position: relative;
+  width: 100%;
 }
 
 .send-streak-card {
@@ -590,7 +598,7 @@ html[data-page-visible="false"] *::after {
   padding: 12px 14px 14px;
   position: relative;
   text-align: center;
-  transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+  transition: background 0.2s ease, border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
   width: 100%;
 }
 
@@ -598,6 +606,15 @@ html[data-page-visible="false"] *::after {
   border-color: color-mix(in srgb, #4f9a45 48%, var(--line));
   box-shadow: 0 6px 18px color-mix(in srgb, #4f9a45 12%, transparent);
   transform: translateY(-1px);
+}
+
+/* Tree moods stay inside this stage; the at-risk comic bubble sits outside it. */
+.send-streak-tree-stage {
+  height: 68px;
+  margin: 0 auto 2px;
+  overflow: visible;
+  position: relative;
+  width: 78px;
 }
 
 .send-streak-card:hover .streak-tree-buddy.is-hover {
@@ -647,6 +664,72 @@ html[data-page-visible="false"] *::after {
   font-size: 12px;
   font-weight: 600;
   margin-top: 6px;
+}
+
+.send-streak-card.at-risk {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #f0d35a 22%, var(--panel-wash)), var(--panel-wash) 74%);
+  border-color: color-mix(in srgb, #d4b02a 34%, var(--line-soft));
+}
+
+.send-streak-card.at-risk:hover {
+  border-color: color-mix(in srgb, #c9a420 48%, var(--line));
+  box-shadow: 0 6px 18px color-mix(in srgb, #e0c040 16%, transparent);
+}
+
+/* Comic bubble floats outside the card, near the top-right corner. */
+.send-streak-risk-bubble {
+  animation: send-streak-risk-pop 0.45s cubic-bezier(0.34, 1.4, 0.64, 1) both;
+  background: #fffdf3;
+  border: 2px solid #2c2a24;
+  border-radius: 18px 18px 6px 18px;
+  box-shadow: 2px 2px 0 #2c2a24;
+  color: #8a6a12;
+  font-family: "Comic Sans MS", "Chalkboard SE", "Marker Felt", "Segoe Print", cursive;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  line-height: 1.1;
+  padding: 5px 9px 4px;
+  pointer-events: none;
+  position: absolute;
+  right: -12px;
+  top: -16px;
+  transform: rotate(6deg);
+  white-space: nowrap;
+  z-index: 6;
+}
+
+.send-streak-risk-bubble::after {
+  border: 7px solid transparent;
+  border-right-color: #2c2a24;
+  border-top-color: #2c2a24;
+  bottom: -10px;
+  content: "";
+  left: 8px;
+  position: absolute;
+}
+
+.send-streak-risk-bubble::before {
+  border: 6px solid transparent;
+  border-right-color: #fffdf3;
+  border-top-color: #fffdf3;
+  bottom: -7px;
+  content: "";
+  left: 9px;
+  position: absolute;
+  z-index: 1;
+}
+
+@keyframes send-streak-risk-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.7) rotate(0deg);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) rotate(6deg);
+  }
 }
 
 /* Cute dancing tree + mood scenes */
@@ -2145,7 +2228,7 @@ html[data-theme="dark"] .streak-tree-moon::after {
     order: 2;
   }
 
-  .send-streak-card {
+  .send-streak-wrap {
     order: 3;
   }
 }
@@ -2486,9 +2569,9 @@ html[data-theme="dark"] .streak-tree-moon::after {
   margin-bottom: 18px;
   opacity: 1;
   transition:
-    grid-template-rows 280ms cubic-bezier(0.4, 0, 0.2, 1),
-    opacity 220ms ease,
-    margin-bottom 280ms cubic-bezier(0.4, 0, 0.2, 1);
+    grid-template-rows 420ms cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 320ms ease,
+    margin-bottom 420ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .scheduled-group-exit.is-leaving {
@@ -2699,6 +2782,23 @@ html[data-theme="dark"] .streak-tree-moon::after {
   flex-direction: column;
   gap: 8px;
   padding: 12px 14px;
+  transition:
+    opacity 280ms ease,
+    transform 280ms var(--ease-out),
+    max-height 320ms cubic-bezier(0.4, 0, 0.2, 1),
+    padding 320ms cubic-bezier(0.4, 0, 0.2, 1),
+    margin 320ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.scheduled-item.is-leaving {
+  max-height: 0;
+  margin: 0;
+  opacity: 0;
+  overflow: hidden;
+  padding-bottom: 0;
+  padding-top: 0;
+  pointer-events: none;
+  transform: translateX(10px);
 }
 
 .scheduled-item:last-child {
@@ -2827,6 +2927,18 @@ html[data-theme="dark"] .streak-tree-moon::after {
   padding: 14px 16px;
   width: 100%;
   animation: scheduled-panel-in 320ms var(--ease-out) both;
+  transform-origin: top center;
+}
+
+.scheduled-reschedule-panel.is-closing {
+  animation: scheduled-panel-out 320ms var(--ease-out) both;
+  pointer-events: none;
+}
+
+.scheduled-add-person-panel .scheduled-reschedule-field em {
+  color: var(--muted);
+  font-style: normal;
+  font-weight: 400;
 }
 
 @keyframes scheduled-panel-in {
@@ -2837,6 +2949,17 @@ html[data-theme="dark"] .streak-tree-moon::after {
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes scheduled-panel-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-6px);
   }
 }
 
@@ -3651,6 +3774,10 @@ html[data-theme="dark"] .streak-tree-moon::after {
   border-color: color-mix(in srgb, var(--good) 35%, var(--line));
 }
 
+.send-progress-panel.paused {
+  border-color: color-mix(in srgb, #b59a5a 45%, var(--line));
+}
+
 .send-progress-eta {
   margin: 0;
 }
@@ -3683,6 +3810,10 @@ html[data-theme="dark"] .streak-tree-moon::after {
 
 .send-checklist-item.failed {
   color: #b91c1c;
+}
+
+.send-checklist-item.paused {
+  color: #8a7340;
 }
 
 .send-checklist-name {
@@ -3723,6 +3854,12 @@ html[data-theme="dark"] .streak-tree-moon::after {
 .send-checklist-item.failed .send-check {
   background: #fee2e2;
   color: #b91c1c;
+}
+
+.send-checklist-item.paused .send-check {
+  background: #f5edd8;
+  color: #8a7340;
+  font-size: 9px;
 }
 
 .send-checklist-gap {
@@ -5262,6 +5399,14 @@ th.sortable.active {
   transform: translateY(0);
 }
 
+.history-company-card-header {
+  align-items: center;
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+  padding-right: 10px;
+}
+
 .history-company-card-main {
   align-items: center;
   background: transparent;
@@ -5269,12 +5414,63 @@ th.sortable.active {
   color: inherit;
   cursor: pointer;
   display: flex;
+  flex: 1;
   gap: 12px;
   justify-content: space-between;
   min-height: 88px;
+  min-width: 0;
   padding: 16px;
   text-align: left;
-  width: 100%;
+}
+
+.history-add-to-send-icon {
+  align-items: center;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line));
+  border-radius: 8px;
+  color: var(--accent-deep);
+  cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 18px;
+  font-weight: 600;
+  height: 28px;
+  justify-content: center;
+  line-height: 1;
+  padding: 0;
+  width: 28px;
+}
+
+.history-add-to-send-icon:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.history-add-to-send-icon:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.history-add-to-send {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+  border-radius: 10px;
+  color: var(--accent-deep);
+  cursor: pointer;
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  padding: 6px 11px;
+  white-space: nowrap;
+}
+
+.history-add-to-send:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+.history-add-to-send:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .history-company-card-main:active {
@@ -6312,42 +6508,12 @@ html[data-theme="dark"] .grove-weather-moon-crater {
 .grove-guide-thumb.is-idle-hidden {
   opacity: 0;
   pointer-events: none;
-  /* Instant hide only after live canvas has a frame — avoids a blank blink on hover. */
-  transition: none;
 }
 
 .grove-guide-thumb.is-live {
   left: 0;
   position: absolute;
   top: 0;
-}
-
-.grove-guide-thumb.is-loading {
-  background: transparent;
-  position: relative;
-}
-
-.grove-guide-thumb.is-loading::after {
-  background: color-mix(in srgb, var(--muted) 40%, transparent);
-  border-radius: 50% 50% 42% 42%;
-  content: "";
-  height: 48px;
-  left: 50%;
-  position: absolute;
-  top: 28px;
-  transform: translateX(-50%);
-  width: 48px;
-}
-
-.grove-guide-thumb.is-loading::before {
-  background: color-mix(in srgb, var(--muted) 45%, #6b4a2e);
-  bottom: 18px;
-  content: "";
-  height: 28px;
-  left: 50%;
-  position: absolute;
-  transform: translateX(-50%);
-  width: 6px;
 }
 
 .grove-guide-copy {
@@ -6527,6 +6693,7 @@ html[data-theme="dark"] .grove-weather-moon-crater {
 }
 
 .analytics-grid {
+  align-items: start;
   display: grid;
   gap: 14px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -6653,6 +6820,20 @@ html[data-theme="dark"] .grove-weather-moon-crater {
   margin: 12px 0 4px;
 }
 
+.analytics-chart-plot {
+  min-height: 120px;
+}
+
+.climb-card .analytics-chart-plot .svg-chart {
+  display: block;
+  height: 120px;
+  width: 100%;
+}
+
+.climb-card .analytics-chart-plot .svg-chart-wrap {
+  align-items: stretch;
+}
+
 .trend-bar {
   align-items: center;
   display: flex;
@@ -6695,8 +6876,31 @@ html[data-theme="dark"] .grove-weather-moon-crater {
 
 .fun-stats {
   display: grid;
-  gap: 10px;
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
+  grid-template-columns: repeat(9, minmax(0, 1fr));
+}
+
+.fun-stats .stat {
+  min-width: 0;
+  padding: 10px 8px;
+}
+
+.fun-stats .stat strong {
+  font-size: 1.05rem;
+}
+
+.fun-stats .stat span {
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+@media (max-width: 1100px) {
+  .fun-stats {
+    grid-auto-flow: column;
+    grid-template-columns: repeat(9, minmax(108px, 1fr));
+    overflow-x: auto;
+    padding-bottom: 4px;
+  }
 }
 
 .svg-chart-wrap {
@@ -6757,7 +6961,7 @@ html[data-theme="dark"] .grove-weather-moon-crater {
 
 .hourly-bar-fill {
   background: linear-gradient(180deg, #3d7ab5, #7aa7d4);
-  border-radius: 4px 4px 1px 1px;
+  border-radius: 6px 6px 2px 2px;
   min-height: 0;
   width: 100%;
 }
@@ -6784,9 +6988,10 @@ html[data-theme="dark"] .grove-weather-moon-crater {
   align-items: center;
   border-radius: 50%;
   display: grid;
-  height: 96px;
+  flex-shrink: 0;
+  height: 112px;
   place-items: center;
-  width: 96px;
+  width: 112px;
 }
 
 .donut-hole {
@@ -6794,9 +6999,9 @@ html[data-theme="dark"] .grove-weather-moon-crater {
   background: var(--panel-solid);
   border-radius: 50%;
   display: grid;
-  height: 54px;
+  height: 64px;
   place-items: center;
-  width: 54px;
+  width: 64px;
 }
 
 .donut-legend {
@@ -7006,6 +7211,20 @@ html[data-theme="dark"] .grove-weather-moon-crater {
   display: block;
   height: 100%;
   min-width: 8px;
+}
+
+.mix-card {
+  align-self: start;
+}
+
+.mix-card .donut-row {
+  align-items: center;
+  justify-content: flex-start;
+  min-height: 0;
+}
+
+.mix-card .donut-card {
+  width: 100%;
 }
 
 .analytics-company-table {
@@ -7316,6 +7535,29 @@ html[data-theme="dark"] .scheduled-group-bar,
 html[data-theme="dark"] .scheduled-item.editing,
 html[data-theme="dark"] .scheduled-later-banner,
 html[data-theme="dark"] .history-person-card,
+html[data-theme="dark"] .send-streak-card.at-risk {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #c9a830 18%, var(--panel-wash)), var(--panel-wash) 74%);
+  border-color: color-mix(in srgb, #c9a830 36%, var(--line-soft));
+}
+
+html[data-theme="dark"] .send-streak-risk-bubble {
+  background: #2a2618;
+  border-color: #e8d9a0;
+  box-shadow: 2px 2px 0 #e8d9a0;
+  color: #f0d878;
+}
+
+html[data-theme="dark"] .send-streak-risk-bubble::after {
+  border-left-color: #e8d9a0;
+  border-top-color: #e8d9a0;
+}
+
+html[data-theme="dark"] .send-streak-risk-bubble::before {
+  border-left-color: #2a2618;
+  border-top-color: #2a2618;
+}
+
 html[data-theme="dark"] .history-company-card,
 html[data-theme="dark"] .resume-preview-frame,
 html[data-theme="dark"] .passion-toggle,
@@ -7589,9 +7831,28 @@ html[data-theme="dark"] .eyebrow {
   color: var(--muted);
 }
 
-html[data-theme="dark"] .hourly-bar-fill,
-html[data-theme="dark"] .trend-bar-fill {
-  background: rgba(126, 176, 224, 0.55) !important;
+html[data-theme="dark"] .hourly-bar-fill {
+  background: linear-gradient(180deg, #7eb0e0, #4a7fb0);
+}
+
+html[data-theme="dark"] .hourly-bar-fill.weekday-best {
+  background: linear-gradient(180deg, #e9a13b, #c97f18);
+}
+
+html[data-theme="dark"] .trend-bar-fill.sent {
+  background: linear-gradient(180deg, #7eb0e0, #4a7fb0);
+}
+
+html[data-theme="dark"] .trend-bar-fill.found {
+  background: linear-gradient(180deg, #5ec9a0, #2f9e78);
+}
+
+html[data-theme="dark"] .trend-bar-fill.company {
+  background: linear-gradient(180deg, #d6c08a, #b59a5a);
+}
+
+html[data-theme="dark"] .svg-area {
+  fill: color-mix(in srgb, var(--accent, #7eb0e0) 28%, transparent);
 }
 
 html[data-theme="dark"] .tab.active {
@@ -7699,6 +7960,13 @@ html[data-theme="dark"] .history-people-count {
   color: var(--ink-soft);
 }
 
+html[data-theme="dark"] .history-add-to-send,
+html[data-theme="dark"] .history-add-to-send-icon {
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface));
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+  color: var(--ink-soft);
+}
+
 html[data-theme="dark"] .toggle-knob,
 html[data-theme="dark"] .passion-toggle-knob {
   background: #e8eef6;
@@ -7711,12 +7979,17 @@ html[data-theme="dark"] .passion-toggle-knob {
 }
 
 .garden-wrap {
+  margin-top: 4px;
   overflow-x: auto;
-  padding-bottom: 4px;
+  padding-bottom: 2px;
+  width: 100%;
 }
 
 .garden-svg {
   display: block;
+  flex-shrink: 0;
+  height: auto;
+  max-width: 100%;
 }
 
 .garden-month,
@@ -7731,6 +8004,7 @@ html[data-theme="dark"] .passion-toggle-knob {
 }
 
 .garden-cell.soil { fill: color-mix(in srgb, var(--line) 55%, transparent); }
+.garden-cell.blank { fill: color-mix(in srgb, var(--line) 38%, transparent); opacity: 0.65; }
 .garden-cell.sprout { fill: #b9dcae; }
 .garden-cell.leaf1 { fill: #7cc06e; }
 .garden-cell.leaf2 { fill: #479a48; }
@@ -7738,6 +8012,7 @@ html[data-theme="dark"] .passion-toggle-knob {
 
 html[data-theme="dark"] .garden-cell { stroke: rgba(255, 255, 255, 0.05); }
 html[data-theme="dark"] .garden-cell.soil { fill: rgba(148, 163, 190, 0.14); }
+html[data-theme="dark"] .garden-cell.blank { fill: rgba(148, 163, 190, 0.08); opacity: 0.9; }
 html[data-theme="dark"] .garden-cell.sprout { fill: #3a5a34; }
 html[data-theme="dark"] .garden-cell.leaf1 { fill: #4d7d44; }
 html[data-theme="dark"] .garden-cell.leaf2 { fill: #63a457; }
@@ -7787,13 +8062,13 @@ html[data-theme="dark"] .garden-cell-chip.leaf3 { background: #86cf74; }
 
 /* ---- Weekday rhythm ---- */
 .weekday-rhythm {
-  margin-top: 14px;
+  margin-top: 16px;
   border-top: 1px dashed var(--line);
-  padding-top: 10px;
+  padding-top: 14px;
 }
 
 .weekday-headline {
-  margin: 0 0 8px;
+  margin: 0 0 10px;
   font-size: 13px;
   color: var(--ink-soft);
 }
@@ -7803,7 +8078,9 @@ html[data-theme="dark"] .garden-cell-chip.leaf3 { background: #86cf74; }
 }
 
 .weekday-bars {
-  height: 64px;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  height: 100px;
+  width: 100%;
 }
 
 .hourly-bar-fill.weekday-best {
@@ -7812,6 +8089,7 @@ html[data-theme="dark"] .garden-cell-chip.leaf3 { background: #86cf74; }
 
 /* ---- Company bubbles ---- */
 .bubble-chart-wrap {
+  margin-top: 4px;
   overflow: hidden;
 }
 
@@ -7819,22 +8097,35 @@ html[data-theme="dark"] .garden-cell-chip.leaf3 { background: #86cf74; }
   width: 100%;
   height: auto;
   display: block;
+  min-height: 200px;
 }
 
 .bubble {
   cursor: pointer;
+  outline: none;
+  transition: transform 160ms ease;
 }
 
-.bubble circle {
-  opacity: 0.82;
-  transition: opacity 140ms ease, stroke-width 140ms ease;
-  stroke: rgba(255, 255, 255, 0.55);
-  stroke-width: 1;
+.bubble:hover,
+.bubble:focus-visible {
+  transform: scale(1.06);
 }
 
-.bubble:hover circle,
-.bubble:focus-visible circle {
-  opacity: 1;
+.bubble-body {
+  filter: drop-shadow(0 3px 6px rgb(23 40 70 / 18%));
+  stroke: rgba(255, 255, 255, 0.72);
+  stroke-width: 1.5;
+  transition: stroke-width 140ms ease, filter 140ms ease;
+}
+
+.bubble-shine {
+  fill: rgba(255, 255, 255, 0.38);
+  pointer-events: none;
+}
+
+.bubble:hover .bubble-body,
+.bubble:focus-visible .bubble-body {
+  filter: drop-shadow(0 5px 12px rgb(23 40 70 / 24%));
   stroke-width: 2.5;
 }
 
@@ -7843,10 +8134,12 @@ html[data-theme="dark"] .garden-cell-chip.leaf3 { background: #86cf74; }
   font-size: 11px;
   font-weight: 600;
   pointer-events: none;
+  text-shadow: 0 1px 2px rgb(0 0 0 / 28%);
 }
 
 .bubble-count {
-  fill: rgba(255, 255, 255, 0.85);
+  fill: rgba(255, 255, 255, 0.9);
   font-size: 10px;
   pointer-events: none;
+  text-shadow: 0 1px 2px rgb(0 0 0 / 22%);
 }

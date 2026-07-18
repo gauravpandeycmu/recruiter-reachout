@@ -5,11 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createCandidate,
   listUpcomingSends,
+  rescheduleCompanyBatch,
   rescheduleQueuedSend,
   scheduleSends,
   setOutreachContent,
   saveResume,
 } from "../src/services.js";
+import { cancelScheduledSends } from "../src/sendJobs.js";
 import { Store } from "../src/store.js";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -31,6 +33,8 @@ describe("rescheduleQueuedSend integration", () => {
     process.env.DAILY_SEND_LIMIT = "50";
     process.env.HOURLY_SEND_LIMIT = "20";
     process.env.DOMAIN_DAILY_SEND_LIMIT = "20";
+    process.env.GLOBAL_SEND_GAP_MINUTES = "4";
+    process.env.DEFAULT_SCHEDULE_INTERVAL_MINUTES = "4";
 
     store.setGmailAccount({
       id: "me@example.com",
@@ -58,21 +62,26 @@ describe("rescheduleQueuedSend integration", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
-  async function seedAndSchedule(name: string, email: string, startAt: string) {
-    const person = store.upsertCandidate(
+  async function seed(name: string, email: string, company: string) {
+    return store.upsertCandidate(
       createCandidate({
         fullName: name,
-        company: "Acme",
+        company,
         email,
-        emailCandidates: [{ email, pattern: "first.last", confidence: "high", reason: "test" }],
+        emailCandidates: [{ email, pattern: "api_verified", confidence: "high", reason: "test" }],
         status: "email_guessed",
       }),
     );
+  }
+
+  async function seedAndSchedule(name: string, email: string, startAt: string, company = "Acme") {
+    const person = await seed(name, email, company);
     const result = await scheduleSends(store, {
       candidateIds: [person.id],
       startAt,
-      intervalMinutes: 8,
+      intervalMinutes: 4,
       mode: "schedule",
+      jitterSeconds: 0,
     });
     const queueItemId = result.queued[0]!.id;
     return { person, queueItemId };
@@ -131,5 +140,137 @@ describe("rescheduleQueuedSend integration", () => {
 
     const scheduledTab = listUpcomingSends(store).filter((item) => item.jobMode !== "send_now");
     expect(scheduledTab).toHaveLength(0);
+  });
+
+  it("Change time → tomorrow 8am keeps the whole company batch (no mid-loop rebalance yank)", async () => {
+    // Use relative times so the test does not flake after local 8pm
+    // (when "tonight 8pm" rolls to tomorrow and lands after "tomorrow 8am").
+    const eveningBlock = new Date(Date.now() + 3 * 60 * 60_000);
+    const morningBlock = new Date(Date.now() + 14 * 60 * 60_000);
+    const n1 = await seed("Ned", "ned@notion.com", "Notion");
+    const n2 = await seed("Nina", "nina@notion.com", "Notion");
+    const n3 = await seed("Nora", "nora@notion.com", "Notion");
+    const s1 = await seed("Sam", "sam@seatgeek.com", "SeatGeek");
+    const s2 = await seed("Sue", "sue@seatgeek.com", "SeatGeek");
+
+    await scheduleSends(store, {
+      candidateIds: [n1.id, n2.id, n3.id],
+      startAt: eveningBlock.toISOString(),
+      intervalMinutes: 4,
+      mode: "schedule",
+      jitterSeconds: 0,
+    });
+    await scheduleSends(store, {
+      candidateIds: [s1.id, s2.id],
+      startAt: eveningBlock.toISOString(),
+      intervalMinutes: 4,
+      mode: "schedule",
+      jitterSeconds: 0,
+    });
+
+    const notionQueue = store
+      .listSendQueue()
+      .filter((item) => item.status === "scheduled")
+      .filter((item) => [n1.id, n2.id, n3.id].includes(item.candidateId))
+      .sort((a, b) => a.scheduledFor.localeCompare(b.scheduledFor));
+    expect(notionQueue).toHaveLength(3);
+
+    const seatgeekBefore = store
+      .listSendQueue()
+      .filter((item) => [s1.id, s2.id].includes(item.candidateId))
+      .map((item) => item.scheduledFor)
+      .sort();
+
+    const result = await rescheduleCompanyBatch(store, {
+      queueItemIds: notionQueue.map((item) => item.id),
+      startAt: morningBlock.toISOString(),
+    });
+    expect(result.updated).toBe(3);
+
+    const notionAfter = store
+      .listSendQueue()
+      .filter((item) => [n1.id, n2.id, n3.id].includes(item.candidateId))
+      .sort((a, b) => a.scheduledFor.localeCompare(b.scheduledFor));
+    expect(notionAfter.map((item) => item.scheduledFor)).toEqual([
+      morningBlock.toISOString(),
+      new Date(morningBlock.getTime() + 4 * 60_000).toISOString(),
+      new Date(morningBlock.getTime() + 8 * 60_000).toISOString(),
+    ]);
+
+    const jobs = store
+      .listSendJobs()
+      .filter((job) => [n1.id, n2.id, n3.id].includes(job.candidateId) && job.status === "pending")
+      .sort((a, b) => (a.scheduledFor ?? "").localeCompare(b.scheduledFor ?? ""));
+    expect(jobs.map((job) => job.scheduledFor)).toEqual(notionAfter.map((item) => item.scheduledFor));
+
+    // SeatGeek stays on the earlier evening block (untouched by Notion change-time).
+    const seatgeekAfter = store
+      .listSendQueue()
+      .filter((item) => [s1.id, s2.id].includes(item.candidateId))
+      .map((item) => item.scheduledFor)
+      .sort();
+    expect(seatgeekAfter).toEqual(seatgeekBefore);
+    expect(new Date(seatgeekAfter[0]!).getTime()).toBeLessThan(morningBlock.getTime());
+  });
+
+  it("rescheduleCompanyBatch lands a company on a new start with intact spacing", async () => {
+    // Use a stable far-future evening so local clock hour cannot collapse the window.
+    const evening = new Date();
+    evening.setDate(evening.getDate() + 2);
+    evening.setHours(21, 0, 0, 0);
+    const n1 = await seed("Ned", "ned2@notion.com", "Notion");
+    const n2 = await seed("Nina", "nina2@notion.com", "Notion");
+    const n3 = await seed("Nora", "nora2@notion.com", "Notion");
+    await scheduleSends(store, {
+      candidateIds: [n1.id, n2.id, n3.id],
+      startAt: evening.toISOString(),
+      intervalMinutes: 4,
+      mode: "schedule",
+      jitterSeconds: 0,
+    });
+    const notionQueue = store
+      .listSendQueue()
+      .filter((item) => [n1.id, n2.id, n3.id].includes(item.candidateId))
+      .sort((a, b) => a.scheduledFor.localeCompare(b.scheduledFor));
+
+    const tomorrow8 = new Date();
+    tomorrow8.setDate(tomorrow8.getDate() + 1);
+    tomorrow8.setHours(8, 0, 0, 0);
+
+    // Old UI applied person-by-person deltas from a stale snapshot (rebalance mid-loop).
+    // Batch API is the supported path — lock correct start + 4m spacing.
+    const delta = tomorrow8.getTime() - new Date(notionQueue[0]!.scheduledFor).getTime();
+    for (const item of notionQueue) {
+      const nextAt = new Date(new Date(item.scheduledFor).getTime() + delta).toISOString();
+      await rescheduleQueuedSend(store, { queueItemId: item.id, scheduledFor: nextAt });
+    }
+
+    const afterPersonLoop = store
+      .listSendQueue()
+      .filter((item) => [n1.id, n2.id, n3.id].includes(item.candidateId))
+      .sort((a, b) => a.scheduledFor.localeCompare(b.scheduledFor));
+    const ids = afterPersonLoop.map((item) => item.id);
+    await rescheduleCompanyBatch(store, { queueItemIds: ids, startAt: tomorrow8.toISOString() });
+    const fixed = store
+      .listSendQueue()
+      .filter((item) => [n1.id, n2.id, n3.id].includes(item.candidateId))
+      .sort((a, b) => a.scheduledFor.localeCompare(b.scheduledFor));
+    expect(fixed[0]!.scheduledFor).toBe(tomorrow8.toISOString());
+    expect(fixed[1]!.scheduledFor).toBe(new Date(tomorrow8.getTime() + 4 * 60_000).toISOString());
+    expect(fixed[2]!.scheduledFor).toBe(new Date(tomorrow8.getTime() + 8 * 60_000).toISOString());
+  });
+
+  it("rescheduleCompanyBatch clamps a past startAt to now instead of failing", async () => {
+    const startAt = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
+    const { queueItemId } = await seedAndSchedule("Clamp Past", "clamp@acme.com", startAt);
+    const before = Date.now();
+    const result = await rescheduleCompanyBatch(store, {
+      queueItemIds: [queueItemId],
+      startAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+    });
+    expect(result.updated).toBe(1);
+    const next = store.getSendQueueItem(queueItemId)!.scheduledFor;
+    expect(Date.parse(next)).toBeGreaterThanOrEqual(before - 5_000);
+    expect(Date.parse(next)).toBeLessThanOrEqual(Date.now() + 5_000);
   });
 });

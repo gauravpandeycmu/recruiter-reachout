@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { findRepoRoot } from "./paths.js";
 
 const DEFAULT_EXTENSION_PATH =
-  "/Users/gaurav/Library/Application Support/Google/Chrome/Default/Extensions/lbdglhhdbgnknbdifhanfholehojlkgg/1.2.81_0";
+  "/Users/gaurav/Library/Application Support/Google/Chrome/Default/Extensions/lbdglhhdbgnknbdifhanfholehojlkgg/1.3.0_0";
 
 /** Stable unpacked copy Playwright can load via --load-extension (see Playwright chrome-extensions docs). */
 export function salesqlExtensionCacheDir(): string {

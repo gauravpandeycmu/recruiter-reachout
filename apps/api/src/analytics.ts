@@ -6,6 +6,7 @@ import type {
   TrackingEvent,
 } from "@recruiter/shared";
 import { resolveCandidateCompany } from "@recruiter/shared";
+import { audit } from "@recruiter/shared/auditLog";
 import type { Store } from "./store.js";
 
 const SETTLED = new Set(["sent", "opened", "clicked", "bounced", "do_not_contact"]);
@@ -33,10 +34,10 @@ export function buildAnalyticsSummary(
   const goal = store.getAnalyticsGoalSettings();
   const tzOffsetMinutes = options.tzOffsetMinutes ?? -new Date().getTimezoneOffset();
   const candidateById = new Map(candidates.map((candidate) => [candidate.id, candidate] as const));
-  // 26 weeks of buckets: the Pace chart slices the last 14 client-side, while the
-  // contribution garden / weekday rhythm need the long window. Week/today stats
-  // below look buckets up by date, so the wider window doesn't affect them.
-  const daily = buildDailyBuckets(candidates, events, candidateById, 182, localDate, tzOffsetMinutes);
+  // ~180 days of buckets: Pace slices the last 14 client-side; the contribution
+  // garden / weekday rhythm need the long window. Week/today stats look buckets
+  // up by date, so the wider window doesn't affect them.
+  const daily = buildDailyBuckets(candidates, events, candidateById, 180, localDate, tzOffsetMinutes);
 
   const todayBucket = daily.find((d) => d.date === localDate) ?? emptyDay(localDate);
   const weekDates = lastNDates(7, localDate);
@@ -63,11 +64,6 @@ export function buildAnalyticsSummary(
   const sent = sendEvents.length;
   const emailFound = candidates.filter((c) => Boolean(c.email?.includes("@"))).length;
   const discovered = emailFound;
-  const companiesTouched = new Set(
-    candidates
-      .filter((c) => c.email || SETTLED.has(c.status) || (c.emailCandidates?.length ?? 0) > 0)
-      .map((c) => resolveCandidateCompany(c).toLowerCase()),
-  ).size;
   const recruitersContacted = new Set(sendEvents.map((e) => e.candidateId)).size;
 
   const companies = buildCompanyLeaderboard(candidates, events);
@@ -91,14 +87,16 @@ export function buildAnalyticsSummary(
   const streak = computeStreak(goal.goalMetDates, localDate, met);
   const shouldCelebrate = met && goal.lastGoalCelebratedOn !== localDate;
   const longestStreak = computeLongestStreak(goal.goalMetDates, localDate, met);
-  // Streak days = actual sends OR schedule clicks (future-dated jobs still count today).
-  const outreachDates = collectOutreachActivityDates(store, sendEvents, tzOffsetMinutes);
+  // Streak days = Schedule / Send clicks (queue createdAt), not later Gmail delivery.
+  const outreachDates = collectOutreachActivityDates(store, tzOffsetMinutes);
   const activityToday = outreachDates.has(localDate);
   const sendStreak = computeStreak([...outreachDates], localDate, activityToday);
   const longestSendStreak = computeLongestStreak([...outreachDates], localDate, activityToday);
-  const usage = buildUsageFun(store, events, candidates, longestStreak);
+  const usage = buildUsageFun(store, events, candidates, longestStreak, tzOffsetMinutes);
   const hourly = buildScheduleClickHourly(store, tzOffsetMinutes);
-  const cumulativeSends = buildCumulativeScheduledCompanies(dailyWithSchedule);
+  // Running unique companies emailed — same source as companiesReached (send events).
+  const cumulativeSends = buildCumulativeCompaniesReached(events, candidateById, dailyWithSchedule, tzOffsetMinutes);
+  const companiesReachedAllTime = cumulativeSends.at(-1)?.total ?? 0;
   const queueBreakdown = buildQueueBreakdown(store);
 
   return {
@@ -113,7 +111,7 @@ export function buildAnalyticsSummary(
       sent,
       discovered,
       collected: candidates.length,
-      companiesTouched,
+      companiesTouched: companiesReachedAllTime,
       recruitersContacted,
     },
     funnel: {
@@ -138,7 +136,7 @@ export function buildAnalyticsSummary(
     queueBreakdown,
     usage,
     companies,
-    motivation: buildMotivation(sent, companiesTouched, streak),
+    motivation: buildMotivation(sent, companiesReachedAllTime, streak),
     health,
     goal,
     goalProgress: {
@@ -188,6 +186,13 @@ export function updateAnalyticsGoal(
     lastGoalCelebratedOn,
     updatedAt: new Date().toISOString(),
   };
+  audit("analytics.goal_update", {
+    dailySendGoal,
+    celebrateToday: Boolean(patch.celebrateToday),
+    localDate,
+    sendStreak: summary.goalProgress.sendStreak,
+    sentToday: summary.goalProgress.sentToday,
+  });
   return store.setAnalyticsGoalSettings(next);
 }
 
@@ -226,6 +231,7 @@ function buildUsageFun(
   events: TrackingEvent[],
   candidates: RecruiterCandidate[],
   longestStreak: number,
+  tzOffsetMinutes: number,
 ): AnalyticsSummary["usage"] {
   const llmEvents = store.listLlmUsageEvents();
   const companyContent = store.listCompanyContent().filter((item) => item.source === "generated");
@@ -248,7 +254,9 @@ function buildUsageFun(
     companyContent.reduce((sum, item) => sum + item.subject.split(/\s+/).filter(Boolean).length + item.body.split(/\s+/).filter(Boolean).length, 0),
   );
   const sendDays = new Set(
-    events.filter((event) => event.type === "send").map((event) => event.createdAt.slice(0, 10)),
+    events
+      .filter((event) => event.type === "send")
+      .map((event) => toOffsetYmd(event.createdAt, tzOffsetMinutes)),
   );
   const activeDays = sendDays.size;
   const sent = events.filter((event) => event.type === "send").length;
@@ -294,25 +302,23 @@ function buildUsageFun(
   };
 }
 
-const OUTREACH_QUEUE_STATUSES = new Set(["scheduled", "queued", "sent"]);
-
 /**
  * Local calendar days that count toward the send streak.
- * Includes successful Gmail sends and schedule/queue clicks that are still active
- * or already delivered — so scheduling for Monday still plants today's tree.
+ * Credit the Schedule / Send click day (queue item createdAt) forever — later
+ * delivery, Scheduled→Send now on an old row, failures, pauses, or cancellations
+ * must not move the credit to a different day.
  */
-function collectOutreachActivityDates(
-  store: Store,
-  sendEvents: TrackingEvent[],
-  tzOffsetMinutes: number,
-): Set<string> {
+function collectOutreachActivityDates(store: Store, tzOffsetMinutes: number): Set<string> {
   const dates = new Set<string>();
-  for (const event of sendEvents) {
-    dates.add(toOffsetYmd(event.createdAt, tzOffsetMinutes));
-  }
   for (const item of store.listSendQueue()) {
-    if (!OUTREACH_QUEUE_STATUSES.has(item.status)) continue;
     dates.add(toOffsetYmd(item.createdAt, tzOffsetMinutes));
+  }
+  // Bare send_now jobs (POST /candidates/:id/send) never create a queue row — still credit the click day.
+  for (const job of store.listSendJobs()) {
+    if (job.mode !== "send_now" || job.queueItemId) {
+      continue;
+    }
+    dates.add(toOffsetYmd(job.createdAt, tzOffsetMinutes));
   }
   return dates;
 }
@@ -320,6 +326,7 @@ function collectOutreachActivityDates(
 /**
  * Distinct companies scheduled on each local day (Schedule / queue click).
  * One company batch = one toward the daily goal, regardless of recipient count.
+ * Counts the click day even if sends later failed — scheduling is the user's action.
  */
 function collectScheduledCompaniesByDay(
   store: Store,
@@ -327,15 +334,26 @@ function collectScheduledCompaniesByDay(
   tzOffsetMinutes: number,
 ): Map<string, Set<string>> {
   const byDay = new Map<string, Set<string>>();
-  for (const item of store.listSendQueue()) {
-    if (!OUTREACH_QUEUE_STATUSES.has(item.status)) continue;
-    const date = toOffsetYmd(item.createdAt, tzOffsetMinutes);
-    const person = candidateById.get(item.candidateId);
-    const company = (person ? resolveCandidateCompany(person) : "Unknown company").trim() || "Unknown company";
+  const add = (date: string, company: string) => {
     const key = company.toLowerCase();
     const set = byDay.get(date) ?? new Set<string>();
     set.add(key);
     byDay.set(date, set);
+  };
+  for (const item of store.listSendQueue()) {
+    const date = toOffsetYmd(item.createdAt, tzOffsetMinutes);
+    const person = candidateById.get(item.candidateId);
+    const company = (person ? resolveCandidateCompany(person) : "Unknown company").trim() || "Unknown company";
+    add(date, company);
+  }
+  for (const job of store.listSendJobs()) {
+    if (job.mode !== "send_now" || job.queueItemId) {
+      continue;
+    }
+    const date = toOffsetYmd(job.createdAt, tzOffsetMinutes);
+    const person = candidateById.get(job.candidateId);
+    const company = (person ? resolveCandidateCompany(person) : "Unknown company").trim() || "Unknown company";
+    add(date, company);
   }
   return byDay;
 }
@@ -356,13 +374,31 @@ function buildScheduleClickHourly(
   return counts.map((sent, hour) => ({ hour, sent }));
 }
 
-function buildCumulativeScheduledCompanies(
+/**
+ * Running unique companies emailed (send events) — same definition as companiesReached.
+ * Re-scheduling the same company on later days does not inflate the climb.
+ */
+function buildCumulativeCompaniesReached(
+  events: TrackingEvent[],
+  candidateById: Map<string, RecruiterCandidate>,
   daily: AnalyticsSummary["daily"],
+  tzOffsetMinutes: number,
 ): AnalyticsSummary["cumulativeSends"] {
-  let total = 0;
+  const byDay = new Map(daily.map((day) => [day.date, new Set<string>()] as const));
+  for (const event of events) {
+    if (event.type !== "send") continue;
+    const date = toOffsetYmd(event.createdAt, tzOffsetMinutes);
+    const set = byDay.get(date);
+    if (!set) continue;
+    const company = resolveEventCompany(event, candidateById);
+    if (company) set.add(company.toLowerCase());
+  }
+  const seen = new Set<string>();
   return daily.map((day) => {
-    total += day.scheduledCompanies;
-    return { date: day.date, total };
+    for (const company of byDay.get(day.date) ?? []) {
+      seen.add(company);
+    }
+    return { date: day.date, total: seen.size };
   });
 }
 

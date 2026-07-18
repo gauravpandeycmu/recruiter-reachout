@@ -7,7 +7,8 @@
     "dev": "vite --host 127.0.0.1 --port 3000",
     "build": "tsc -p tsconfig.json && vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "bake:grove-thumbs": "node scripts/bake-grove-thumbs.mjs"
   },
   "dependencies": {
     "@recruiter/shared": "2.0.0",
@@ -21,6 +22,7 @@
   },
   "devDependencies": {
     "@types/react": "latest",
-    "@types/react-dom": "latest"
+    "@types/react-dom": "latest",
+    "puppeteer-core": "^24.43.1"
   }
 }

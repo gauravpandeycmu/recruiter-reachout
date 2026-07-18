@@ -6,7 +6,7 @@ export function appDataPollKey(data: AppData): string {
   let qSig = `${queue.length}`;
   for (let i = 0; i < queue.length; i += 1) {
     const item = queue[i]!;
-    qSig += `|${item.id}:${item.status}:${item.scheduledFor ?? ""}`;
+    qSig += `|${item.id}:${item.status}:${item.scheduledFor ?? ""}:${item.failureReason ?? ""}:${item.jobId ?? ""}:${item.attempts}`;
   }
   const candidates = data.candidates;
   let cSig = `${candidates.length}`;
@@ -15,19 +15,27 @@ export function appDataPollKey(data: AppData): string {
     cSig += `|${c.id}:${c.status}:${c.email ? "1" : "0"}`;
   }
   const upcoming = data.upcomingSends ?? [];
-  const u0 = upcoming[0];
+  let uSig = `${upcoming.length}`;
+  for (let i = 0; i < upcoming.length; i += 1) {
+    const u = upcoming[i]!;
+    uSig += `|${u.queueItemId}:${u.scheduledFor}:${u.jobMode ?? ""}:${u.jobStatus ?? ""}:${u.failureReason ?? ""}`;
+  }
   const events = data.events;
   const lastEvent = events[events.length - 1];
   return [
     cSig,
     qSig,
-    upcoming.length,
-    u0 ? `${u0.queueItemId}:${u0.scheduledFor}` : "",
+    uSig,
     data.gmailAccount?.email ?? "",
     events.length,
     lastEvent ? `${lastEvent.id ?? ""}:${lastEvent.type}:${lastEvent.createdAt}` : "",
     data.content?.subject ?? "",
   ].join("#");
+}
+
+/** Ignore stale poll responses when a newer request has already started. */
+export function shouldApplyPollResult(requestGeneration: number, latestGeneration: number): boolean {
+  return requestGeneration === latestGeneration;
 }
 
 export function workerStatusPollKey(status: WorkerStatusView): string {

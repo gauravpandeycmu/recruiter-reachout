@@ -17,6 +17,8 @@
 
 export interface ContactResult {
   found: boolean;
+  /** True when the toast wait hit its timeout (vs an explicit no-contact result). */
+  timedOut?: boolean;
   name?: string;
   titleAndCompany?: string;
 }
@@ -43,8 +45,9 @@ export type JobrightDiscoveryOutcome =
   | { status: "not_found" }
   | { status: "error"; message: string };
 
-const DEFAULT_RESULT_TIMEOUT_MS = 8000;
-const DEFAULT_REVEAL_TIMEOUT_MS = 8000;
+/** Live Jobright toasts often need ~20–40s; 8s/20s produced false timeouts under load. */
+export const DEFAULT_RESULT_TIMEOUT_MS = 45_000;
+const DEFAULT_REVEAL_TIMEOUT_MS = 20_000;
 
 export async function discoverEmailOnJobright(
   adapter: JobrightPageAdapter,
@@ -65,6 +68,9 @@ export async function discoverEmailOnJobright(
     await adapter.clickSearch();
     const result = await adapter.waitForContactResult(options.resultTimeoutMs ?? DEFAULT_RESULT_TIMEOUT_MS);
     if (!result.found) {
+      if (result.timedOut) {
+        return { status: "error", message: "Timed out waiting for Jobright contact result." };
+      }
       return { status: "not_found" };
     }
 

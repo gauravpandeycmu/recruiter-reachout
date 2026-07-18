@@ -91,6 +91,41 @@ describe("buildPlantingSequence", () => {
     expect(seq).toHaveLength(SPECIES_UNLOCK_BY_DAY);
   });
 
+  it("opens the grove with exactly 2 rares close together, then a real gap", () => {
+    // Regression: an unweighted full-array shuffle used to scatter rares
+    // randomly — this seed happened to land 2 rares in the first 6 days
+    // *and* several more by day 30, which read as "everything is new" instead
+    // of "a couple of special trees to start."
+    const seq = buildPlantingSequence(SPECIES_UNLOCK_BY_DAY);
+    const rareDays = seq.reduce<number[]>((days, species, index) => {
+      if (RARE_SET.has(species)) days.push(index);
+      return days;
+    }, []);
+    expect(rareDays).toHaveLength(RARE_SPECIES.length);
+    const [first, second, third] = rareDays;
+    expect(first).toBe(0);
+    expect(second).toBeLessThanOrEqual(2);
+    // The third rare must not land right after the opener pair.
+    expect(third! - second!).toBeGreaterThanOrEqual(7);
+  });
+
+  it("spaces every rare at least 7 days apart, once past the opener pair", () => {
+    const seq = buildPlantingSequence(SPECIES_UNLOCK_BY_DAY);
+    const rareDays = seq.reduce<number[]>((days, species, index) => {
+      if (RARE_SET.has(species)) days.push(index);
+      return days;
+    }, []);
+    for (let i = 2; i < rareDays.length; i += 1) {
+      expect(rareDays[i]! - rareDays[i - 1]!).toBeGreaterThanOrEqual(7);
+    }
+  });
+
+  it("does not cluster more than 2 rares in the first week", () => {
+    const seq = buildPlantingSequence(SPECIES_UNLOCK_BY_DAY);
+    const raresInFirstWeek = seq.slice(0, 7).filter((s) => RARE_SET.has(s));
+    expect(raresInFirstWeek.length).toBeLessThanOrEqual(2);
+  });
+
   it("does not unlock a new species on every streak day (duplicates are expected)", () => {
     // Day N plants a tree, but unlock count only grows when the species is new.
     let previousSize = 0;

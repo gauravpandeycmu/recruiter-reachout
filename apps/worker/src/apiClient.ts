@@ -1,6 +1,7 @@
 import type {
   DiscoverySettings,
   LinkedInCaptureJob,
+  LinkedInProfileEnrichJob,
   RecruiterCandidate,
   SendJob,
   WorkerPhase,
@@ -28,6 +29,23 @@ export interface WorkerStatusUpdate {
   provider?: "jobright" | "salesql";
 }
 
+/** Bound how long a send-related request can hang. fetchNextSendJob claims a
+ *  job server-side the instant the request is processed, and reportSendResult
+ *  is the only record that a real Gmail send happened — an unbounded hang on
+ *  either leaves the caller unable to tell "nothing happened" from "it DID
+ *  happen but the response never arrived," which used to be swallowed
+ *  silently. Applied to the send-flow calls in this file specifically (not
+ *  every fetch here) since those are the ones a hang can silently strand. */
+async function fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs = 15_000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export interface LinkedInCaptureReportResult {
   job?: LinkedInCaptureJob;
   results?: unknown[];
@@ -45,8 +63,20 @@ export interface WorkerApiClient {
   reportWorkerStatus(update: WorkerStatusUpdate): Promise<WorkerStatus>;
   fetchDiscoverySettings(): Promise<DiscoverySettings>;
   fetchNextSendJob(): Promise<SendJob | undefined>;
+  fetchNextSendDue(): Promise<{ jobId: string; scheduledFor: string; candidateId: string } | undefined>;
+  fetchPendingWork(): Promise<{
+      nextSendDue?: { jobId: string; scheduledFor: string; candidateId: string };
+      nextClaimAllowedAt?: string;
+      hasInProgressSend: boolean;
+      hasDiscovery: boolean;
+      hasCapture: boolean;
+      hasEnrich: boolean;
+    }>;
   fetchSendJob(jobId: string): Promise<SendJob | undefined>;
   reportSendResult(jobId: string, result: { success: boolean; failureReason?: string; scheduledInGmail?: boolean }): Promise<SendJob>;
+  /** Heartbeat for an actively-sending job — keeps the 15-minute stale-job
+   *  reclaim from re-claiming (and re-sending) a job that's just slow. */
+  touchSendJob(jobId: string): Promise<void>;
   fetchNextLinkedInCaptureJob(): Promise<LinkedInCaptureJob | undefined>;
   reportLinkedInCaptureResult(
     jobId: string,
@@ -56,6 +86,16 @@ export interface WorkerApiClient {
       failureReason?: string;
     },
   ): Promise<LinkedInCaptureReportResult>;
+  fetchNextLinkedInProfileEnrichJob(): Promise<LinkedInProfileEnrichJob | undefined>;
+  reportLinkedInProfileEnrichResult(
+    jobId: string,
+    result: {
+      success: boolean;
+      profilePhotoUrl?: string;
+      fullName?: string;
+      failureReason?: string;
+    },
+  ): Promise<LinkedInProfileEnrichJob>;
 }
 
 /** Thin fetch wrapper against the local API, using the same endpoints the dashboard already uses. */
@@ -64,7 +104,10 @@ export function createApiClient(options: ApiClientOptions = {}): WorkerApiClient
 
   return {
     async fetchNextDiscoveryCandidate(): Promise<RecruiterCandidate | undefined> {
-      const response = await fetch(`${baseUrl}/api/automation/next-discovery`);
+      // Mutating GET (claims the candidate server-side the instant it's
+      // processed) — bound it the same way as fetchNextSendJob so a hang
+      // can't leave a candidate claimed with the worker never knowing.
+      const response = await fetchWithTimeout(`${baseUrl}/api/automation/next-discovery`);
       if (response.status === 404) {
         return undefined;
       }
@@ -75,7 +118,7 @@ export function createApiClient(options: ApiClientOptions = {}): WorkerApiClient
     },
 
     async reportDiscoveryResult(candidateId: string, outcome: DiscoveryOutcome): Promise<RecruiterCandidate> {
-      const response = await fetch(`${baseUrl}/api/candidates/${candidateId}/email-discovered`, {
+      const response = await fetchWithTimeout(`${baseUrl}/api/candidates/${candidateId}/email-discovered`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(outcome),
@@ -128,7 +171,7 @@ export function createApiClient(options: ApiClientOptions = {}): WorkerApiClient
     },
 
     async fetchNextSendJob(): Promise<SendJob | undefined> {
-      const response = await fetch(`${baseUrl}/api/automation/next-send`);
+      const response = await fetchWithTimeout(`${baseUrl}/api/automation/next-send`);
       if (response.status === 404) {
         return undefined;
       }
@@ -136,6 +179,39 @@ export function createApiClient(options: ApiClientOptions = {}): WorkerApiClient
         throw new Error(`Failed to fetch next send job (${response.status}): ${await response.text()}`);
       }
       return (await response.json()) as SendJob;
+    },
+
+    async fetchNextSendDue(): Promise<{ jobId: string; scheduledFor: string; candidateId: string } | undefined> {
+      const response = await fetch(`${baseUrl}/api/automation/next-send-due`);
+      if (response.status === 404) {
+        return undefined;
+      }
+      if (!response.ok) {
+        throw new Error(`Failed to fetch next send due (${response.status}): ${await response.text()}`);
+      }
+      return (await response.json()) as { jobId: string; scheduledFor: string; candidateId: string };
+    },
+
+    async fetchPendingWork(): Promise<{
+      nextSendDue?: { jobId: string; scheduledFor: string; candidateId: string };
+      nextClaimAllowedAt?: string;
+      hasInProgressSend: boolean;
+      hasDiscovery: boolean;
+      hasCapture: boolean;
+      hasEnrich: boolean;
+    }> {
+      const response = await fetch(`${baseUrl}/api/automation/pending-work`);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch pending work (${response.status}): ${await response.text()}`);
+      }
+      return (await response.json()) as {
+        nextSendDue?: { jobId: string; scheduledFor: string; candidateId: string };
+        nextClaimAllowedAt?: string;
+        hasInProgressSend: boolean;
+        hasDiscovery: boolean;
+        hasCapture: boolean;
+        hasEnrich: boolean;
+      };
     },
 
     async fetchSendJob(jobId: string): Promise<SendJob | undefined> {
@@ -153,7 +229,7 @@ export function createApiClient(options: ApiClientOptions = {}): WorkerApiClient
       jobId: string,
       result: { success: boolean; failureReason?: string; scheduledInGmail?: boolean },
     ): Promise<SendJob> {
-      const response = await fetch(`${baseUrl}/api/automation/send-result/${jobId}`, {
+      const response = await fetchWithTimeout(`${baseUrl}/api/automation/send-result/${jobId}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(result),
@@ -162,6 +238,15 @@ export function createApiClient(options: ApiClientOptions = {}): WorkerApiClient
         throw new Error(`Failed to report send result (${response.status}): ${await response.text()}`);
       }
       return (await response.json()) as SendJob;
+    },
+
+    async touchSendJob(jobId: string): Promise<void> {
+      const response = await fetchWithTimeout(`${baseUrl}/api/automation/send-jobs/${jobId}/touch`, {
+        method: "POST",
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to touch send job (${response.status}): ${await response.text()}`);
+      }
     },
 
     async fetchNextLinkedInCaptureJob(): Promise<LinkedInCaptureJob | undefined> {
@@ -192,6 +277,37 @@ export function createApiClient(options: ApiClientOptions = {}): WorkerApiClient
         throw new Error(`Failed to report LinkedIn capture result (${response.status}): ${await response.text()}`);
       }
       return (await response.json()) as LinkedInCaptureReportResult;
+    },
+
+    async fetchNextLinkedInProfileEnrichJob(): Promise<LinkedInProfileEnrichJob | undefined> {
+      const response = await fetch(`${baseUrl}/api/automation/next-linkedin-profile-enrich`);
+      if (response.status === 404) {
+        return undefined;
+      }
+      if (!response.ok) {
+        throw new Error(`Failed to fetch LinkedIn profile enrich job (${response.status}): ${await response.text()}`);
+      }
+      return (await response.json()) as LinkedInProfileEnrichJob;
+    },
+
+    async reportLinkedInProfileEnrichResult(
+      jobId: string,
+      result: {
+        success: boolean;
+        profilePhotoUrl?: string;
+        fullName?: string;
+        failureReason?: string;
+      },
+    ): Promise<LinkedInProfileEnrichJob> {
+      const response = await fetch(`${baseUrl}/api/automation/linkedin-profile-enrich-result/${jobId}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(result),
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to report LinkedIn profile enrich result (${response.status}): ${await response.text()}`);
+      }
+      return (await response.json()) as LinkedInProfileEnrichJob;
     },
   };
 }

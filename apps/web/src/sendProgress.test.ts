@@ -44,6 +44,38 @@ describe("buildSendProgressRows", () => {
     );
     expect(rows[0]?.name).toBe("missing");
   });
+
+  it("treats scheduled rows with failureReason as failed (worker Compose failures)", () => {
+    const rows = buildSendProgressRows(
+      [
+        {
+          id: "q1",
+          candidateId: "c1",
+          status: "scheduled",
+          scheduledFor: "2026-07-11T11:00:00.000Z",
+          failureReason: "Could not find Gmail Compose button.",
+        },
+      ],
+      [{ id: "c1", fullName: "Ada" }],
+    );
+    expect(rows[0]?.status).toBe("failed");
+  });
+
+  it("keeps paused rows distinct from failed even when failureReason is set", () => {
+    const rows = buildSendProgressRows(
+      [
+        {
+          id: "q1",
+          candidateId: "c1",
+          status: "paused",
+          scheduledFor: "2026-07-11T11:00:00.000Z",
+          failureReason: "Paused by user",
+        },
+      ],
+      [{ id: "c1", fullName: "Ada" }],
+    );
+    expect(rows[0]?.status).toBe("paused");
+  });
 });
 
 describe("compactSendChecklist", () => {
@@ -72,5 +104,21 @@ describe("compactSendChecklist", () => {
     expect(compact.length).toBeLessThanOrEqual(6);
     expect(compact.some((row) => row.status === "sending")).toBe(true);
     expect(compact.map((row) => row.id)).toContain("q5");
+  });
+
+  it("keeps the full checklist when every unfinished row is paused", () => {
+    const queue = Array.from({ length: 10 }, (_, i) => ({
+      id: `q${i}`,
+      candidateId: `c${i}`,
+      status: i < 2 ? "sent" : "paused",
+      scheduledFor: `2026-07-11T${String(10 + i).padStart(2, "0")}:00:00.000Z`,
+      failureReason: i >= 2 ? "Paused by user" : undefined,
+    }));
+    const rows = buildSendProgressRows(
+      queue,
+      queue.map((item) => ({ id: item.candidateId, fullName: item.candidateId })),
+    );
+    expect(rows.filter((row) => row.status === "paused")).toHaveLength(8);
+    expect(compactSendChecklist(rows)).toEqual(rows);
   });
 });

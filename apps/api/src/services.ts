@@ -19,7 +19,8 @@ import type {
   TestModeSettings,
   TrackingEvent,
 } from "@recruiter/shared";
-import { dedupeRepeatedPersonName, extractFirstName, inferCompanyFromEmail, linkedInUrlsMatch, normalizeWhitespace, preferLinkedInUrl, renderEmail, shouldRewriteCompanyFromEmail, validateCandidateInput } from "@recruiter/shared";
+import { dedupeRepeatedPersonName, extractFirstName, inferCompanyFromEmail, isValidEmail, linkedInProfileSlug, linkedInUrlsMatch, normalizeWhitespace, preferLinkedInUrl, renderEmail, shouldRewriteCompanyFromEmail, validateCandidateInput } from "@recruiter/shared";
+import { audit } from "@recruiter/shared/auditLog";
 import {
   createGmailAccount,
   createGmailDraft,
@@ -32,17 +33,41 @@ import {
   type GmailAttachment,
 } from "./gmail.js";
 import { addPublicTracking, createTrackingLink, getPublicTrackingBaseUrl } from "./tracking.js";
-import { assertWithinPacingCaps, scheduleCandidates, scheduleCandidatesExplicit, type ExplicitScheduleInput } from "./scheduler.js";
+import { assertWithinPacingCaps, scheduleCandidates, scheduleCandidatesExplicit, type ExplicitScheduleInput, type ExplicitScheduleResult } from "./scheduler.js";
 import { applyBounce, parseBounceMessage, parseGmailMessageText } from "./bounces.js";
 import { assertCanSend } from "./sendGate.js";
+import { withKeyLock } from "./asyncLock.js";
 import type { Store } from "./store.js";
 import { generateCompanyEmailContent, type GenerationProgressStep } from "./personalization.js";
 import { resolveJobDescriptionFromUrl } from "./jobPosting.js";
-import { extractJobIds } from "@recruiter/shared";
+import { createLinkedInProfileEnrichJob } from "./linkedinProfileEnrichJobs.js";
+import { extractJobIds, resolveCandidateCompany } from "@recruiter/shared";
 
 export type { GenerationProgressStep };
 import { isGmailReadyForSend, probeSetupSessions, spawnOpenLogin } from "./setup.js";
-import { claimNextSendJob, completeSendJob, createImmediateSendJob, createSendJobFromQueueItem, cancelScheduledSends } from "./sendJobs.js";
+import {
+  claimNextSendJob,
+  completeSendJob,
+  createImmediateSendJob,
+  createSendJobFromQueueItem,
+  cancelScheduledSends,
+  globalSendGapMs,
+  nextClaimAllowedAt,
+  peekNextDueOrUpcomingSendJob,
+  reclaimStaleSendJobs,
+  touchSendJob,
+  WORKER_OFFLINE_AFTER_MS,
+} from "./sendJobs.js";
+
+export { WORKER_OFFLINE_AFTER_MS };
+import {
+  companiesOverlapWithinGap,
+  defaultGapMinutes,
+  packNewCompanyBlock,
+  companyBlocksNeedCompact,
+  rebalanceCompanyBlocks,
+  type BlockSlot,
+} from "./scheduleBlocks.js";
 
 export interface CandidateStatusCheck {
   key: string;
@@ -221,6 +246,113 @@ export async function removeActiveCandidate(store: Store, candidateId: string): 
   }
   await store.save();
   return archived;
+}
+
+/** Bring archived people back onto today's Send batch (e.g. Scheduled → Send now handoff). */
+export async function reactivateCandidates(
+  store: Store,
+  candidateIds: string[],
+): Promise<{ reactivated: RecruiterCandidate[] }> {
+  const ids = [...new Set(candidateIds.map((id) => id.trim()).filter(Boolean))];
+  const reactivated: RecruiterCandidate[] = [];
+  for (const id of ids) {
+    const existing = store.listCandidates().find((candidate) => candidate.id === id);
+    if (!existing) {
+      continue;
+    }
+    const updated = store.updateCandidate(id, {
+      isActive: true,
+      archivedAt: undefined,
+    });
+    if (updated) {
+      reactivated.push(updated);
+    }
+  }
+  await store.save();
+  return { reactivated };
+}
+
+/**
+ * History → Add to Send: replace today's active recipients with these people.
+ * Keeps known emails (no re-discovery). Clears per-person outreach edits so the
+ * Send tab can draft fresh. Cancels their pending scheduled work.
+ */
+export async function replaceActiveFromHistory(
+  store: Store,
+  input: { candidateIds: string[] },
+): Promise<{
+  archived: RecruiterCandidate[];
+  activated: RecruiterCandidate[];
+  cancelled: { jobsCancelled: number; queueCancelled: number };
+}> {
+  const ids = [...new Set(input.candidateIds.map((id) => id.trim()).filter(Boolean))];
+  if (ids.length === 0) {
+    return {
+      archived: [],
+      activated: [],
+      cancelled: { jobsCancelled: 0, queueCancelled: 0 },
+    };
+  }
+
+  const archived = store.archiveActiveCandidates();
+  const cancelled = cancelScheduledSends(store, {
+    candidateIds: ids,
+    pendingOnly: true,
+    reason: "Loaded from History onto Send",
+    // Terminal — do not leave resume-able paused rows that block Schedule later.
+    terminal: true,
+  });
+
+  const activated: RecruiterCandidate[] = [];
+  for (const id of ids) {
+    const existing = store.listCandidates().find((candidate) => candidate.id === id);
+    if (!existing) {
+      continue;
+    }
+    const email =
+      existing.email?.trim() ||
+      existing.emailCandidates?.find((guess) => guess.email?.includes("@"))?.email?.trim() ||
+      undefined;
+    const emailCandidates = existing.emailCandidates?.length
+      ? existing.emailCandidates
+      : email
+        ? [
+            {
+              email,
+              pattern: "api_verified" as const,
+              confidence: "high" as const,
+              reason: "Kept from History.",
+              evidence: "history",
+            },
+          ]
+        : [];
+    const fresh = store.upsertCandidate({
+      ...existing,
+      isActive: true,
+      archivedAt: undefined,
+      email,
+      emailCandidates,
+      customSubject: undefined,
+      customBody: undefined,
+      lastError: undefined,
+      forceProvider: undefined,
+      // Ready to schedule when we already know the address; otherwise discovery can run.
+      status: email ? "email_guessed" : "new",
+      updatedAt: new Date().toISOString(),
+    });
+    activated.push(fresh);
+  }
+
+  await store.save();
+  audit("candidates.replace_active_from_history", {
+    requested: ids.length,
+    archived: archived.length,
+    activated: activated.length,
+    withEmail: activated.filter((person) => Boolean(person.email)).length,
+    jobsCancelled: cancelled.jobsCancelled,
+    queueCancelled: cancelled.queueCancelled,
+  });
+  return { archived, activated, cancelled };
 }
 
 /** Archive active dashboard candidates that match the given LinkedIn URLs / names. */
@@ -481,11 +613,11 @@ export interface DiscoveryReport {
   email?: string;
   message?: string;
   provider?: "jobright" | "salesql";
+  /** True only when a real SalesQL Reveal Info credit was actually spent —
+   *  lets recordDiscoveryResult count usage against real spend instead of
+   *  outcome status alone. */
+  creditSpent?: boolean;
 }
-
-/** How long after the last heartbeat before the dashboard treats the worker as offline.
- *  Must be longer than a full SalesQL pass (overlay wait ~45s + reveal + navigation). */
-export const WORKER_OFFLINE_AFTER_MS = 180_000;
 
 export type WorkerStatusInput = {
   phase: import("@recruiter/shared").WorkerPhase;
@@ -495,6 +627,8 @@ export type WorkerStatusInput = {
   provider?: "jobright" | "salesql";
 };
 
+let lastWorkerHeartbeatAuditAt = 0;
+
 export function updateWorkerStatus(store: Store, input: WorkerStatusInput): import("@recruiter/shared").WorkerStatus {
   const now = new Date().toISOString();
   const candidateName =
@@ -502,7 +636,7 @@ export function updateWorkerStatus(store: Store, input: WorkerStatusInput): impo
     (input.candidateId
       ? store.listCandidates().find((candidate) => candidate.id === input.candidateId)?.fullName
       : undefined);
-  return store.setWorkerStatus({
+  const status = store.setWorkerStatus({
     phase: input.phase,
     message: input.message.trim() || "Working…",
     candidateId: input.candidateId,
@@ -511,6 +645,22 @@ export function updateWorkerStatus(store: Store, input: WorkerStatusInput): impo
     lastHeartbeatAt: now,
     updatedAt: now,
   });
+  if (input.phase !== "idle") {
+    audit("worker.status", {
+      phase: input.phase,
+      message: input.message,
+      candidateId: input.candidateId,
+      candidateName,
+      provider: input.provider,
+    });
+  } else {
+    const t = Date.now();
+    if (t - lastWorkerHeartbeatAuditAt >= 60_000) {
+      lastWorkerHeartbeatAuditAt = t;
+      audit("worker.heartbeat", { phase: input.phase, message: input.message });
+    }
+  }
+  return status;
 }
 
 export function getWorkerStatusView(store: Store): {
@@ -600,16 +750,47 @@ export async function incrementProviderUsage(
  * loops forever burning Jobright lookups on a profile that keeps failing. */
 export const MAX_DISCOVERY_ATTEMPTS = 3;
 
-export function nextDiscoveryCandidate(store: Store): RecruiterCandidate | undefined {
-  const eligible = store
-    .listActiveCandidates()
-    .filter(
-      (candidate) =>
-        !candidate.email &&
-        candidate.status !== "email_not_found" &&
-        Boolean(candidate.linkedinUrl?.trim()),
-    );
-  return [...eligible].sort((a, b) => (a.lastDiscoveryAttemptAt ?? "").localeCompare(b.lastDiscoveryAttemptAt ?? ""))[0];
+/** A claimed-but-never-resolved discovery candidate (worker crash mid-lookup)
+ *  is reclaimable after this — longer than the worker's own discovery hard
+ *  timeout (WORKER_DISCOVERY_HARD_TIMEOUT_MS, 240s by default) so a normal
+ *  in-flight attempt that's still reporting its result back is never mistaken
+ *  for abandoned. */
+const DISCOVERY_CLAIM_STALE_MS = 6 * 60 * 1000;
+
+function isEligibleForDiscovery(candidate: RecruiterCandidate, cutoffMs: number): boolean {
+  if (candidate.email || candidate.status === "email_not_found" || !candidate.linkedinUrl?.trim()) {
+    return false;
+  }
+  if (!candidate.discoveryClaimedAt) return true;
+  const claimedAt = new Date(candidate.discoveryClaimedAt).getTime();
+  return !Number.isFinite(claimedAt) || claimedAt <= cutoffMs;
+}
+
+/** Read-only: is there a discovery candidate waiting (claimed-but-stale counts)?
+ *  Used by pending-work's hasDiscovery flag, which must NOT claim — it's polled
+ *  continuously just to decide whether to wake discovery browsers at all. */
+export function hasEligibleDiscoveryCandidate(store: Store, now = new Date()): boolean {
+  const cutoff = now.getTime() - DISCOVERY_CLAIM_STALE_MS;
+  return store.listActiveCandidates().some((candidate) => isEligibleForDiscovery(candidate, cutoff));
+}
+
+/**
+ * Picks and atomically claims the next candidate needing discovery. Unlike
+ * every other job type in this codebase (send, LinkedIn capture, LinkedIn
+ * enrich), discovery has no separate job row — the candidate itself carries
+ * the claim (discoveryClaimedAt). This function has no internal `await`, so
+ * — same reasoning as claimNextSendJob — the read-check-write is atomic
+ * within one Node process: two "simultaneous" calls can never both claim the
+ * same candidate.
+ */
+export function nextDiscoveryCandidate(store: Store, now = new Date()): RecruiterCandidate | undefined {
+  const cutoff = now.getTime() - DISCOVERY_CLAIM_STALE_MS;
+  const eligible = store.listActiveCandidates().filter((candidate) => isEligibleForDiscovery(candidate, cutoff));
+  const next = [...eligible].sort((a, b) => (a.lastDiscoveryAttemptAt ?? "").localeCompare(b.lastDiscoveryAttemptAt ?? ""))[0];
+  if (!next) {
+    return undefined;
+  }
+  return store.updateCandidate(next.id, { discoveryClaimedAt: now.toISOString() });
 }
 
 export async function recordDiscoveryResult(store: Store, candidateId: string, report: DiscoveryReport): Promise<RecruiterCandidate> {
@@ -617,7 +798,10 @@ export async function recordDiscoveryResult(store: Store, candidateId: string, r
   if (!candidate) {
     throw new Error("Candidate not found.");
   }
-  const patch: Partial<RecruiterCandidate> = { lastDiscoveryAttemptAt: new Date().toISOString() };
+  const patch: Partial<RecruiterCandidate> = {
+    lastDiscoveryAttemptAt: new Date().toISOString(),
+    discoveryClaimedAt: undefined,
+  };
   // A forced SalesQL check is consumed by a conclusive attempt (found or not_found).
   // On a transient error, leave it set so the worker retries via SalesQL again
   // instead of silently falling back to the normal Jobright-first chain.
@@ -654,7 +838,12 @@ export async function recordDiscoveryResult(store: Store, candidateId: string, r
       patch.company = inferredCompany;
     }
     if (provider === "salesql") {
-      await incrementProviderUsage(store, "salesql");
+      // "Already visible" (no Reveal click needed) never spends a credit —
+      // only count a real spend, or the local counter over-counts relative
+      // to SalesQL's own account usage.
+      if (report.creditSpent) {
+        await incrementProviderUsage(store, "salesql");
+      }
     } else {
       await incrementProviderUsage(store, "jobright");
     }
@@ -667,15 +856,23 @@ export async function recordDiscoveryResult(store: Store, candidateId: string, r
         ? "SalesQL: No Emails Found for this LinkedIn profile."
         : "Jobright: no contact info found for this LinkedIn profile.";
     if (provider === "salesql") {
-      await incrementProviderUsage(store, "salesql");
+      if (report.creditSpent) {
+        await incrementProviderUsage(store, "salesql");
+      }
     } else {
       await incrementProviderUsage(store, "jobright");
     }
-    // A forced SalesQL miss is conclusive for that credit spend — stop retrying.
-    if (attempts >= MAX_DISCOVERY_ATTEMPTS || candidate.forceProvider === "salesql" || provider === "salesql") {
+    // A user-forced SalesQL check ("Look up via SalesQL") concluding not_found
+    // is a deliberate one-shot action — park immediately, same as before. But
+    // an AUTOMATIC SalesQL not_found (reached via the ordinary Jobright ->
+    // SalesQL fallback chain) used to park on the very first miss too,
+    // skipping the shared attempts budget entirely — asymmetric with
+    // Jobright, which gets MAX_DISCOVERY_ATTEMPTS tries. Both providers now
+    // share the same budget unless the check was explicitly forced.
+    if (attempts >= MAX_DISCOVERY_ATTEMPTS || candidate.forceProvider === "salesql") {
       patch.status = "email_not_found";
       patch.lastError =
-        candidate.forceProvider === "salesql" || provider === "salesql"
+        candidate.forceProvider === "salesql"
           ? report.message ?? defaultMessage
           : `${report.message ?? defaultMessage} (gave up after ${attempts} attempts; clear the error to retry.)`;
     } else {
@@ -688,6 +885,21 @@ export async function recordDiscoveryResult(store: Store, candidateId: string, r
     // the worker keeps retrying next pass instead of eventually giving up on
     // a candidate that may never have actually been hard to find.
     patch.lastError = report.message ?? "Jobright automation error.";
+    // A real SalesQL credit can still be spent on a path that ends in
+    // "error" (e.g. Reveal Info was clicked but the result failed to parse
+    // before the hard timeout fired) — count it, or the local usage counter
+    // under-counts relative to SalesQL's own account usage.
+    if (report.provider === "salesql" && report.creditSpent) {
+      await incrementProviderUsage(store, "salesql");
+    }
+    // Conclusive SalesQL quota denial: clear the force flag so we don't hot-loop
+    // the same forced SalesQL attempt every 1.5s.
+    if (
+      report.provider === "salesql" &&
+      /quota/i.test(report.message ?? "")
+    ) {
+      patch.forceProvider = undefined;
+    }
   }
   const updated = store.updateCandidate(candidateId, patch);
   if (!updated) {
@@ -1180,26 +1392,213 @@ export async function createDraft(store: Store, candidateId: string) {
   };
 }
 
+/**
+ * True when this candidate already has an unresolved SendJob. Callers must
+ * check this *after* their own async validation, inside a withKeyLock(candidateId,
+ * ...) section — otherwise a double-click / client retry can pass validation
+ * twice before either has written a job, producing two real sends.
+ */
+function hasActiveSendJob(store: Store, candidateId: string, excludeJobId?: string): boolean {
+  return store
+    .listSendJobs()
+    .some(
+      (job) =>
+        job.candidateId === candidateId &&
+        job.id !== excludeJobId &&
+        (job.status === "pending" || job.status === "in_progress"),
+    );
+}
+
 export async function sendCandidate(store: Store, candidateId: string, resumeId?: string) {
-  const rendered = applyTestModeRecipientOverride(previewEmail(store, candidateId), store);
-  if (!rendered.to) {
-    throw new Error("Candidate needs an email before sending.");
-  }
-  await validateSendCandidate(store, candidateId, rendered.to);
-  const payload = buildSendJobPayload(store, { candidateId, mode: "send_now", resumeId });
-  const job = createImmediateSendJob(store, candidateId, payload);
-  return {
-    candidate: store.listCandidates().find((item) => item.id === candidateId),
-    rendered,
-    job,
-    note: "Send queued for Gmail.",
-  };
+  return withKeyLock(candidateId, async () => {
+    const rendered = applyTestModeRecipientOverride(previewEmail(store, candidateId), store);
+    if (!rendered.to) {
+      throw new Error("Candidate needs an email before sending.");
+    }
+    await validateSendCandidate(store, candidateId, rendered.to);
+    if (hasActiveSendJob(store, candidateId)) {
+      throw new Error("A send is already queued or in progress for this candidate.");
+    }
+    const payload = buildSendJobPayload(store, { candidateId, mode: "send_now", resumeId });
+    const job = createImmediateSendJob(store, candidateId, payload);
+    return {
+      candidate: store.listCandidates().find((item) => item.id === candidateId),
+      rendered,
+      job,
+      note: "Send queued for Gmail.",
+    };
+  });
 }
 
 export interface ScheduleJobFailure {
   candidateId: string;
   queueItemId: string;
   reason: string;
+}
+
+function queueItemToBlockSlot(
+  item: { id: string; candidateId: string; scheduledFor: string; createdAt: string },
+  candidates: Map<string, RecruiterCandidate>,
+): BlockSlot {
+  const person = candidates.get(item.candidateId);
+  return {
+    id: item.id,
+    company: person ? resolveCandidateCompany(person) : "Unknown",
+    scheduledFor: item.scheduledFor,
+    createdAt: item.createdAt,
+  };
+}
+
+/**
+ * Only intentional mid-batch pauses reserve packing windows.
+ * History loads / user cancels used to leave `paused` rows that permanently pushed
+ * the next company (e.g. AppLovin at 9:44 instead of 9:12 after SeatGeek).
+ */
+export function isIntentionalPauseReserve(item: { status: string; failureReason?: string }): boolean {
+  if (item.status !== "paused") return false;
+  const reason = (item.failureReason ?? "").trim().toLowerCase();
+  return reason.startsWith("paused by user");
+}
+
+/** Active scheduled/queued slots — these form company chains and get rebalanced. */
+function pendingActiveBlockSlots(store: Store, excludeCandidateIds?: Set<string>): BlockSlot[] {
+  const candidates = new Map(store.listCandidates().map((c) => [c.id, c]));
+  const slots: BlockSlot[] = [];
+  for (const item of store.listSendQueue()) {
+    if (item.status !== "scheduled" && item.status !== "queued") {
+      continue;
+    }
+    if (excludeCandidateIds?.has(item.candidateId)) {
+      continue;
+    }
+    slots.push(queueItemToBlockSlot(item, candidates));
+  }
+  return slots;
+}
+
+/**
+ * Intentional pauses reserve their window so a *different* company can't steal the slot.
+ * History/cancel ghosts must not reserve — they are not coming back via Resume.
+ */
+function pendingReservedBlockSlots(store: Store, excludeCandidateIds?: Set<string>): BlockSlot[] {
+  const candidates = new Map(store.listCandidates().map((c) => [c.id, c]));
+  const slots: BlockSlot[] = [];
+  for (const item of store.listSendQueue()) {
+    if (!isIntentionalPauseReserve(item)) {
+      continue;
+    }
+    if (excludeCandidateIds?.has(item.candidateId)) {
+      continue;
+    }
+    slots.push(queueItemToBlockSlot(item, candidates));
+  }
+  return slots;
+}
+
+/** @deprecated Prefer pendingActiveBlockSlots + pendingReservedBlockSlots. */
+function pendingBlockSlots(store: Store, excludeCandidateIds?: Set<string>): BlockSlot[] {
+  return [
+    ...pendingActiveBlockSlots(store, excludeCandidateIds),
+    ...pendingReservedBlockSlots(store, excludeCandidateIds),
+  ];
+}
+
+function applyScheduledForUpdates(
+  store: Store,
+  scheduledForById: Map<string, string>,
+): void {
+  const nowIso = new Date().toISOString();
+  for (const [queueItemId, scheduledFor] of scheduledForById) {
+    const item = store.getSendQueueItem(queueItemId);
+    if (!item) continue;
+    if (item.scheduledFor === scheduledFor) continue;
+    store.upsertSendQueueItem({ ...item, scheduledFor, updatedAt: nowIso });
+    for (const job of store.listSendJobs()) {
+      if (job.queueItemId !== queueItemId) continue;
+      if (job.status !== "pending" && job.status !== "in_progress") continue;
+      store.upsertSendJob({ ...job, scheduledFor, updatedAt: nowIso });
+    }
+  }
+}
+
+/** Fix colliding or pathologically stretched company blocks on the *active* pending queue (not paused). */
+export function rebalancePendingCompanyBlocks(
+  store: Store,
+  input: { intervalMinutes?: number; gapMinutes?: number; now?: Date; forceSerialize?: boolean } = {},
+): { shifted: Array<{ candidateId: string; original: string; shiftedTo: string; reason: string }> } {
+  const intervalMinutes = input.intervalMinutes ?? defaultGapMinutes();
+  const gapMinutes = input.gapMinutes ?? defaultGapMinutes(intervalMinutes);
+  // Only active rows — paused reserves stay put and must not inflate rewritten spacing.
+  const slots = pendingActiveBlockSlots(store);
+  if (slots.length === 0) {
+    return { shifted: [] };
+  }
+  const pathological = companyBlocksNeedCompact(slots, intervalMinutes);
+  const overlapping = companiesOverlapWithinGap(slots, gapMinutes);
+  if (!pathological && !overlapping && !input.forceSerialize) {
+    return { shifted: [] };
+  }
+  const { scheduledForById, shifted } = rebalanceCompanyBlocks({
+    slots,
+    intervalMinutes,
+    gapMinutes,
+    now: input.now,
+    // Pathological ~50m stretch: compact + chain. Overlap-only: keep healthy 8/12m spacing.
+    serializeAll: Boolean(input.forceSerialize) || pathological,
+  });
+  applyScheduledForUpdates(store, scheduledForById);
+  const mapped = {
+    shifted: shifted.map((entry) => ({
+      candidateId: store.getSendQueueItem(entry.id)?.candidateId ?? entry.id,
+      original: entry.original,
+      shiftedTo: entry.shiftedTo,
+      reason: entry.reason,
+      company: entry.company,
+    })),
+  };
+  if (mapped.shifted.length > 0 || input.forceSerialize) {
+    audit("schedule.rebalance", {
+      intervalMinutes,
+      gapMinutes,
+      serializeAll: Boolean(input.forceSerialize) || pathological,
+      pathological,
+      overlapping,
+      shifted: mapped.shifted.length,
+      sample: mapped.shifted.slice(0, 10),
+    });
+  }
+  return mapped;
+}
+
+/**
+ * When the user schedules active Send recipients again, kill leftover paused/failed
+ * queue rows for those people so History→Send (or prior job failures) cannot block
+ * them as "Already scheduled."
+ */
+function supersedeStaleQueueForCandidates(store: Store, candidateIds: Set<string>): void {
+  if (candidateIds.size === 0) return;
+  const now = new Date().toISOString();
+  const reason = "Superseded by new schedule";
+  for (const item of store.listSendQueue()) {
+    if (!candidateIds.has(item.candidateId)) continue;
+    if (item.status !== "paused" && item.status !== "failed") continue;
+    store.upsertSendQueueItem({
+      ...item,
+      status: "failed",
+      failureReason: reason,
+      updatedAt: now,
+    });
+    for (const job of store.listSendJobs()) {
+      if (job.queueItemId !== item.id) continue;
+      if (job.status === "failed" || job.status === "completed") continue;
+      store.upsertSendJob({
+        ...job,
+        status: "failed",
+        failureReason: reason,
+        updatedAt: now,
+      });
+    }
+  }
 }
 
 export async function scheduleSends(
@@ -1217,22 +1616,45 @@ export async function scheduleSends(
         .map((id) => store.listCandidates().find((candidate) => candidate.id === id))
         .filter((candidate): candidate is RecruiterCandidate => Boolean(candidate))
     : store.listActiveCandidates();
+
+  // No jitter when packing against other companies — times must be exact and serializable.
+  // Within-company and between-company spacing both honor the global Gmail gap.
+  const requestedInterval = Math.max(1, Math.round(input.intervalMinutes ?? defaultGapMinutes()));
+  const gapMinutes = defaultGapMinutes(requestedInterval);
+  const intervalMinutes = Math.max(requestedInterval, gapMinutes);
+  const mode: SendJobMode = input.mode === "send_now" ? "send_now" : "schedule";
+  // Send-now must start at wall-clock now — never honor a stale/past startAt from the UI.
+  const effectiveStartAt =
+    mode === "send_now"
+      ? new Date()
+      : input.startAt
+        ? new Date(input.startAt)
+        : new Date();
+
   const result = scheduleCandidatesExplicit(
     roster,
-    input,
+    // jitterSeconds is always 0 here — never honor a caller-supplied override.
+    // The company-block packer that runs right after this needs exact,
+    // serializable times; jitter would break its gap/overlap math.
+    { ...input, startAt: effectiveStartAt.toISOString(), intervalMinutes, jitterSeconds: 0 },
     {
       intakeCapPerDay: Number(process.env.DAILY_INTAKE_LIMIT ?? 300),
       sendCapPerDay: Number(process.env.DAILY_SEND_LIMIT ?? 50),
-      perHourCap: Number(process.env.HOURLY_SEND_LIMIT ?? 5),
-      perDomainCap: Number(process.env.DOMAIN_DAILY_SEND_LIMIT ?? 5),
-      startDate: input.startAt ? new Date(input.startAt) : new Date(),
+      perHourCap: Number(process.env.HOURLY_SEND_LIMIT ?? 20),
+      perDomainCap: Number(process.env.DOMAIN_DAILY_SEND_LIMIT ?? 20),
+      startDate: effectiveStartAt,
+      jitterSeconds: 0,
     },
     store.listSuppressions(),
   );
 
-  const mode: SendJobMode = input.mode === "send_now" ? "send_now" : "schedule";
   const jobs: SendJob[] = [];
   const jobByQueueId = new Map<string, SendJob>();
+  const rosterIdSet = new Set(roster.map((candidate) => candidate.id));
+  // Only live pending rows block a new schedule. Paused/failed leftovers (e.g. History →
+  // Send, or an earlier jobFailure) must be superseded — otherwise Schedule silently
+  // queues 2 of 7 and rejects the rest as "Already scheduled."
+  supersedeStaleQueueForCandidates(store, rosterIdSet);
   const alreadyScheduled = new Set(
     store
       .listSendQueue()
@@ -1242,33 +1664,118 @@ export async function scheduleSends(
   const duplicateRejected: Array<{ candidateId: string; reason: string }> = [];
   const jobFailures: ScheduleJobFailure[] = [];
   const actuallyQueued: SendQueueItem[] = [];
+  const packShifted: ExplicitScheduleResult["shifted"] = [];
 
+  // Pack each new company as a block against already-pending + earlier companies in this batch.
+  const provisional: SendQueueItem[] = [];
   for (const item of result.queued) {
     if (alreadyScheduled.has(item.candidateId)) {
       duplicateRejected.push({ candidateId: item.candidateId, reason: "Already scheduled." });
       continue;
     }
+    provisional.push(item);
+  }
+
+  const byCompany = new Map<string, SendQueueItem[]>();
+  for (const item of provisional) {
+    const person = roster.find((c) => c.id === item.candidateId);
+    const company = person ? resolveCandidateCompany(person) : "Unknown";
+    const key = company.replace(/\s+/g, " ").trim().toLowerCase();
+    const list = byCompany.get(key) ?? [];
+    list.push(item);
+    byCompany.set(key, list);
+  }
+
+  // Process companies in the order they appear in the user's candidate list (batch order).
+  const companyOrder: string[] = [];
+  for (const item of provisional) {
+    const person = roster.find((c) => c.id === item.candidateId);
+    const company = person ? resolveCandidateCompany(person) : "Unknown";
+    const key = company.replace(/\s+/g, " ").trim().toLowerCase();
+    if (!companyOrder.includes(key)) companyOrder.push(key);
+  }
+
+  const existingActive = pendingActiveBlockSlots(store);
+  const existingReserved = pendingReservedBlockSlots(store);
+  const acceptedThisPass: BlockSlot[] = [];
+
+  for (const key of companyOrder) {
+    const group = byCompany.get(key) ?? [];
+    if (group.length === 0) continue;
+    const person0 = roster.find((c) => c.id === group[0]!.candidateId);
+    const company = person0 ? resolveCandidateCompany(person0) : "Unknown";
+    const desiredStart = group
+      .map((item) => new Date(item.scheduledFor).getTime())
+      .filter((t) => Number.isFinite(t))
+      .sort((a, b) => a - b)[0];
+    const packed = packNewCompanyBlock({
+      existing: [...existingActive, ...acceptedThisPass],
+      reserved: existingReserved,
+      newSlots: group.map((item) => ({
+        id: item.id,
+        company,
+        createdAt: item.createdAt,
+      })),
+      desiredStart: desiredStart ? new Date(desiredStart) : new Date(input.startAt ?? Date.now()),
+      intervalMinutes,
+      gapMinutes,
+    });
+    for (const item of group) {
+      const nextFor = packed.scheduledForById.get(item.id) ?? item.scheduledFor;
+      if (nextFor !== item.scheduledFor) {
+        const original = item.scheduledFor;
+        item.scheduledFor = nextFor;
+        packShifted.push({
+          candidateId: item.candidateId,
+          original,
+          shiftedTo: nextFor,
+          reason: packed.shifted.find((entry) => entry.id === item.id)?.reason
+            ?? packed.shifted[0]?.reason
+            ?? "Follows another company block.",
+          company,
+        });
+      }
+      acceptedThisPass.push({
+        id: item.id,
+        company,
+        scheduledFor: item.scheduledFor,
+        createdAt: item.createdAt,
+      });
+    }
+  }
+
+  for (const item of provisional) {
     alreadyScheduled.add(item.candidateId);
     actuallyQueued.push(item);
     store.upsertSendQueueItem(item);
     try {
-      const rendered = applyTestModeRecipientOverride(previewEmail(store, item.candidateId), store);
-      if (!rendered.to) {
-        throw new Error("Candidate needs an email before sending.");
-      }
-      await validateSendCandidate(store, item.candidateId, rendered.to, {
-        scheduledFor: item.scheduledFor,
-        skipPacing: mode === "schedule",
+      // withKeyLock: two overlapping scheduleSends calls (double-click / client
+      // retry) for the same candidate must not both pass validation before
+      // either has written a job — that produced two real sends.
+      await withKeyLock(item.candidateId, async () => {
+        const rendered = applyTestModeRecipientOverride(previewEmail(store, item.candidateId), store);
+        if (!rendered.to) {
+          throw new Error("Candidate needs an email before sending.");
+        }
+        await validateSendCandidate(store, item.candidateId, rendered.to, {
+          scheduledFor: item.scheduledFor,
+          // Explicit Schedule: honor the user's times, bypass caps. Send-now
+          // still enforces pacing — it has no future slot to fall back to.
+          skipPacing: mode === "schedule",
+        });
+        if (hasActiveSendJob(store, item.candidateId)) {
+          throw new Error("Already scheduled.");
+        }
+        const payload = buildSendJobPayload(store, {
+          candidateId: item.candidateId,
+          mode,
+          scheduledFor: item.scheduledFor,
+          queueItemId: item.id,
+          resumeId: input.resumeId,
+        });
+        jobs.push(createSendJobFromQueueItem(store, item, payload));
+        jobByQueueId.set(item.id, jobs[jobs.length - 1]!);
       });
-      const payload = buildSendJobPayload(store, {
-        candidateId: item.candidateId,
-        mode,
-        scheduledFor: item.scheduledFor,
-        queueItemId: item.id,
-        resumeId: input.resumeId,
-      });
-      jobs.push(createSendJobFromQueueItem(store, item, payload));
-      jobByQueueId.set(item.id, jobs[jobs.length - 1]!);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       jobFailures.push({ candidateId: item.candidateId, queueItemId: item.id, reason });
@@ -1278,6 +1785,29 @@ export async function scheduleSends(
         failureReason: reason,
         updatedAt: new Date().toISOString(),
       });
+    }
+  }
+
+  // If older collisions remain on the queue, rebalance everything once.
+  const rebalanced = rebalancePendingCompanyBlocks(store, { intervalMinutes });
+  for (const entry of rebalanced.shifted) {
+    if (!packShifted.some((s) => s.candidateId === entry.candidateId && s.shiftedTo === entry.shiftedTo)) {
+      packShifted.push(entry);
+    }
+  }
+  // Refresh job scheduledFor after rebalance.
+  for (const job of jobs) {
+    if (!job.queueItemId) continue;
+    const item = store.getSendQueueItem(job.queueItemId);
+    if (item && item.scheduledFor !== job.scheduledFor) {
+      const updated = store.upsertSendJob({
+        ...job,
+        scheduledFor: item.scheduledFor,
+        updatedAt: new Date().toISOString(),
+      });
+      const idx = jobs.findIndex((j) => j.id === job.id);
+      if (idx >= 0) jobs[idx] = updated;
+      jobByQueueId.set(item.id, updated);
     }
   }
 
@@ -1293,19 +1823,301 @@ export async function scheduleSends(
   }
 
   await store.save();
-  const succeededQueued = actuallyQueued.filter((item) => jobByQueueId.has(item.id));
-  return {
+  const succeededQueued = actuallyQueued
+    .map((item) => store.getSendQueueItem(item.id) ?? item)
+    .filter((item) => jobByQueueId.has(item.id));
+  const response = {
     ...result,
     queued: succeededQueued,
     rejected: [...result.rejected, ...duplicateRejected],
+    shifted: [...result.shifted, ...packShifted],
     jobFailures,
     jobs,
     archived,
   };
+  audit("schedule.sends", {
+    mode,
+    intervalMinutes,
+    requested: provisional.length,
+    queued: succeededQueued.length,
+    rejected: response.rejected.length,
+    shifted: response.shifted.length,
+    jobFailures: jobFailures.length,
+    firstAt: succeededQueued[0]?.scheduledFor,
+    lastAt: succeededQueued.at(-1)?.scheduledFor,
+    companies: [...new Set(acceptedThisPass.map((slot) => slot.company))],
+  });
+  return response;
+}
+
+/** Guess a display name from an email local-part (e.g. elizabeth.turner → Elizabeth Turner). */
+export function guessFullNameFromEmail(email: string): string {
+  const local = (email.split("@")[0] ?? "").trim();
+  const cleaned = local
+    .replace(/\d+/g, " ")
+    .replace(/[._+\-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) {
+    return "Recruiter";
+  }
+  return cleaned
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
+}
+
+export function guessFullNameFromLinkedInUrl(url: string | undefined): string | undefined {
+  const slug = linkedInProfileSlug(url);
+  if (!slug || /^(ac[oa]|pub)/i.test(slug) || slug.length < 3) {
+    return undefined;
+  }
+  const parts = slug
+    .replace(/\d+$/g, "")
+    .split(/[-._]+/)
+    .map((part) => part.trim())
+    .filter((part) => part.length >= 2 && /[a-z]/i.test(part));
+  if (parts.length === 0) {
+    return undefined;
+  }
+  return parts.map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase()).join(" ");
+}
+
+function inferBatchIntervalMinutes(items: Array<{ scheduledFor: string }>): number {
+  const fallback = defaultGapMinutes();
+  const times = items
+    .map((item) => new Date(item.scheduledFor).getTime())
+    .filter((value) => Number.isFinite(value))
+    .sort((a, b) => a - b);
+  if (times.length >= 2) {
+    const gaps: number[] = [];
+    for (let i = 1; i < times.length; i += 1) {
+      gaps.push((times[i]! - times[i - 1]!) / 60_000);
+    }
+    const avg = gaps.reduce((sum, gap) => sum + gap, 0) / gaps.length;
+    // Stretched schedules (~50m) are a bug — don't propagate them when adding people.
+    if (Number.isFinite(avg) && avg >= 1 && avg <= fallback * 2) {
+      return Math.max(1, Math.round(avg));
+    }
+  }
+  return fallback;
+}
+
+/**
+ * Add one person (known email) onto an existing company schedule — appends after the
+ * last slot using the batch's average spacing. Optional LinkedIn URL queues a photo enrich.
+ */
+export async function addPersonToScheduledBatch(
+  store: Store,
+  input: {
+    company: string;
+    email: string;
+    fullName?: string;
+    linkedinUrl?: string;
+    resumeId?: string;
+    intervalMinutes?: number;
+  },
+) {
+  const company = normalizeWhitespace(input.company);
+  const email = input.email.trim().toLowerCase();
+  const linkedinUrlRaw = input.linkedinUrl?.trim();
+  const linkedinUrl = linkedinUrlRaw
+    ? linkedinUrlRaw.startsWith("http")
+      ? linkedinUrlRaw
+      : `https://${linkedinUrlRaw.replace(/^\/+/, "")}`
+    : undefined;
+
+  if (!company) {
+    throw new Error("Company is required.");
+  }
+  if (!isValidEmail(email)) {
+    throw new Error("A valid email is required.");
+  }
+  if (linkedinUrl && !linkedinUrl.includes("linkedin.com/")) {
+    throw new Error("LinkedIn URL must be a linkedin.com profile link.");
+  }
+
+  const providedName = normalizeWhitespace(input.fullName ?? "");
+  const fullName =
+    providedName ||
+    guessFullNameFromLinkedInUrl(linkedinUrl) ||
+    guessFullNameFromEmail(email);
+
+  const emailGuess = {
+    email,
+    pattern: "api_verified" as const,
+    confidence: "high" as const,
+    reason: "Manually added to scheduled batch",
+  };
+
+  const seed: Partial<RecruiterCandidate> = {
+    fullName,
+    email,
+    linkedinUrl: linkedinUrl ? normalizeLinkedInUrl(linkedinUrl) || linkedinUrl : undefined,
+    company,
+    emailCandidates: [emailGuess],
+    status: "email_guessed",
+    isActive: true,
+  };
+
+  const existing = findExistingCandidate(store, seed);
+  let candidate: RecruiterCandidate;
+  if (existing) {
+    const updated = store.updateCandidate(existing.id, {
+      fullName: providedName || existing.fullName || fullName,
+      firstName: extractFirstName(providedName || existing.fullName || fullName),
+      email,
+      emailCandidates:
+        existing.emailCandidates?.some((guess) => guess.email.trim().toLowerCase() === email)
+          ? existing.emailCandidates
+          : [...(existing.emailCandidates ?? []), emailGuess],
+      linkedinUrl: preferLinkedInUrl(existing.linkedinUrl, seed.linkedinUrl),
+      company: existing.company || company,
+      status: "email_guessed",
+      isActive: true,
+      archivedAt: undefined,
+      lastError: undefined,
+    });
+    candidate = updated ?? existing;
+  } else {
+    candidate = store.upsertCandidate(
+      createCandidate({
+        ...seed,
+        firstName: extractFirstName(fullName),
+      }),
+    );
+  }
+
+  const companyKey = normalizeCompanyKey(company);
+  const companyUpcoming = listUpcomingSends(store).filter(
+    (item) => normalizeCompanyKey(item.company) === companyKey && item.jobStatus !== "in_progress",
+  );
+  if (companyUpcoming.some((item) => item.candidateId === candidate.id)) {
+    throw new Error(`${candidate.fullName} is already on the ${company} schedule.`);
+  }
+  // Paused rows are invisible to listUpcomingSends but still reserve the person on this company.
+  const pausedOnCompany = store.listSendQueue().some((item) => {
+    if (item.status !== "paused" || item.candidateId !== candidate.id) {
+      return false;
+    }
+    const person = store.listCandidates().find((entry) => entry.id === item.candidateId);
+    const itemCompany = person ? resolveCandidateCompany(person) : "Unknown";
+    return normalizeCompanyKey(itemCompany) === companyKey;
+  });
+  if (pausedOnCompany) {
+    throw new Error(`${candidate.fullName} is already on the ${company} schedule (paused). Resume them instead.`);
+  }
+
+  const intervalMinutes =
+    companyUpcoming.length >= 2
+      ? inferBatchIntervalMinutes(companyUpcoming)
+      : input.intervalMinutes && input.intervalMinutes >= 1
+        ? Math.round(input.intervalMinutes)
+        : inferBatchIntervalMinutes(companyUpcoming);
+
+  const lastAt = companyUpcoming
+    .map((item) => new Date(item.scheduledFor).getTime())
+    .filter((value) => Number.isFinite(value))
+    .sort((a, b) => a - b)
+    .at(-1);
+  const startAt = new Date((lastAt && lastAt > Date.now() ? lastAt : Date.now()) + intervalMinutes * 60_000);
+
+  const scheduleResult = await scheduleSends(store, {
+    candidateIds: [candidate.id],
+    startAt: startAt.toISOString(),
+    intervalMinutes,
+    mode: "schedule",
+    resumeId: input.resumeId,
+  });
+
+  if ((scheduleResult.jobs?.length ?? 0) === 0) {
+    const reason =
+      scheduleResult.jobFailures?.[0]?.reason ||
+      scheduleResult.rejected?.[0]?.reason ||
+      "Could not add this person to the schedule.";
+    throw new Error(reason);
+  }
+
+  let enrichQueued = false;
+  const needsPhoto = Boolean(candidate.linkedinUrl) && !candidate.profilePhotoUrl;
+  if (needsPhoto && candidate.linkedinUrl) {
+    createLinkedInProfileEnrichJob(store, {
+      candidateId: candidate.id,
+      linkedinUrl: candidate.linkedinUrl,
+    });
+    enrichQueued = true;
+    await store.save();
+  }
+
+  const upcoming = listUpcomingSends(store).find((item) => item.candidateId === candidate.id);
+  const result = {
+    candidate,
+    upcoming,
+    scheduledFor: scheduleResult.jobs[0]?.scheduledFor ?? startAt.toISOString(),
+    intervalMinutes,
+    enrichQueued,
+    jobs: scheduleResult.jobs,
+    shifted: scheduleResult.shifted ?? [],
+  };
+  audit("schedule.add_person", {
+    company,
+    email,
+    candidateId: candidate.id,
+    scheduledFor: result.scheduledFor,
+    intervalMinutes,
+    enrichQueued,
+  });
+  return result;
 }
 
 export function nextSendJob(store: Store) {
   return claimNextSendJob(store);
+}
+
+/** Soonest pending send — used by the worker to hibernate until warmup.
+ * Prefer a job that is claimable *now* (e.g. bare send_now) over a future schedule
+ * that merely sorts earlier by scheduledFor. */
+export function peekNextSendDue(store: Store): { jobId: string; scheduledFor: string; candidateId: string } | undefined {
+  const first = peekNextDueOrUpcomingSendJob(store);
+  if (!first) {
+    return undefined;
+  }
+  return {
+    jobId: first.id,
+    candidateId: first.candidateId,
+    scheduledFor: first.scheduledFor || first.createdAt,
+  };
+}
+
+/** Non-claiming snapshot so the worker can hibernate Chromium when nothing is due. */
+export function getPendingWorkerWork(store: Store, now = new Date()): {
+  nextSendDue?: { jobId: string; scheduledFor: string; candidateId: string };
+  nextClaimAllowedAt?: string;
+  hasInProgressSend: boolean;
+  hasDiscovery: boolean;
+  hasCapture: boolean;
+  hasEnrich: boolean;
+} {
+  // Reclaim here (not only on claim) so a crashed in_progress job cannot block
+  // discovery hibernation decisions for the full stale window.
+  reclaimStaleSendJobs(store, now);
+  const nextSendDue = peekNextSendDue(store);
+  const claimAt = nextClaimAllowedAt(store);
+  const hasInProgressSend = store.listSendJobs().some((job) => job.status === "in_progress");
+  const hasDiscovery = hasEligibleDiscoveryCandidate(store);
+  const hasCapture = store.listLinkedInCaptureJobs().some((job) => job.status === "pending" || job.status === "in_progress");
+  const hasEnrich = store
+    .listLinkedInProfileEnrichJobs()
+    .some((job) => job.status === "pending" || job.status === "in_progress");
+  return {
+    nextSendDue,
+    nextClaimAllowedAt: claimAt?.toISOString(),
+    hasInProgressSend,
+    hasDiscovery,
+    hasCapture,
+    hasEnrich,
+  };
 }
 
 export async function reportSendResult(
@@ -1321,19 +2133,219 @@ export async function reportSendResult(
   return job;
 }
 
+/** Worker heartbeat for a specific in-progress send — lets reclaimStaleSendJobs
+ *  tell "still sending" apart from "crashed", without changing job status. */
+export async function touchSendJobResult(store: Store, jobId: string) {
+  const job = touchSendJob(store, jobId);
+  if (!job) {
+    throw new Error("Send job not found.");
+  }
+  await store.save();
+  return job;
+}
+
 export async function cancelScheduledSendsForBatch(
   store: Store,
   input: { candidateIds?: string[]; queueItemIds?: string[]; pendingOnly?: boolean } = {},
 ) {
-  const result = cancelScheduledSends(store, input);
+  // Cancel = gone. Terminal failed rows never reserve packing slots (unlike Pause).
+  const result = cancelScheduledSends(store, { ...input, terminal: true, reason: "Cancelled by user" });
+  audit("schedule.cancel", {
+    candidateIds: input.candidateIds?.length ?? 0,
+    queueItemIds: input.queueItemIds?.length ?? 0,
+    jobsCancelled: result.jobsCancelled,
+    queueCancelled: result.queueCancelled,
+  });
   await store.save();
   return result;
 }
 
-/** Gap between Send-now bumps so Gmail pacing stays comfortable. */
-const SEND_NOW_GAP_MS = 4 * 60 * 1000;
+/**
+ * Pause remaining pending sends mid-batch without reshuffling the Send UI.
+ * Keeps people on the progress list as paused; does not reactivate (no jump to top).
+ * Already-sent / in-progress rows are left alone.
+ */
+export async function pausePendingSendBatch(
+  store: Store,
+  input: { queueItemIds: string[] },
+): Promise<{ jobsCancelled: number; queueCancelled: number; reactivated: RecruiterCandidate[] }> {
+  const queueItemIds = [...new Set(input.queueItemIds.map((id) => id.trim()).filter(Boolean))];
+  if (queueItemIds.length === 0) {
+    return { jobsCancelled: 0, queueCancelled: 0, reactivated: [] };
+  }
 
+  const cancelled = cancelScheduledSends(store, {
+    queueItemIds,
+    pendingOnly: true,
+    reason: "Paused by user",
+  });
+  audit("schedule.pause", {
+    requested: queueItemIds.length,
+    jobsCancelled: cancelled.jobsCancelled,
+    queueCancelled: cancelled.queueCancelled,
+  });
+  await store.save();
+  return {
+    jobsCancelled: cancelled.jobsCancelled,
+    queueCancelled: cancelled.queueCancelled,
+    reactivated: [],
+  };
+}
+
+/**
+ * Resume paused queue rows with fresh times (Schedule remaining after Pause).
+ * Does not reactivate — the Send progress session keeps owning the UI.
+ * Packs against other pending company blocks so resume can't collide with SeatGeek/etc.
+ */
+export async function resumePausedSendBatch(
+  store: Store,
+  input: {
+    queueItemIds: string[];
+    startAt?: string;
+    intervalMinutes?: number;
+    resumeId?: string;
+  },
+): Promise<{ resumed: number; jobs: SendJob[] }> {
+  const queueItemIds = [...new Set(input.queueItemIds.map((id) => id.trim()).filter(Boolean))];
+  const requestedInterval = Math.max(1, Math.round(input.intervalMinutes ?? defaultGapMinutes()));
+  const gapMinutes = defaultGapMinutes(requestedInterval);
+  const intervalMinutes = Math.max(requestedInterval, gapMinutes);
+  const startAt = input.startAt ? new Date(input.startAt) : new Date();
+  if (Number.isNaN(startAt.getTime())) {
+    throw new Error("Pick a valid start time.");
+  }
+
+  const paused = queueItemIds
+    .map((id) => store.getSendQueueItem(id))
+    .filter((item): item is NonNullable<typeof item> => Boolean(item && item.status === "paused"))
+    .sort((a, b) => new Date(a.scheduledFor).getTime() - new Date(b.scheduledFor).getTime());
+
+  const candidates = new Map(store.listCandidates().map((c) => [c.id, c]));
+  const byCompany = new Map<string, typeof paused>();
+  for (const item of paused) {
+    const person = candidates.get(item.candidateId);
+    const company = person ? resolveCandidateCompany(person) : "Unknown";
+    const key = company.replace(/\s+/g, " ").trim().toLowerCase();
+    const list = byCompany.get(key) ?? [];
+    list.push(item);
+    byCompany.set(key, list);
+  }
+
+  // Pack earlier-created companies first (same tie-break as rebalance).
+  const companyGroups = [...byCompany.values()].sort((a, b) => {
+    const aCreated = Math.min(...a.map((item) => new Date(item.createdAt).getTime()));
+    const bCreated = Math.min(...b.map((item) => new Date(item.createdAt).getTime()));
+    if (aCreated !== bCreated) return aCreated - bCreated;
+    const aStart = Math.min(...a.map((item) => new Date(item.scheduledFor).getTime()));
+    const bStart = Math.min(...b.map((item) => new Date(item.scheduledFor).getTime()));
+    return aStart - bStart;
+  });
+
+  // Exclude the rows we're resuming so they don't collide with themselves as "paused reserves".
+  const excludeResuming = new Set(paused.map((item) => item.candidateId));
+  const existingActive = pendingActiveBlockSlots(store, excludeResuming);
+  const existingReserved = pendingReservedBlockSlots(store, excludeResuming);
+  const accepted: BlockSlot[] = [];
+  const scheduledForById = new Map<string, string>();
+
+  for (const group of companyGroups) {
+    const person = candidates.get(group[0]!.candidateId);
+    const company = person ? resolveCandidateCompany(person) : "Unknown";
+    const packed = packNewCompanyBlock({
+      existing: [...existingActive, ...accepted],
+      reserved: existingReserved,
+      newSlots: group.map((item) => ({
+        id: item.id,
+        company,
+        createdAt: item.createdAt,
+      })),
+      desiredStart: startAt,
+      intervalMinutes,
+      gapMinutes,
+    });
+    for (const item of group) {
+      const when = packed.scheduledForById.get(item.id) ?? startAt.toISOString();
+      scheduledForById.set(item.id, when);
+      accepted.push({
+        id: item.id,
+        company,
+        scheduledFor: when,
+        createdAt: item.createdAt,
+      });
+    }
+  }
+
+  const jobs: SendJob[] = [];
+  const nowIso = new Date().toISOString();
+  for (const item of paused) {
+    const scheduledFor = scheduledForById.get(item.id) ?? startAt.toISOString();
+    store.upsertSendQueueItem({
+      ...item,
+      status: "scheduled",
+      scheduledFor,
+      failureReason: undefined,
+      updatedAt: nowIso,
+    });
+
+    const payload = buildSendJobPayload(store, {
+      candidateId: item.candidateId,
+      mode: "schedule",
+      scheduledFor,
+      queueItemId: item.id,
+      resumeId: input.resumeId,
+    });
+
+    const existing =
+      store
+        .listSendJobs()
+        .filter((job) => job.queueItemId === item.id)
+        .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))[0] ?? undefined;
+
+    const job = store.upsertSendJob({
+      ...(existing ?? {
+        id: randomUUID(),
+        candidateId: item.candidateId,
+        createdAt: nowIso,
+      }),
+      ...payload,
+      queueItemId: item.id,
+      mode: "schedule",
+      scheduledFor,
+      status: "pending",
+      failureReason: undefined,
+      updatedAt: nowIso,
+    });
+    jobs.push(job);
+  }
+
+  rebalancePendingCompanyBlocks(store, { intervalMinutes, gapMinutes });
+  for (let i = 0; i < jobs.length; i += 1) {
+    const job = jobs[i]!;
+    if (!job.queueItemId) continue;
+    const item = store.getSendQueueItem(job.queueItemId);
+    if (item && item.scheduledFor !== job.scheduledFor) {
+      jobs[i] = store.upsertSendJob({
+        ...job,
+        scheduledFor: item.scheduledFor,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+  }
+
+  await store.save();
+  audit("schedule.resume", {
+    resumed: jobs.length,
+    intervalMinutes,
+    startAt: startAt.toISOString(),
+    firstAt: jobs[0]?.scheduledFor,
+    lastAt: jobs.at(-1)?.scheduledFor,
+  });
+  return { resumed: jobs.length, jobs };
+}
+
+/** Gap between Send-now bumps — must match the claim gate (`globalSendGapMs`). */
 function nextSendNowAt(store: Store, excludeJobId?: string, now = new Date()): Date {
+  const gapMs = globalSendGapMs();
   let slot = now.getTime();
   for (const job of store.listSendJobs()) {
     if (excludeJobId && job.id === excludeJobId) continue;
@@ -1341,7 +2353,7 @@ function nextSendNowAt(store: Store, excludeJobId?: string, now = new Date()): D
     if (job.mode !== "send_now") continue;
     const when = new Date(job.scheduledFor ?? job.updatedAt ?? job.createdAt).getTime();
     if (Number.isNaN(when)) continue;
-    slot = Math.max(slot, when + SEND_NOW_GAP_MS);
+    slot = Math.max(slot, when + gapMs);
   }
   return new Date(slot);
 }
@@ -1349,18 +2361,47 @@ function nextSendNowAt(store: Store, excludeJobId?: string, now = new Date()): D
 /** Move one queued send to a new time, or bump it into the send-now pipeline. */
 export async function rescheduleQueuedSend(
   store: Store,
-  input: { queueItemId: string; scheduledFor?: string; sendNow?: boolean },
+  input: {
+    queueItemId: string;
+    scheduledFor?: string;
+    sendNow?: boolean;
+    /** When moving a whole company batch, skip mid-loop rebalance (caller rebalances once). */
+    skipRebalance?: boolean;
+  },
+) {
+  const initialItem = store.getSendQueueItem(input.queueItemId);
+  if (!initialItem) {
+    throw new Error("Scheduled send not found.");
+  }
+  // withKeyLock: serialize against other send/schedule/reschedule calls for the
+  // same candidate, and re-read item/job fresh inside the lock (not the
+  // pre-lock snapshot) so a worker claim that lands while we wait is visible.
+  return withKeyLock(initialItem.candidateId, () =>
+    rescheduleQueuedSendLocked(store, input),
+  );
+}
+
+async function rescheduleQueuedSendLocked(
+  store: Store,
+  input: {
+    queueItemId: string;
+    scheduledFor?: string;
+    sendNow?: boolean;
+    skipRebalance?: boolean;
+  },
 ) {
   const item = store.getSendQueueItem(input.queueItemId);
   if (!item || (item.status !== "scheduled" && item.status !== "queued")) {
     throw new Error("Scheduled send not found.");
   }
-  let job = store
-    .listSendJobs()
-    .find(
-      (entry) =>
-        entry.queueItemId === item.id && (entry.status === "pending" || entry.status === "in_progress"),
-    );
+  const jobsForItem = store.listSendJobs().filter((entry) => entry.queueItemId === item.id);
+  let job =
+    jobsForItem.find((entry) => entry.status === "pending" || entry.status === "in_progress") ??
+    // Reuse the latest failed job so Send now after a worker failure doesn't
+    // orphan resumes. Also considers a cancelled-reason job (not just
+    // excluded) — belt-and-braces alongside retryFailedSends's own reuse
+    // logic, in case a cancelled job's queue item is ever left "scheduled".
+    [...jobsForItem].filter((entry) => entry.status === "failed").sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))[0];
   if (job?.status === "in_progress") {
     throw new Error("That send is already in progress — wait for it to finish.");
   }
@@ -1376,11 +2417,26 @@ export async function rescheduleQueuedSend(
     throw new Error("That time is in the past.");
   }
 
-  await validateSendCandidate(store, item.candidateId, item.email, {
+  // Pacing should use the address that will actually be emailed (test-mode redirect).
+  const pacingEmail =
+    applyTestModeRecipientOverride(previewEmail(store, item.candidateId), store).to ?? item.email;
+
+  await validateSendCandidate(store, item.candidateId, pacingEmail, {
     scheduledFor: nextAt.toISOString(),
     excludeJobId: job?.id,
     skipPacing: !sendNow,
   });
+
+  // Re-check right before writing: validateSendCandidate just awaited, so the
+  // worker's claimNextSendJob (a separate, unlocked path) could have claimed
+  // this exact job while we were validating. Overwriting status back to
+  // "pending" here would un-claim a job the worker is actively sending.
+  if (job) {
+    const fresh = store.getSendJob(job.id);
+    if (fresh?.status === "in_progress") {
+      throw new Error("That send is already in progress — wait for it to finish.");
+    }
+  }
 
   const scheduledFor = nextAt.toISOString();
   store.upsertSendQueueItem({
@@ -1390,6 +2446,11 @@ export async function rescheduleQueuedSend(
     failureReason: undefined,
     updatedAt: nowIso,
   });
+  if (sendNow) {
+    // Match scheduleSends: leave today's Send list so progress tracking owns the UI.
+    store.archiveCandidate(item.candidateId);
+  }
+
   if (job) {
     store.upsertSendJob({
       ...job,
@@ -1397,6 +2458,24 @@ export async function rescheduleQueuedSend(
       scheduledFor,
       status: "pending",
       failureReason: undefined,
+      // Refresh body/subject/to from current template + test mode, keep resume paths.
+      ...(() => {
+        const payload = buildSendJobPayload(store, {
+          candidateId: item.candidateId,
+          mode: sendNow ? "send_now" : "schedule",
+          scheduledFor,
+          queueItemId: item.id,
+        });
+        return {
+          to: payload.to,
+          subject: payload.subject,
+          textBody: payload.textBody,
+          htmlBody: payload.htmlBody,
+          resumePath: job.resumePath ?? payload.resumePath,
+          resumeFileName: job.resumeFileName ?? payload.resumeFileName,
+          resumeMimeType: job.resumeMimeType ?? payload.resumeMimeType,
+        };
+      })(),
       updatedAt: nowIso,
     });
   } else {
@@ -1408,8 +2487,80 @@ export async function rescheduleQueuedSend(
     });
     createSendJobFromQueueItem(store, item, payload);
   }
+
+  // Changing one company's times can land on top of another — re-serialize blocks.
+  // Batch movers pass skipRebalance and call rebalance once after all rows update.
+  if (!sendNow && !input.skipRebalance) {
+    rebalancePendingCompanyBlocks(store);
+  }
+
   await store.save();
   return listUpcomingSends(store).find((entry) => entry.queueItemId === item.id);
+}
+
+/**
+ * Move an entire company batch so the earliest send lands on `startAt`, keeping spacing.
+ * Rebalances once at the end — never mid-loop (that used to yank tomorrow-8am back to tonight).
+ */
+export async function rescheduleCompanyBatch(
+  store: Store,
+  input: { queueItemIds: string[]; startAt: string },
+): Promise<{ updated: number; upcoming: ReturnType<typeof listUpcomingSends> }> {
+  const queueItemIds = [...new Set(input.queueItemIds.map((id) => id.trim()).filter(Boolean))];
+  if (queueItemIds.length === 0) {
+    throw new Error("Nothing to reschedule.");
+  }
+  const startAtRaw = new Date(input.startAt);
+  if (Number.isNaN(startAtRaw.getTime())) {
+    throw new Error("Pick a valid date and time.");
+  }
+  // Past-due Change time → treat as "start now" (UI also clamps; keep API forgiving).
+  const startAt =
+    startAtRaw.getTime() < Date.now() - 60_000 ? new Date() : startAtRaw;
+
+  const items = queueItemIds
+    .map((id) => store.getSendQueueItem(id))
+    .filter((item): item is NonNullable<typeof item> => Boolean(item && (item.status === "scheduled" || item.status === "queued")))
+    .sort((a, b) => new Date(a.scheduledFor).getTime() - new Date(b.scheduledFor).getTime());
+  if (items.length === 0) {
+    throw new Error("Scheduled send not found.");
+  }
+
+  const oldStart = new Date(items[0]!.scheduledFor).getTime();
+  const deltaMs = startAt.getTime() - oldStart;
+
+  for (const item of items) {
+    const inProgress = store
+      .listSendJobs()
+      .some((job) => job.queueItemId === item.id && job.status === "in_progress");
+    if (inProgress) {
+      throw new Error("That send is already in progress — wait for it to finish.");
+    }
+  }
+
+  let updated = 0;
+  for (const item of items) {
+    const nextAt = new Date(new Date(item.scheduledFor).getTime() + deltaMs).toISOString();
+    await rescheduleQueuedSend(store, {
+      queueItemId: item.id,
+      scheduledFor: nextAt,
+      skipRebalance: true,
+    });
+    updated += 1;
+  }
+
+  rebalancePendingCompanyBlocks(store);
+  await store.save();
+  audit("schedule.reschedule_company_batch", {
+    requested: queueItemIds.length,
+    updated,
+    startAt: startAt.toISOString(),
+    firstAt: items[0] ? new Date(new Date(items[0].scheduledFor).getTime() + deltaMs).toISOString() : undefined,
+  });
+  return {
+    updated,
+    upcoming: listUpcomingSends(store).filter((entry) => queueItemIds.includes(entry.queueItemId)),
+  };
 }
 
 export async function updateScheduledCompanyBatch(
@@ -1476,7 +2627,23 @@ export async function retryFailedSends(
   }
 
   for (const item of store.listSendQueue()) {
-    if (!filter.has(item.id) || item.status !== "failed") {
+    if (!filter.has(item.id)) {
+      continue;
+    }
+    // Worker failures keep status "scheduled" + failureReason (and a failed job).
+    // Also retry explicit "failed" rows and scheduled orphans with no pending job.
+    const previous = jobsByQueueId.get(item.id);
+    const hasActiveJob = store
+      .listSendJobs()
+      .some(
+        (job) =>
+          job.queueItemId === item.id && (job.status === "pending" || job.status === "in_progress"),
+      );
+    const isFailedRow = item.status === "failed";
+    const isScheduledNeedingRetry =
+      (item.status === "scheduled" || item.status === "queued") &&
+      (Boolean(item.failureReason) || !hasActiveJob || previous?.status === "failed");
+    if (!isFailedRow && !isScheduledNeedingRetry) {
       continue;
     }
     const candidate = store.listCandidates().find((person) => person.id === item.candidateId);
@@ -1489,7 +2656,6 @@ export async function retryFailedSends(
       failureReason: undefined,
       updatedAt: now,
     });
-    const previous = jobsByQueueId.get(item.id);
     const payload = buildSendJobPayload(store, {
       candidateId: item.candidateId,
       mode: "schedule",
@@ -1502,12 +2668,153 @@ export async function retryFailedSends(
       payload.resumeFileName = previous.resumeFileName;
       payload.resumeMimeType = previous.resumeMimeType;
     }
-    createSendJobFromQueueItem(store, item, payload);
+    if (hasActiveJob) {
+      // Already claimable — just clear the failureReason on the queue row.
+      retried += 1;
+      continue;
+    }
+    if (previous && previous.status === "failed") {
+      // Reuse the most recent failed job (including a hard-cancelled one)
+      // instead of creating a second one. A cancelled job can still
+      // physically complete in Gmail after the cancel lands — completeSendJob
+      // reconciles that late report against THIS job id. Creating a
+      // brand-new job here while that's still possible would let the worker
+      // send the same candidate a second time once the original attempt
+      // finishes.
+      store.upsertSendJob({
+        ...previous,
+        status: "pending",
+        failureReason: undefined,
+        scheduledFor: item.scheduledFor,
+        to: payload.to,
+        subject: payload.subject,
+        textBody: payload.textBody,
+        htmlBody: payload.htmlBody,
+        resumePath: payload.resumePath,
+        resumeFileName: payload.resumeFileName,
+        resumeMimeType: payload.resumeMimeType,
+        updatedAt: now,
+      });
+    } else {
+      createSendJobFromQueueItem(store, item, payload);
+    }
     retried += 1;
   }
 
   await store.save();
+  audit("schedule.retry_failed", { requested: filter.size, retried });
   return { retried };
+}
+
+/**
+ * Recreate pending jobs only for true orphans (scheduled/queued with no send job at all).
+ * Do NOT auto-retry worker failures — that fail-loops on every API restart. Those stay for Retry.
+ */
+export function healOrphanedScheduledSendJobs(store: Store): { healed: number } {
+  let healed = 0;
+  const jobsByQueueId = new Map<string, SendJob[]>();
+  for (const job of store.listSendJobs()) {
+    if (!job.queueItemId) continue;
+    const list = jobsByQueueId.get(job.queueItemId) ?? [];
+    list.push(job);
+    jobsByQueueId.set(job.queueItemId, list);
+  }
+
+  for (const item of store.listSendQueue()) {
+    if (item.status !== "scheduled" && item.status !== "queued") {
+      continue;
+    }
+    const jobs = jobsByQueueId.get(item.id) ?? [];
+    if (jobs.length > 0) {
+      // Any prior job (pending / failed / completed) means this isn't a missing-row orphan.
+      continue;
+    }
+    const candidate = store.listCandidates().find((person) => person.id === item.candidateId);
+    if (!candidate?.email) {
+      continue;
+    }
+    const payload = buildSendJobPayload(store, {
+      candidateId: item.candidateId,
+      mode: "schedule",
+      scheduledFor: item.scheduledFor,
+      queueItemId: item.id,
+    });
+    createSendJobFromQueueItem(store, item, payload);
+    healed += 1;
+  }
+  return { healed };
+}
+
+/**
+ * When a candidate already has an active scheduled/queued row, cancel leftover paused duplicates
+ * from earlier cancel/resume cycles so they can't reserve phantom windows.
+ */
+export function cleanupStalePausedDuplicates(store: Store): { cancelled: number } {
+  const activeCandidateIds = new Set(
+    store
+      .listSendQueue()
+      .filter((item) => item.status === "scheduled" || item.status === "queued")
+      .map((item) => item.candidateId),
+  );
+  if (activeCandidateIds.size === 0) {
+    return { cancelled: 0 };
+  }
+  const now = new Date().toISOString();
+  let cancelled = 0;
+  for (const item of store.listSendQueue()) {
+    if (item.status !== "paused") continue;
+    if (!activeCandidateIds.has(item.candidateId)) continue;
+    store.upsertSendQueueItem({
+      ...item,
+      status: "failed",
+      failureReason: "Superseded by a newer scheduled send.",
+      updatedAt: now,
+    });
+    for (const job of store.listSendJobs()) {
+      if (job.queueItemId !== item.id) continue;
+      if (job.status !== "pending" && job.status !== "in_progress") continue;
+      store.upsertSendJob({
+        ...job,
+        status: "failed",
+        failureReason: "Superseded by a newer scheduled send.",
+        updatedAt: now,
+      });
+    }
+    cancelled += 1;
+  }
+  return { cancelled };
+}
+
+/**
+ * Convert History/cancel (and other non-resume) paused ghosts to failed so they
+ * never reserve packing windows on a future Schedule click.
+ */
+export function cleanupDeadPausedReserves(store: Store): { cancelled: number } {
+  const now = new Date().toISOString();
+  let cancelled = 0;
+  for (const item of store.listSendQueue()) {
+    if (item.status !== "paused") continue;
+    if (isIntentionalPauseReserve(item)) continue;
+    const reason = (item.failureReason ?? "").trim() || "Cleared stale paused reserve.";
+    store.upsertSendQueueItem({
+      ...item,
+      status: "failed",
+      failureReason: reason.startsWith("Cleared ") ? reason : `Cleared stale paused reserve (${reason})`,
+      updatedAt: now,
+    });
+    for (const job of store.listSendJobs()) {
+      if (job.queueItemId !== item.id) continue;
+      if (job.status !== "pending" && job.status !== "in_progress") continue;
+      store.upsertSendJob({
+        ...job,
+        status: "failed",
+        failureReason: "Cleared stale paused reserve.",
+        updatedAt: now,
+      });
+    }
+    cancelled += 1;
+  }
+  return { cancelled };
 }
 
 export async function updatePendingSendJobContent(
@@ -1559,6 +2866,7 @@ export interface UpcomingSendView {
   subject: string;
   body: string;
   resumeFileName?: string;
+  failureReason?: string;
 }
 
 export function listUpcomingSends(store: Store): UpcomingSendView[] {
@@ -1569,6 +2877,15 @@ export function listUpcomingSends(store: Store): UpcomingSendView[] {
       .filter((job) => job.queueItemId && (job.status === "pending" || job.status === "in_progress"))
       .map((job) => [job.queueItemId!, job] as const),
   );
+  // Prefer an active job; if none, still surface content + last failure from any job.
+  const lastJobByQueueId = new Map<string, SendJob>();
+  for (const job of store.listSendJobs()) {
+    if (!job.queueItemId) continue;
+    const prev = lastJobByQueueId.get(job.queueItemId);
+    if (!prev || (job.updatedAt || "") > (prev.updatedAt || "")) {
+      lastJobByQueueId.set(job.queueItemId, job);
+    }
+  }
 
   return store
     .listSendQueue()
@@ -1576,6 +2893,7 @@ export function listUpcomingSends(store: Store): UpcomingSendView[] {
     .map((item) => {
       const person = people.get(item.candidateId);
       const job = jobsByQueueId.get(item.id);
+      const lastJob = lastJobByQueueId.get(item.id);
       return {
         queueItemId: item.id,
         jobId: job?.id,
@@ -1590,9 +2908,10 @@ export function listUpcomingSends(store: Store): UpcomingSendView[] {
         queueStatus: item.status,
         jobStatus: job?.status,
         jobMode: job?.mode,
-        subject: job?.subject ?? person?.customSubject ?? "",
-        body: job?.textBody ?? person?.customBody ?? "",
-        resumeFileName: job?.resumeFileName,
+        subject: job?.subject ?? lastJob?.subject ?? person?.customSubject ?? "",
+        body: job?.textBody ?? lastJob?.textBody ?? person?.customBody ?? "",
+        resumeFileName: job?.resumeFileName ?? lastJob?.resumeFileName,
+        failureReason: item.failureReason ?? (job ? undefined : lastJob?.failureReason),
       };
     })
     .sort((a, b) => new Date(a.scheduledFor).getTime() - new Date(b.scheduledFor).getTime());
@@ -1645,13 +2964,59 @@ export async function assignCandidateToJob(store: Store, candidateId: string, jo
 }
 
 export async function scheduleToday(store: Store) {
-  const result = scheduleCandidates(store.listActiveCandidates(), {
+  const settings = {
     intakeCapPerDay: Number(process.env.DAILY_INTAKE_LIMIT ?? 300),
     sendCapPerDay: Number(process.env.DAILY_SEND_LIMIT ?? 50),
     perHourCap: Number(process.env.HOURLY_SEND_LIMIT ?? 5),
     perDomainCap: Number(process.env.DOMAIN_DAILY_SEND_LIMIT ?? 5),
     startDate: new Date(),
-  }, store.listSuppressions());
+  };
+  const result = scheduleCandidates(store.listActiveCandidates(), settings, store.listSuppressions());
+
+  // scheduleCandidates only enforces hourly/daily/domain caps — it has no notion
+  // of company blocks, so its naive Math.floor(slot / perHourCap) math can (and
+  // does) assign the exact same hour-bucket timestamp to candidates from
+  // different companies. Repack through the same company-block packer the
+  // explicit Schedule flow uses so different companies are always serialized
+  // with a real gap between them instead of firing at the same instant.
+  const intervalMinutes = Math.max(1, Math.round(60 / settings.perHourCap));
+  const gapMinutes = defaultGapMinutes(intervalMinutes);
+  const candidatesById = new Map(store.listCandidates().map((c) => [c.id, c]));
+  const byCompany = new Map<string, SendQueueItem[]>();
+  const companyOrder: string[] = [];
+  for (const item of result.scheduledToday) {
+    const person = candidatesById.get(item.candidateId);
+    const company = person ? resolveCandidateCompany(person) : "Unknown";
+    const key = company.replace(/\s+/g, " ").trim().toLowerCase();
+    if (!byCompany.has(key)) {
+      byCompany.set(key, []);
+      companyOrder.push(key);
+    }
+    byCompany.get(key)!.push(item);
+  }
+
+  const existingActive = pendingActiveBlockSlots(store);
+  const existingReserved = pendingReservedBlockSlots(store);
+  const acceptedThisPass: BlockSlot[] = [];
+
+  for (const key of companyOrder) {
+    const group = byCompany.get(key)!;
+    const person0 = candidatesById.get(group[0]!.candidateId);
+    const company = person0 ? resolveCandidateCompany(person0) : "Unknown";
+    const packed = packNewCompanyBlock({
+      existing: [...existingActive, ...acceptedThisPass],
+      reserved: existingReserved,
+      newSlots: group.map((item) => ({ id: item.id, company, createdAt: item.createdAt })),
+      desiredStart: settings.startDate,
+      intervalMinutes,
+      gapMinutes,
+    });
+    for (const item of group) {
+      item.scheduledFor = packed.scheduledForById.get(item.id) ?? item.scheduledFor;
+      acceptedThisPass.push({ id: item.id, company, scheduledFor: item.scheduledFor, createdAt: item.createdAt });
+    }
+  }
+
   for (const item of [...result.scheduledToday, ...result.rolledOver, ...result.suppressed]) {
     store.upsertSendQueueItem(item);
   }

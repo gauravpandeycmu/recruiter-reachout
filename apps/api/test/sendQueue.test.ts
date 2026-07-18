@@ -79,6 +79,55 @@ describe("send queue wiring", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("does not create two send jobs when sendCandidate races itself for the same candidate", async () => {
+    process.env.PUBLIC_TRACKING_BASE_URL = "https://relay.example.com";
+    vi.spyOn(setup, "probeSetupSessions").mockResolvedValue({
+      gmail: { ready: true, message: "ok" },
+      jobright: { ready: false, message: "n/a" },
+      linkedin: { ready: false, message: "n/a" },
+      checkedAt: new Date().toISOString(),
+    });
+
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-send-queue-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const candidate = store.upsertCandidate(
+      createCandidate({
+        fullName: "Jane Doe",
+        company: "Acme",
+        email: "jane.doe@acme.com",
+        emailCandidates: [{
+          email: "jane.doe@acme.com",
+          pattern: "first.last",
+          confidence: "high",
+          reason: "verified",
+        }],
+      }),
+    );
+    setOutreachContent(store, { subject: "Hi {firstName}", body: "Hello {firstName}" });
+    await saveResume(store, {
+      fileName: "resume.pdf",
+      mimeType: "application/pdf",
+      dataBase64: Buffer.from("%PDF-1.4\nfake").toString("base64"),
+    });
+
+    // Simulate a double-click / client retry: two concurrent calls for the
+    // same candidate. Only one may ever create a job.
+    const results = await Promise.allSettled([
+      sendCandidate(store, candidate.id),
+      sendCandidate(store, candidate.id),
+    ]);
+
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((r) => r.status === "rejected")).toHaveLength(1);
+
+    const jobsForCandidate = store.listSendJobs().filter((job) => job.candidateId === candidate.id);
+    expect(jobsForCandidate).toHaveLength(1);
+
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("applies TEST_MODE recipient override in queued payload", async () => {
     process.env.PUBLIC_TRACKING_BASE_URL = "https://relay.example.com";
     vi.spyOn(setup, "probeSetupSessions").mockResolvedValue({

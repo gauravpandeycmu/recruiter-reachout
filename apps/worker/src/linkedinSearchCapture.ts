@@ -216,29 +216,45 @@ export async function captureCompanyRecruiters(
   const byUrl = new Map<string, ScrapedLinkedInProfile>();
 
   for (let pageNumber = 1; pageNumber <= pages; pageNumber += 1) {
-    const url = buildLinkedInPeopleSearchUrl({
-      companyName: input.companyName,
-      location: "United States",
-      page: pageNumber,
-    });
-    log(`LinkedIn capture page ${pageNumber}/${pages}: ${url}`);
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-    await delay(2500);
+    try {
+      const url = buildLinkedInPeopleSearchUrl({
+        companyName: input.companyName,
+        location: "United States",
+        page: pageNumber,
+      });
+      log(`LinkedIn capture page ${pageNumber}/${pages}: ${url}`);
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+      await delay(2500);
 
-    const current = page.url();
-    if (/\/login|\/checkpoint|\/authwall/i.test(current)) {
-      throw new Error("LinkedIn session is not logged in. Open Setup → LinkedIn login, then retry.");
-    }
-
-    const found = await scrapeVisiblePeopleResults(page);
-    log(`Page ${pageNumber}: found ${found.length} profile(s)`);
-    for (const profile of found) {
-      if (!byUrl.has(profile.linkedinUrl)) {
-        byUrl.set(profile.linkedinUrl, profile);
+      const current = page.url();
+      if (/\/login|\/checkpoint|\/authwall/i.test(current)) {
+        throw new Error("LinkedIn session is not logged in. Open Setup → LinkedIn login, then retry.");
       }
-    }
-    if (pageNumber < pages) {
-      await delay(2000 + Math.floor(Math.random() * 1500));
+
+      const found = await scrapeVisiblePeopleResults(page);
+      log(`Page ${pageNumber}: found ${found.length} profile(s)`);
+      for (const profile of found) {
+        if (!byUrl.has(profile.linkedinUrl)) {
+          byUrl.set(profile.linkedinUrl, profile);
+        }
+      }
+      if (pageNumber < pages) {
+        await delay(2000 + Math.floor(Math.random() * 1500));
+      }
+    } catch (error) {
+      // A later page failing (LinkedIn checkpoint/rate-limit, a goto timeout)
+      // must not discard profiles already scraped from earlier pages. Only
+      // surface the error (and save nothing) when NOTHING has been captured
+      // yet — e.g. a login wall on page 1 is a real, actionable failure with
+      // no partial result to fall back to.
+      if (byUrl.size > 0) {
+        const message = error instanceof Error ? error.message : String(error);
+        log(
+          `Page ${pageNumber}/${pages} failed (${message}) — keeping ${byUrl.size} profile(s) captured from earlier pages.`,
+        );
+        break;
+      }
+      throw error;
     }
   }
 

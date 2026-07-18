@@ -2,6 +2,7 @@ import React, { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, use
 import {
   atLocalHour,
   nextMondayAt,
+  parseDatetimeLocal,
   toDatetimeLocalValue,
 } from "./scheduleTime";
 import { createRoot } from "react-dom/client";
@@ -35,14 +36,21 @@ import {
   getTestModeSettings,
   updateTestModeSettings,
   updateAnalyticsGoal,
+  type UpcomingSendView,
   scheduleSends,
+  addPersonToScheduledBatch,
   cancelScheduledSends,
-  rescheduleQueuedSend,
+  pausePendingSends,
+  resumePausedSends,
+  rescheduleCompanyBatch,
   updateScheduledCompanyBatch,
   retryFailedSends,
+  reactivateCandidates,
+  replaceActiveFromHistory,
   nextDiscoveryCandidate,
   previewEmail,
   removeCandidate,
+  auditUi,
   removeEmailSample,
   removeResume,
   requestDiscovery,
@@ -57,23 +65,30 @@ import {
   uploadResume,
   type AppData,
   type EnvReport,
-  type UpcomingSendView,
   type WorkerStatusView,
 } from "./api";
 import {
   groupUpcomingByCompany,
   isScheduleForNow,
   isScheduledItemOverdue,
+  resolveTrackedSendMode,
   resumeTintIndex,
   stripTestModePrefix,
   summarizeUpcomingSends,
   filterScheduledTabItems,
+  buildSendSessionFromUpcoming,
+  deriveBatchScheduleTiming,
+  formatCompanyBlockShiftMessage,
+  discoveryStatusLabel,
+  trackedSendQueueIdsAreOrphaned,
+  type SendSession,
 } from "./sendHelpers";
-import { appDataPollKey, workerStatusPollKey } from "./pollKeys";
+import { appDataPollKey, shouldApplyPollResult, workerStatusPollKey } from "./pollKeys";
 import {
   buildSendProgressRows,
   compactSendChecklist,
   localYmd,
+  resolveQueueProgressStatus,
 } from "./sendProgress";
 import { streakRingMetrics } from "./streakRing";
 import { PreciseLocationSetup } from "./WeatherWidget";
@@ -127,6 +142,7 @@ const SESSION_STATUS_STORAGE_KEY = "recruiter-reachout.setup-session-status";
 const UI_PREFS_STORAGE_KEY = "recruiter-reachout.ui-prefs";
 const ACTIVE_SEND_QUEUE_IDS_KEY = "recruiter-reachout.active-send-queue-ids";
 const ACTIVE_SEND_MODE_KEY = "recruiter-reachout.active-send-mode";
+const ACTIVE_SEND_SESSION_KEY = "recruiter-reachout.active-send-session";
 const BATCH_COMPANY_CHOICE_KEY = "recruiter-reachout.batch-company-choice";
 const DANCING_CAT_GIF = "https://media.giphy.com/media/JIX9t2j0ZTN9S/giphy.gif";
 
@@ -299,6 +315,15 @@ function truncatePreview(text: string, max = 220): string {
   return `${cleaned.slice(0, max - 1)}…`;
 }
 
+function defaultRescheduleStart(fromIso: string, now = new Date()): Date {
+  const current = new Date(fromIso);
+  if (!Number.isFinite(current.getTime()) || current.getTime() <= now.getTime() + 60_000) {
+    // Past-due / imminent batches: default to right now so Save new time is not stuck on a dead clock.
+    return now;
+  }
+  return current;
+}
+
 function formatShortWhen(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) {
@@ -311,6 +336,14 @@ function formatShortWhen(iso: string): string {
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+/** Next-up card: past/due claimable slots say "Due now" instead of a stale clock time. */
+function formatNextUpWhen(iso: string, dueNow: boolean): string {
+  if (dueNow) {
+    return "Due now";
+  }
+  return formatShortWhen(iso);
 }
 
 type SendProgressRow = import("./sendProgress").SendProgressRow;
@@ -361,6 +394,30 @@ function writeTrackedSendMode(mode: "now" | "later" | null) {
     }
   } catch {
     // ignore storage failures
+  }
+}
+
+function readSendSession(): SendSession | null {
+  try {
+    const raw = window.sessionStorage.getItem(ACTIVE_SEND_SESSION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as SendSession;
+    if (!parsed?.company || !Array.isArray(parsed.people)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeSendSession(session: SendSession | null) {
+  try {
+    if (!session) {
+      window.sessionStorage.removeItem(ACTIVE_SEND_SESSION_KEY);
+    } else {
+      window.sessionStorage.setItem(ACTIVE_SEND_SESSION_KEY, JSON.stringify(session));
+    }
+  } catch {
+    // ignore
   }
 }
 
@@ -533,13 +590,13 @@ function CumulativeSendsChart({ points }: { points: Array<{ date: string; total:
   const area = `${pad},${height - pad} ${line} ${width - pad},${height - pad}`;
   return (
     <div className="svg-chart-wrap">
-      <svg viewBox={`0 0 ${width} ${height}`} className="svg-chart" role="img" aria-label="Cumulative companies scheduled">
+      <svg viewBox={`0 0 ${width} ${height}`} className="svg-chart" role="img" aria-label="Cumulative companies reached">
         <polygon points={area} className="svg-area" />
         <polyline points={line} className="svg-line" fill="none" />
       </svg>
       <div className="svg-chart-meta">
         <strong>{points.at(-1)?.total ?? 0}</strong>
-        <span>companies scheduled</span>
+        <span>companies reached</span>
       </div>
     </div>
   );
@@ -605,32 +662,39 @@ function DonutChart({
 }
 
 /**
- * Six months of days as garden plots — bare soil → sprout → leaf by emails sent,
- * with a blossom marker on days the daily goal was met. Sibling of the streak grove:
- * the grove shows the run you're on, the garden shows every day you ever showed up.
+ * GitHub-style contribution grid — past months through today only.
+ * Leading blanks align the first day to its weekday; trailing blanks fill
+ * the rest of the current week (future days stay empty, no future weeks).
  */
 function ContributionGarden({
   daily,
   goal,
+  today,
 }: {
   daily: Array<{ date: string; sent: number; scheduledCompanies: number }>;
   goal: number;
+  today: string;
 }) {
-  const cell = 13;
+  const cell = 10;
   const gap = 3;
-  const top = 18;
-  const left = 30;
-  const first = daily[0];
+  const top = 16;
+  const left = 28;
+  // Only through today — never invent future calendar days.
+  const past = daily.filter((d) => d.date <= today);
+  const first = past[0];
   if (!first) return null;
   const firstDow = (new Date(`${first.date}T00:00:00`).getDay() + 6) % 7; // 0 = Monday
   const cells: Array<{ date: string; sent: number; scheduled: number } | null> = [
     ...Array.from({ length: firstDow }, () => null),
-    ...daily.map((d) => ({ date: d.date, sent: d.sent, scheduled: d.scheduledCompanies })),
+    ...past.map((d) => ({ date: d.date, sent: d.sent, scheduled: d.scheduledCompanies })),
   ];
+  // Pad only the remainder of this week (GitHub does the same for days after today).
+  const tailPad = cells.length % 7 === 0 ? 0 : 7 - (cells.length % 7);
+  if (tailPad > 0) cells.push(...Array.from({ length: tailPad }, () => null));
   const weeks: Array<typeof cells> = [];
   for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, i + 7));
   const width = left + weeks.length * (cell + gap);
-  const height = top + 7 * (cell + gap);
+  const height = top + 7 * (cell + gap) + 2;
   const monthLabels: Array<{ x: number; label: string }> = [];
   let lastMonth = "";
   weeks.forEach((week, w) => {
@@ -649,8 +713,6 @@ function ContributionGarden({
     if (day.sent >= 6) return "leaf3";
     if (day.sent >= 3) return "leaf2";
     if (day.sent >= 1) return "leaf1";
-    // Scheduled-only days stay faintly alive — the streak counts them, so the
-    // garden shouldn't show bare soil in the middle of a living run.
     if (day.scheduled > 0) return "sprout";
     return "soil";
   };
@@ -662,7 +724,7 @@ function ContributionGarden({
         height={height}
         className="garden-svg"
         role="img"
-        aria-label="Daily sending activity for the last six months"
+        aria-label={`Daily sending activity through ${today}`}
       >
         {monthLabels.map((m) => (
           <text key={`${m.label}-${m.x}`} className="garden-month" x={m.x} y={11}>
@@ -670,15 +732,27 @@ function ContributionGarden({
           </text>
         ))}
         {["Mon", "Wed", "Fri"].map((label, i) => (
-          <text key={label} className="garden-day-label" x={0} y={top + (i * 2 + 0) * (cell + gap) + cell - 3}>
+          <text key={label} className="garden-day-label" x={0} y={top + i * 2 * (cell + gap) + cell - 2}>
             {label}
           </text>
         ))}
         {weeks.map((week, w) =>
           week.map((day, dow) => {
-            if (!day) return null;
             const x = left + w * (cell + gap);
             const y = top + dow * (cell + gap);
+            if (!day) {
+              return (
+                <rect
+                  key={`blank-${w}-${dow}`}
+                  className="garden-cell soil blank"
+                  x={x}
+                  y={y}
+                  width={cell}
+                  height={cell}
+                  rx={2}
+                />
+              );
+            }
             const goalMet = goal > 0 && day.scheduled >= goal;
             return (
               <g key={day.date}>
@@ -688,13 +762,13 @@ function ContributionGarden({
                   y={y}
                   width={cell}
                   height={cell}
-                  rx={3}
+                  rx={2}
                 >
                   <title>
                     {`${day.date}: ${day.sent} sent · ${day.scheduled} companies scheduled${goalMet ? " · goal met 🌸" : ""}`}
                   </title>
                 </rect>
-                {goalMet && <circle className="garden-bloom" cx={x + cell - 3.4} cy={y + 3.4} r={2.1} />}
+                {goalMet && <circle className="garden-bloom" cx={x + cell - 2.8} cy={y + 2.8} r={1.7} />}
               </g>
             );
           }),
@@ -754,6 +828,14 @@ function WeekdayRhythm({ daily }: { daily: Array<{ date: string; sent: number }>
 
 const BUBBLE_PALETTE = ["#3f8f4a", "#3d7ab5", "#b5762a", "#7a5fb5", "#2a8f8a", "#b55a6e", "#5a8a2a", "#4a6a9a"];
 
+function bubbleHighlight(hex: string): string {
+  const c = hex.replace("#", "");
+  const r = Math.min(255, parseInt(c.slice(0, 2), 16) + 48);
+  const g = Math.min(255, parseInt(c.slice(2, 4), 16) + 48);
+  const b = Math.min(255, parseInt(c.slice(4, 6), 16) + 48);
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
 /**
  * Packed company bubbles — one circle per company, area scaled by emails
  * actually SENT (never scheduled). Greedy spiral packing, largest at center.
@@ -776,60 +858,72 @@ function CompanyBubbles({
   const W = 560;
   const H = 300;
   const maxSent = Math.max(...rows.map((row) => row.sent));
-  const radiusFor = (sent: number) => 17 + Math.sqrt(sent / maxSent) * 41;
-  const placed: Array<{ x: number; y: number; r: number; row: (typeof rows)[number] }> = [];
-  for (const row of rows) {
+  const radiusFor = (sent: number) => 18 + Math.sqrt(sent / maxSent) * 44;
+  const placed: Array<{ x: number; y: number; r: number; row: (typeof rows)[number]; color: string }> = [];
+  for (const [i, row] of rows.entries()) {
     const r = radiusFor(row.sent);
+    const color = BUBBLE_PALETTE[i % BUBBLE_PALETTE.length]!;
     let x = W / 2;
     let y = H / 2;
     if (placed.length > 0) {
       let angle = placed.length * 2.399963;
       let radius = 4;
       for (let step = 0; step < 900; step += 1) {
-        radius += 1.4;
+        radius += 1.35;
         angle += 0.32;
-        x = W / 2 + Math.cos(angle) * radius * 1.5;
-        y = H / 2 + Math.sin(angle) * radius * 0.72;
+        x = W / 2 + Math.cos(angle) * radius * 1.45;
+        y = H / 2 + Math.sin(angle) * radius * 0.7;
         const fits =
-          placed.every((p) => Math.hypot(p.x - x, p.y - y) >= p.r + r + 3) &&
+          placed.every((p) => Math.hypot(p.x - x, p.y - y) >= p.r + r + 1) &&
           x - r > 2 && x + r < W - 2 && y - r > 2 && y + r < H - 2;
         if (fits) break;
       }
     }
-    placed.push({ x, y, r, row });
+    placed.push({ x, y, r, row, color });
   }
   return (
     <div className="bubble-chart-wrap">
       <svg viewBox={`0 0 ${W} ${H}`} className="bubble-chart" role="img" aria-label="Companies sized by emails sent">
+        <defs>
+          {placed.map((p, i) => (
+            <radialGradient key={p.row.companyName} id={`bubble-grad-${i}`} cx="35%" cy="30%" r="65%">
+              <stop offset="0%" stopColor={bubbleHighlight(p.color)} />
+              <stop offset="55%" stopColor={p.color} />
+              <stop offset="100%" stopColor={p.color} stopOpacity={0.88} />
+            </radialGradient>
+          ))}
+        </defs>
         {placed.map((p, i) => (
-          <g
-            key={p.row.companyName}
-            className="bubble"
-            onClick={() => onOpen(p.row.companyName)}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") onOpen(p.row.companyName);
-            }}
-          >
-            <title>
-              {`${p.row.companyName} · ${p.row.sent} sent · ${p.row.peopleContacted} people${p.row.lastSentAt ? ` · last ${formatActivityAt(p.row.lastSentAt)}` : ""}`}
-            </title>
-            <circle cx={p.x} cy={p.y} r={p.r} fill={BUBBLE_PALETTE[i % BUBBLE_PALETTE.length]} />
-            {p.r >= 30 ? (
-              <>
-                <text className="bubble-name" x={p.x} y={p.y - 2} textAnchor="middle">
-                  {p.row.companyName.length > 13 ? `${p.row.companyName.slice(0, 12)}…` : p.row.companyName}
+          <g key={p.row.companyName} transform={`translate(${p.x}, ${p.y})`}>
+            <g
+              className="bubble"
+              onClick={() => onOpen(p.row.companyName)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") onOpen(p.row.companyName);
+              }}
+            >
+              <title>
+                {`${p.row.companyName} · ${p.row.sent} sent · ${p.row.peopleContacted} people${p.row.lastSentAt ? ` · last ${formatActivityAt(p.row.lastSentAt)}` : ""}`}
+              </title>
+              <circle className="bubble-body" cx={0} cy={0} r={p.r} fill={`url(#bubble-grad-${i})`} />
+              <circle className="bubble-shine" cx={-p.r * 0.28} cy={-p.r * 0.32} r={p.r * 0.22} />
+              {p.r >= 30 ? (
+                <>
+                  <text className="bubble-name" x={0} y={-2} textAnchor="middle">
+                    {p.row.companyName.length > 13 ? `${p.row.companyName.slice(0, 12)}…` : p.row.companyName}
+                  </text>
+                  <text className="bubble-count" x={0} y={13} textAnchor="middle">
+                    {p.row.sent} sent
+                  </text>
+                </>
+              ) : p.r >= 21 ? (
+                <text className="bubble-name" x={0} y={4} textAnchor="middle">
+                  {p.row.companyName.slice(0, Math.max(3, Math.floor(p.r / 4.2)))}
                 </text>
-                <text className="bubble-count" x={p.x} y={p.y + 13} textAnchor="middle">
-                  {p.row.sent}
-                </text>
-              </>
-            ) : p.r >= 21 ? (
-              <text className="bubble-name" x={p.x} y={p.y + 4} textAnchor="middle">
-                {p.row.companyName.slice(0, Math.max(3, Math.floor(p.r / 4.2)))}
-              </text>
-            ) : null}
+              ) : null}
+            </g>
           </g>
         ))}
       </svg>
@@ -906,6 +1000,9 @@ function StreakRingGraphic({
 function App() {
   const initialPrefs = useMemo(() => readUiPrefs(), []);
   const [tab, setTab] = useState<Tab>(() => readStoredTab());
+  useEffect(() => {
+    auditUi("web.tab", { tab });
+  }, [tab]);
   const [state, setState] = useState<AppData>();
   const [selectedId, setSelectedId] = useState<string>();
   const [subject, setSubject] = useState("Quick note, {firstName}");
@@ -1015,6 +1112,7 @@ function App() {
   /** Queue item ids from the latest Schedule click — scopes the send progress panel. */
   const [trackedSendQueueIds, setTrackedSendQueueIds] = useState<string[]>(() => readTrackedSendQueueIds());
   const [trackedSendMode, setTrackedSendMode] = useState<"now" | "later" | null>(() => readTrackedSendMode());
+  const [sendSession, setSendSession] = useState<SendSession | null>(() => readSendSession());
   const [expandedScheduledCompanies, setExpandedScheduledCompanies] = useState<Set<string>>(new Set());
   const [leavingScheduledCompanies, setLeavingScheduledCompanies] = useState<Set<string>>(new Set());
   const [scheduledPeoplePageByCompany, setScheduledPeoplePageByCompany] = useState<Record<string, number>>({});
@@ -1025,8 +1123,103 @@ function App() {
   const [rescheduleCompany, setRescheduleCompany] = useState<string | null>(null);
   const [rescheduleAt, setRescheduleAt] = useState("");
   const [rescheduleBusy, setRescheduleBusy] = useState(false);
+  const [addPersonCompany, setAddPersonCompany] = useState<string | null>(null);
+  const [addPersonEmail, setAddPersonEmail] = useState("");
+  const [addPersonLinkedIn, setAddPersonLinkedIn] = useState("");
+  const [addPersonName, setAddPersonName] = useState("");
+  const [addPersonBusy, setAddPersonBusy] = useState(false);
+  /** Which scheduled inline panel is playing its close animation. */
+  const [closingScheduledPanel, setClosingScheduledPanel] = useState<"reschedule" | "add" | null>(null);
+  const [leavingScheduledPeople, setLeavingScheduledPeople] = useState<Set<string>>(new Set());
+  const panelCloseTimerRef = useRef<number | null>(null);
+
+  const SCHEDULED_PANEL_CLOSE_MS = 320;
+  const SCHEDULED_GROUP_LEAVE_MS = 420;
+  const SCHEDULED_PERSON_LEAVE_MS = 320;
+
+  function clearPanelCloseTimer() {
+    if (panelCloseTimerRef.current != null) {
+      window.clearTimeout(panelCloseTimerRef.current);
+      panelCloseTimerRef.current = null;
+    }
+  }
+
+  function closeReschedulePanel(animated = true) {
+    if (!rescheduleCompany) {
+      return;
+    }
+    if (!animated) {
+      clearPanelCloseTimer();
+      setClosingScheduledPanel(null);
+      setRescheduleCompany(null);
+      return;
+    }
+    clearPanelCloseTimer();
+    setClosingScheduledPanel("reschedule");
+    panelCloseTimerRef.current = window.setTimeout(() => {
+      setRescheduleCompany(null);
+      setClosingScheduledPanel(null);
+      panelCloseTimerRef.current = null;
+    }, SCHEDULED_PANEL_CLOSE_MS);
+  }
+
+  function closeAddPersonPanel(animated = true) {
+    if (!addPersonCompany) {
+      return;
+    }
+    if (!animated) {
+      clearPanelCloseTimer();
+      setClosingScheduledPanel(null);
+      setAddPersonCompany(null);
+      return;
+    }
+    clearPanelCloseTimer();
+    setClosingScheduledPanel("add");
+    panelCloseTimerRef.current = window.setTimeout(() => {
+      setAddPersonCompany(null);
+      setAddPersonEmail("");
+      setAddPersonLinkedIn("");
+      setAddPersonName("");
+      setClosingScheduledPanel(null);
+      panelCloseTimerRef.current = null;
+    }, SCHEDULED_PANEL_CLOSE_MS);
+  }
 
   const candidates = state?.candidates ?? [];
+
+  /** Keep Send tab looking like a normal batch after archive-on-queue (Send now). */
+  const sessionCandidates = useMemo((): RecruiterCandidate[] => {
+    if (!sendSession || trackedSendMode !== "now" || sendSession.people.length === 0) {
+      return [];
+    }
+    return sendSession.people.map(
+      (person) =>
+        ({
+          id: person.candidateId,
+          fullName: person.fullName,
+          firstName: person.fullName.split(/\s+/)[0] ?? person.fullName,
+          email: person.email,
+          company: person.company ?? sendSession.company,
+          profilePhotoUrl: person.profilePhotoUrl,
+          emailCandidates: person.email
+            ? [
+                {
+                  email: person.email,
+                  pattern: "api_verified",
+                  confidence: "high",
+                  reason: "From scheduled send",
+                },
+              ]
+            : [],
+          status: "email_guessed",
+          isActive: true,
+          createdAt: sendSession.startedAt,
+          updatedAt: sendSession.startedAt,
+        }) as RecruiterCandidate,
+    );
+  }, [sendSession, trackedSendMode]);
+
+  const displayCandidates = candidates.length > 0 ? candidates : sessionCandidates;
 
   const sortedBacklog = useMemo(
     () => sortRows(backlog, backlogSort, (job, key) => job[key]),
@@ -1076,7 +1269,7 @@ function App() {
   /** Distinct companies in the active batch — most recently captured first. */
   const batchCompanies = useMemo(() => {
     const latestAt = new Map<string, string>();
-    for (const candidate of candidates) {
+    for (const candidate of displayCandidates) {
       const name = candidate.company?.trim();
       if (!name) {
         continue;
@@ -1087,12 +1280,18 @@ function App() {
         latestAt.set(name, stamp);
       }
     }
+    const sessionCompany = sendSession?.company?.trim();
+    if (sessionCompany && !latestAt.has(sessionCompany)) {
+      latestAt.set(sessionCompany, sendSession!.startedAt);
+    }
     return [...latestAt.entries()]
       .sort((a, b) => b[1].localeCompare(a[1]))
       .map(([name]) => name);
-  }, [candidates]);
+  }, [displayCandidates, sendSession]);
 
-  const batchCompany = batchCompanies.includes(batchCompanyChoice) ? batchCompanyChoice : batchCompanies[0];
+  const batchCompany = batchCompanies.includes(batchCompanyChoice)
+    ? batchCompanyChoice
+    : batchCompanies[0] ?? sendSession?.company;
 
   useEffect(() => {
     if (!batchCompany) {
@@ -1111,17 +1310,17 @@ function App() {
   /** Company filter — only used for personalize / generate email, never to hide the recipient list. */
   const companyCandidates = useMemo(() => {
     if (!batchCompany) {
-      return candidates;
+      return displayCandidates;
     }
     const key = batchCompany.replace(/\s+/g, " ").trim().toLowerCase();
-    return candidates.filter(
+    return displayCandidates.filter(
       (candidate) => (candidate.company ?? "").replace(/\s+/g, " ").trim().toLowerCase() === key,
     );
-  }, [batchCompany, candidates]);
+  }, [batchCompany, displayCandidates]);
 
   const selected = useMemo(
-    () => candidates.find((candidate) => candidate.id === selectedId) ?? candidates[0],
-    [candidates, selectedId],
+    () => displayCandidates.find((candidate) => candidate.id === selectedId) ?? displayCandidates[0],
+    [displayCandidates, selectedId],
   );
 
   const sendProgressPeople = useMemo(() => {
@@ -1142,16 +1341,33 @@ function App() {
         } as unknown as RecruiterCandidate);
       }
     }
+    for (const person of sendSession?.people ?? []) {
+      if (!map.has(person.candidateId)) {
+        map.set(person.candidateId, {
+          id: person.candidateId,
+          fullName: person.fullName,
+          firstName: person.fullName.split(/\s+/)[0] ?? person.fullName,
+          email: person.email,
+          company: person.company,
+          profilePhotoUrl: person.profilePhotoUrl,
+          emailCandidates: [],
+          status: "scheduled",
+          isActive: false,
+          createdAt: sendSession?.startedAt ?? new Date().toISOString(),
+          updatedAt: sendSession?.startedAt ?? new Date().toISOString(),
+        } as unknown as RecruiterCandidate);
+      }
+    }
     return [...map.values()];
-  }, [candidates, state?.upcomingSends]);
+  }, [candidates, state?.upcomingSends, sendSession]);
 
   useEffect(() => {
     setRecipientPage(0);
-  }, [batchCompany, candidates.length]);
+  }, [batchCompany, displayCandidates.length]);
 
-  const recipientPageCount = Math.max(1, Math.ceil(candidates.length / RECIPIENT_PAGE_SIZE));
+  const recipientPageCount = Math.max(1, Math.ceil(displayCandidates.length / RECIPIENT_PAGE_SIZE));
   const safeRecipientPage = Math.min(recipientPage, recipientPageCount - 1);
-  const pagedCandidates = candidates.slice(
+  const pagedCandidates = displayCandidates.slice(
     safeRecipientPage * RECIPIENT_PAGE_SIZE,
     (safeRecipientPage + 1) * RECIPIENT_PAGE_SIZE,
   );
@@ -1261,13 +1477,20 @@ function App() {
   }, [batchCompany, batchContent?.id, batchContent?.updatedAt]);
 
   const readyCandidates = candidates.filter((candidate) => candidate.email && !SETTLED_STATUSES.has(candidate.status));
-  const discoveredCount = candidates.filter((candidate) => candidate.email).length;
-  const notFoundCount = candidates.filter((candidate) => candidate.status === "email_not_found").length;
-  const pendingCount = candidates.filter((candidate) => !candidate.email && candidate.status !== "email_not_found").length;
-  const discoveryPercent = candidates.length === 0 ? 0 : Math.round((discoveredCount / candidates.length) * 100);
+  const discoveredCount = displayCandidates.filter((candidate) => candidate.email).length;
+  const notFoundCount = displayCandidates.filter((candidate) => candidate.status === "email_not_found").length;
+  const pendingCount = displayCandidates.filter((candidate) => !candidate.email && candidate.status !== "email_not_found").length;
+  const discoveryPercent = displayCandidates.length === 0 ? 0 : Math.round((discoveredCount / displayCandidates.length) * 100);
   const activeLookupId = workerStatus?.online ? workerStatus.status?.candidateId : undefined;
 
-  const batchCandidateIds = useMemo(() => new Set(candidates.map((candidate) => candidate.id)), [candidates]);
+  const batchCandidateIds = useMemo(() => {
+    const ids = new Set(candidates.map((candidate) => candidate.id));
+    // Send-now archives candidates; keep session people so the "Sending…" indicator still works.
+    for (const person of sendSession?.people ?? []) {
+      ids.add(person.candidateId);
+    }
+    return ids;
+  }, [candidates, sendSession?.people]);
   const batchSendQueue = useMemo(() => {
     const all = state?.sendQueue ?? [];
     if (trackedSendQueueIds.length > 0) {
@@ -1292,6 +1515,26 @@ function App() {
     writeTrackedSendMode(trackedSendMode);
   }, [trackedSendMode]);
 
+  // After Scheduled → Send now (or a reload mid-send), restore the preview editors from the session.
+  useEffect(() => {
+    if (!sendSession || trackedSendMode !== "now") {
+      return;
+    }
+    if (previewSubject.trim() || previewBody.trim()) {
+      return;
+    }
+    if (!sendSession.subject && !sendSession.body) {
+      return;
+    }
+    const id = selectedId ?? sendSession.people[0]?.candidateId;
+    if (!id) {
+      return;
+    }
+    applyPreviewFields(id, sendSession.subject, sendSession.body, undefined, { animate: false });
+    // intentionally only when session first appears empty
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sendSession, trackedSendMode]);
+
   // If we only recovered scheduled rows (no tracked ids), lock them in so sent ones stay visible.
   useEffect(() => {
     if (trackedSendQueueIds.length > 0 || batchSendQueue.length === 0) {
@@ -1299,8 +1542,13 @@ function App() {
     }
     if (batchSendQueue.every((item) => item.status === "scheduled")) {
       setTrackedSendQueueIds(batchSendQueue.map((item) => item.id));
+      // Mid-batch reload: if a Send session exists, keep the progress panel.
+      if (sendSession && trackedSendMode !== "now") {
+        setTrackedSendMode("now");
+        writeTrackedSendMode("now");
+      }
     }
-  }, [batchSendQueue, trackedSendQueueIds.length]);
+  }, [batchSendQueue, trackedSendQueueIds.length, sendSession, trackedSendMode]);
 
   const scheduledSendCount = batchSendQueue.filter((item) => item.status === "scheduled").length;
   const upcomingSends = state?.upcomingSends ?? [];
@@ -1316,31 +1564,49 @@ function App() {
     (workerStatus.status?.phase === "sending" ||
       Boolean(workerStatus.status?.message?.toLowerCase().includes("sending email")));
   const batchRemainingScheduled = batchSendQueue.filter(
-    (item) => item.status === "scheduled" || item.status === "queued",
+    (item) => (item.status === "scheduled" || item.status === "queued") && !item.failureReason,
   ).length;
 
   useEffect(() => {
-    if (trackedSendQueueIds.length === 0) {
-      return;
-    }
-    if (batchRemainingScheduled > 0 || isSendingPhase) {
+    if (trackedSendQueueIds.length === 0 || isSendingPhase) {
       return;
     }
     const trackedItems = trackedSendQueueIds
       .map((id) => state?.sendQueue?.find((item) => item.id === id))
       .filter((item): item is NonNullable<typeof item> => Boolean(item));
-    if (
-      trackedItems.length > 0 &&
-      trackedItems.every(
-        (item) => item.status === "sent" || item.status === "failed" || item.status === "paused",
-      )
-    ) {
-      setTrackedSendQueueIds([]);
-      writeTrackedSendQueueIds([]);
-      setTrackedSendMode(null);
-      writeTrackedSendMode(null);
+    if (trackedItems.length === 0) {
+      if (trackedSendQueueIdsAreOrphaned(trackedSendQueueIds, state?.sendQueue ?? [])) {
+        setTrackedSendQueueIds([]);
+        writeTrackedSendQueueIds([]);
+        setTrackedSendMode(null);
+        writeTrackedSendMode(null);
+        setSendSession(null);
+        writeSendSession(null);
+      }
+      return;
     }
-  }, [trackedSendQueueIds, batchRemainingScheduled, isSendingPhase, state?.sendQueue]);
+    const stillSending = trackedItems.some(
+      (item) => (item.status === "scheduled" || item.status === "queued") && !item.failureReason,
+    );
+    if (stillSending) {
+      return;
+    }
+    const hasPaused = trackedItems.some((item) => item.status === "paused");
+    const hasFailures = trackedItems.some(
+      (item) => item.status === "failed" || (Boolean(item.failureReason) && item.status !== "paused"),
+    );
+    // Keep the progress panel when anything failed or paused — user still owns the batch.
+    if (hasFailures || hasPaused) {
+      return;
+    }
+    // All sent — clear session.
+    setTrackedSendQueueIds([]);
+    writeTrackedSendQueueIds([]);
+    setTrackedSendMode(null);
+    writeTrackedSendMode(null);
+    setSendSession(null);
+    writeSendSession(null);
+  }, [trackedSendQueueIds, isSendingPhase, state?.sendQueue]);
 
   const sendActiveCandidateId =
     isSendingPhase && workerStatus?.status?.candidateId && batchCandidateIds.has(workerStatus.status.candidateId)
@@ -1356,11 +1622,16 @@ function App() {
     }
     const sentCount = sendProgressRows.filter((row) => row.status === "sent").length;
     const failedCount = sendProgressRows.filter((row) => row.status === "failed").length;
+    const pausedCount = sendProgressRows.filter((row) => row.status === "paused").length;
     const doneCount = sentCount + failedCount;
     const total = sendProgressRows.length;
-    const remaining = sendProgressRows.filter((row) => row.status === "scheduled" || row.status === "sending");
+    const remaining = sendProgressRows.filter(
+      (row) => row.status === "scheduled" || row.status === "sending" || row.status === "paused",
+    );
     const current: SendProgressRow =
       sendProgressRows.find((row) => row.status === "sending") ??
+      sendProgressRows.find((row) => row.status === "scheduled") ??
+      sendProgressRows.find((row) => row.status === "paused") ??
       remaining[0] ??
       sendProgressRows[sendProgressRows.length - 1]!;
     const overallEnd: SendProgressRow =
@@ -1371,14 +1642,19 @@ function App() {
     const last = checklist[checklist.length - 1];
     const firstIndex = first ? sendProgressRows.findIndex((row) => row.id === first.id) : 0;
     const lastIndex = last ? sendProgressRows.findIndex((row) => row.id === last.id) : -1;
+    const activelyQueuing = sendProgressRows.some(
+      (row) => row.status === "scheduled" || row.status === "sending",
+    );
     return {
       sentCount,
       failedCount,
+      pausedCount,
       doneCount,
       total,
       remainingCount: remaining.length,
       percent,
-      active: remaining.length > 0 || isSendingPhase,
+      active: activelyQueuing || isSendingPhase,
+      paused: !activelyQueuing && !isSendingPhase && pausedCount > 0,
       current,
       overallEnd,
       checklist,
@@ -1389,15 +1665,30 @@ function App() {
 
   const showSessionStop =
     trackedSendMode === "now" && trackedSendQueueIds.length > 0 && batchRemainingScheduled > 0;
+  const batchPausedQueueIds = batchSendQueue
+    .filter((item) => item.status === "paused")
+    .map((item) => item.id);
   const showSendProgress =
     trackedSendMode === "now" &&
     sendProgress &&
-    (sendProgress.active || sendProgress.doneCount > 0 || sendProgress.failedCount > 0);
+    (sendProgress.active ||
+      sendProgress.paused ||
+      sendProgress.doneCount > 0 ||
+      sendProgress.failedCount > 0 ||
+      sendProgress.pausedCount > 0);
   const showScheduledLaterBanner =
     trackedSendMode === "later" && trackedSendQueueIds.length > 0 && batchRemainingScheduled > 0;
-  const batchFailedQueueIds = batchSendQueue.filter((item) => item.status === "failed").map((item) => item.id);
+  const batchFailedQueueIds = batchSendQueue
+    .filter(
+      (item) =>
+        item.status === "failed" || (Boolean(item.failureReason) && item.status !== "paused"),
+    )
+    .map((item) => item.id);
   const trackedBatchUpcoming = useMemo(
-    () => upcomingSends.filter((item) => trackedSendQueueIds.includes(item.queueItemId)),
+    () =>
+      upcomingSends
+        .filter((item) => trackedSendQueueIds.includes(item.queueItemId))
+        .sort((a, b) => new Date(a.scheduledFor).getTime() - new Date(b.scheduledFor).getTime()),
     [upcomingSends, trackedSendQueueIds],
   );
 
@@ -1405,7 +1696,8 @@ function App() {
     pendingCount > 0 ||
     isSendingPhase ||
     tab === "scheduled" ||
-    (tab === "send" && (scheduledSendCount > 0 || upcomingSends.length > 0));
+    (Boolean(sendSession) && trackedSendMode === "now") ||
+    (tab === "send" && (scheduledSendCount > 0 || upcomingSends.length > 0 || trackedSendQueueIds.length > 0));
 
   const pollMs = needsFastPoll
     ? DISCOVERY_POLL_MS
@@ -1414,7 +1706,7 @@ function App() {
       : BACKGROUND_POLL_MS;
 
   const scheduleSummary = useMemo(() => {
-    const start = new Date(scheduleStartAt);
+    const start = activeSchedulePreset === "now" ? new Date() : parseDatetimeLocal(scheduleStartAt);
     if (Number.isNaN(start.getTime()) || readyCandidates.length === 0) {
       return null;
     }
@@ -1653,6 +1945,7 @@ function App() {
     });
     if (tab === "setup") {
       void loadTestModeSettings();
+      void loadSetupSessions(true);
     }
     if (tab === "send" || tab === "analytics") {
       void refreshAnalytics().catch((error: Error) => setMessage(error.message));
@@ -1757,18 +2050,31 @@ function App() {
   }, [footer]);
 
   useEffect(() => {
+    let pollGeneration = 0;
+    let inFlight = false;
     const timer = window.setInterval(() => {
       if (document.visibilityState !== "visible") {
         return;
       }
+      if (inFlight) {
+        return;
+      }
+      const generation = ++pollGeneration;
+      inFlight = true;
       void (async () => {
         try {
           const next = await getState();
+          if (!shouldApplyPollResult(generation, pollGeneration)) {
+            return;
+          }
           setState((prev) => {
             if (prev && appDataPollKey(prev) === appDataPollKey(next)) return prev;
             return next;
           });
           const nextWorker = await getWorkerStatus();
+          if (!shouldApplyPollResult(generation, pollGeneration)) {
+            return;
+          }
           setWorkerStatus((prev) => {
             if (prev && workerStatusPollKey(prev) === workerStatusPollKey(nextWorker)) return prev;
             return nextWorker;
@@ -1778,10 +2084,15 @@ function App() {
           }
         } catch {
           // Keep the last known UI state if a poll fails.
+        } finally {
+          inFlight = false;
         }
       })();
     }, pollMs);
-    return () => window.clearInterval(timer);
+    return () => {
+      pollGeneration += 1;
+      window.clearInterval(timer);
+    };
   }, [pollMs, pendingCount]);
 
   useEffect(() => {
@@ -2040,31 +2351,30 @@ function App() {
     }
   }
 
-  async function runStopScheduledSends() {
-    const queueItemIds = batchSendQueue
-      .filter((item) => item.status === "scheduled" || item.status === "queued")
-      .map((item) => item.id);
+  async function runPausePendingSends() {
+    const remaining = batchSendQueue.filter(
+      (item) => item.status === "scheduled" || item.status === "queued",
+    );
+    const queueItemIds = remaining.map((item) => item.id);
     if (!queueItemIds.length) {
-      setMessage("Nothing left to stop in this session.");
+      setMessage("Nothing left to pause in this session.");
       return;
     }
     setBusy(true);
     try {
-      const result = await cancelScheduledSends({
-        queueItemIds,
-        pendingOnly: true,
-      });
+      const result = await pausePendingSends({ queueItemIds });
+      // Keep the same tracked queue so the center checklist stays full (paused, not cleared).
       setMessage(
-        result.jobsCancelled + result.queueCancelled > 0
-          ? `Stopped ${result.queueCancelled} remaining send(s) in this session.`
-          : "No pending sends were left to stop in this session.",
+        result.queueCancelled > 0
+          ? `Paused ${result.queueCancelled} remaining send${result.queueCancelled === 1 ? "" : "s"}. They’re still listed here — adjust timing and click Send/Schedule when ready.`
+          : "No pending sends were left to pause.",
       );
+      await refresh();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Failed to stop scheduled sends.");
+      setMessage(error instanceof Error ? error.message : "Failed to pause remaining sends.");
     } finally {
       setBusy(false);
     }
-    await refresh();
   }
 
   function toggleScheduledCompany(company: string) {
@@ -2131,6 +2441,10 @@ function App() {
       setMessage(`${item.fullName} is sending right now — can't remove until it finishes.`);
       return;
     }
+    setLeavingScheduledPeople((current) => new Set(current).add(item.queueItemId));
+    await new Promise<void>((resolve) => {
+      window.setTimeout(resolve, SCHEDULED_PERSON_LEAVE_MS);
+    });
     setBusy(true);
     try {
       const result = await cancelScheduledSends({
@@ -2141,7 +2455,10 @@ function App() {
         cancelScheduledCompanyEdit();
       }
       if (rescheduleCompany && (item.company?.trim() || "Unknown company") === rescheduleCompany) {
-        setRescheduleCompany(null);
+        closeReschedulePanel(false);
+      }
+      if (addPersonCompany && (item.company?.trim() || "Unknown company") === addPersonCompany) {
+        closeAddPersonPanel(false);
       }
       setMessage(
         result.queueCancelled > 0
@@ -2152,6 +2469,11 @@ function App() {
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Failed to remove scheduled send.");
     } finally {
+      setLeavingScheduledPeople((current) => {
+        const next = new Set(current);
+        next.delete(item.queueItemId);
+        return next;
+      });
       setBusy(false);
     }
   }
@@ -2163,12 +2485,63 @@ function App() {
       return;
     }
     if (rescheduleCompany === company) {
-      setRescheduleCompany(null);
+      closeReschedulePanel(true);
       return;
     }
+    closeAddPersonPanel(false);
     setExpandedScheduledCompanies((current) => new Set(current).add(company));
+    setClosingScheduledPanel(null);
     setRescheduleCompany(company);
-    setRescheduleAt(toDatetimeLocalValue(new Date(actionable[0]!.scheduledFor)));
+    setRescheduleAt(toDatetimeLocalValue(defaultRescheduleStart(actionable[0]!.scheduledFor)));
+  }
+
+  function openAddPersonPanel(company: string) {
+    if (addPersonCompany === company) {
+      closeAddPersonPanel(true);
+      return;
+    }
+    closeReschedulePanel(false);
+    setExpandedScheduledCompanies((current) => new Set(current).add(company));
+    setClosingScheduledPanel(null);
+    setAddPersonCompany(company);
+    setAddPersonEmail("");
+    setAddPersonLinkedIn("");
+    setAddPersonName("");
+  }
+
+  async function saveAddPerson(company: string) {
+    const email = addPersonEmail.trim();
+    if (!email.includes("@")) {
+      setMessage("Enter a valid email address.");
+      return;
+    }
+    setAddPersonBusy(true);
+    try {
+      const result = await addPersonToScheduledBatch({
+        company,
+        email,
+        fullName: addPersonName.trim() || undefined,
+        linkedinUrl: addPersonLinkedIn.trim() || undefined,
+        resumeId: selectedResumeId || undefined,
+        intervalMinutes: scheduleIntervalMinutes,
+      });
+      closeAddPersonPanel(false);
+      const when = formatShortWhen(result.scheduledFor);
+      const shiftNote = formatCompanyBlockShiftMessage(result.shifted, {
+        companyByCandidateId: { [result.candidate.id]: company },
+        formatWhen: formatShortWhen,
+      });
+      setMessage(
+        result.enrichQueued
+          ? `Added ${result.candidate.fullName} to ${company} for ${when}.${shiftNote} Fetching LinkedIn photo…`
+          : `Added ${result.candidate.fullName} to ${company} for ${when}.${shiftNote}`,
+      );
+      await refresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to add person.");
+    } finally {
+      setAddPersonBusy(false);
+    }
   }
 
   function openPastDueReschedule(company: string, items: UpcomingSendView[]) {
@@ -2177,9 +2550,11 @@ function App() {
       setMessage(`${company} has send(s) in progress — wait for them to finish.`);
       return;
     }
+    closeAddPersonPanel(false);
     setExpandedScheduledCompanies((current) => new Set(current).add(company));
+    setClosingScheduledPanel(null);
     setRescheduleCompany(company);
-    setRescheduleAt(toDatetimeLocalValue(new Date(actionable[0]!.scheduledFor)));
+    setRescheduleAt(toDatetimeLocalValue(defaultRescheduleStart(actionable[0]!.scheduledFor)));
   }
 
   async function saveCompanyReschedule(company: string, items: UpcomingSendView[]) {
@@ -2192,27 +2567,27 @@ function App() {
       setMessage(`Nothing to reschedule for ${company}.`);
       return;
     }
-    const newStart = new Date(rescheduleAt);
+    const newStart = parseDatetimeLocal(rescheduleAt);
     if (Number.isNaN(newStart.getTime())) {
       setMessage("Pick a valid date and time.");
       return;
     }
-    const oldStart = new Date(actionable[0]!.scheduledFor).getTime();
-    const deltaMs = newStart.getTime() - oldStart;
+    // Past clock from a past-due card → treat as "start now" instead of a hard API error.
+    const startAt =
+      newStart.getTime() <= Date.now() - 60_000 ? new Date() : newStart;
     setRescheduleBusy(true);
     try {
-      for (const item of actionable) {
-        const nextAt = new Date(new Date(item.scheduledFor).getTime() + deltaMs);
-        await rescheduleQueuedSend({
-          queueItemId: item.queueItemId,
-          scheduledFor: nextAt.toISOString(),
-        });
-      }
-      setRescheduleCompany(null);
+      // One batch call — never reschedule person-by-person (mid-loop rebalance used to
+      // treat a half-moved company as a ~50m stretch and yank tomorrow-8am back to tonight).
+      const result = await rescheduleCompanyBatch({
+        queueItemIds: actionable.map((item) => item.queueItemId),
+        startAt: startAt.toISOString(),
+      });
+      closeReschedulePanel(false);
       setMessage(
-        actionable.length === 1
+        result.updated === 1
           ? `Updated send time for ${company}.`
-          : `Updated ${actionable.length} send times for ${company}.`,
+          : `Updated ${result.updated} send times for ${company}.`,
       );
       await refresh();
     } catch (error) {
@@ -2232,38 +2607,126 @@ function App() {
       );
       return;
     }
+
+    const candidateIds = [...new Set(actionable.map((item) => item.candidateId))];
+    const queueItemIds = actionable.map((item) => item.queueItemId);
+    const template = state?.companyContent?.find((entry) => entry.company === companyContentKey(company));
+    const subjectText = stripTestModePrefix(template?.subject ?? actionable[0]?.subject ?? "");
+    const bodyText = template?.body ?? actionable[0]?.body ?? "";
+    const timing = deriveBatchScheduleTiming(actionable, { intervalPresets: INTERVAL_PRESETS });
+
+    closeReschedulePanel(false);
+    closeAddPersonPanel(false);
+    setBatchCompanyChoice(company);
+    try {
+      window.sessionStorage.setItem(BATCH_COMPANY_CHOICE_KEY, company);
+    } catch {
+      // ignore
+    }
+
+    // Prefill Send-tab timing as Now so Send immediately works; user can still pick a later time.
+    setScheduleIntervalMinutes(timing.intervalMinutes);
+    applySchedulePreset("now");
+
+    // Clear any in-flight progress tracking — user must click Send/Schedule themselves.
+    setTrackedSendQueueIds([]);
+    writeTrackedSendQueueIds([]);
+    setTrackedSendMode(null);
+    writeTrackedSendMode(null);
+    setSendSession(null);
+    writeSendSession(null);
+
+    setSelectedId(candidateIds[0]);
+    applyPreviewFields(candidateIds[0]!, subjectText, bodyText, undefined, { animate: true });
+    setTab("send");
+    setMessage(
+      actionable.length === 1
+        ? `Loaded ${company} on Send — review timing, then click Send when ready.`
+        : `Loaded ${actionable.length} from ${company} on Send — spacing ${timing.intervalMinutes}m. Click Send when ready (or change the schedule).`,
+    );
+
+    setBusy(true);
     setRescheduleBusy(true);
     try {
-      const queuedIds: string[] = [];
-      for (const item of actionable) {
-        await rescheduleQueuedSend({
-          queueItemId: item.queueItemId,
-          sendNow: true,
-        });
-        queuedIds.push(item.queueItemId);
-      }
-      setRescheduleCompany(null);
-      setTrackedSendMode("now");
-      writeTrackedSendMode("now");
-      setTrackedSendQueueIds((prev) => {
-        const merged = new Set([...prev, ...queuedIds]);
-        return [...merged];
-      });
-      setTab("send");
-      setMessage(
-        queuedIds.length === 1
-          ? `Sending ${company} now — watch progress below.`
-          : `Sending ${queuedIds.length} from ${company} now — watch progress below.`,
-      );
+      // Free the queue so Schedule/Send can re-queue with the user's chosen times.
+      await cancelScheduledSends({ queueItemIds, pendingOnly: true });
+      await reactivateCandidates(candidateIds);
       await refresh();
-      await refreshAnalytics().catch(() => {
-        /* optional */
-      });
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Failed to send now.");
+      setMessage(error instanceof Error ? error.message : "Failed to open Send for this batch.");
     } finally {
+      setBusy(false);
       setRescheduleBusy(false);
     }
+  }
+
+  async function addHistoryCompanyToSend(company: CompanyHistorySummary) {
+    const recruiters = company.recruiters ?? [];
+    if (recruiters.length === 0) {
+      setMessage(`No people to load for ${company.companyName}.`);
+      return;
+    }
+    const candidateIds = recruiters.map((person) => person.id);
+
+    setBusy(true);
+    try {
+      const result = await replaceActiveFromHistory(candidateIds);
+      if (result.activated.length === 0) {
+        setMessage(`Could not load anyone from ${company.companyName} onto Send.`);
+        return;
+      }
+
+      setBatchCompanyChoice(company.companyName);
+      try {
+        window.sessionStorage.setItem(BATCH_COMPANY_CHOICE_KEY, company.companyName);
+      } catch {
+        // ignore
+      }
+
+      // Clear any in-flight progress — user schedules this batch themselves.
+      setTrackedSendQueueIds([]);
+      writeTrackedSendQueueIds([]);
+      setTrackedSendMode(null);
+      writeTrackedSendMode(null);
+      setSendSession(null);
+      writeSendSession(null);
+
+      setSelectedId(result.activated[0]!.id);
+      setPreview(undefined);
+      setPreviewSubject("");
+      setPreviewBody("");
+      setPreviewLoadedId(undefined);
+      setPreviewDirty(false);
+      await refresh();
+      setTab("send");
+      const withEmail = result.activated.filter((person) => Boolean(person.email)).length;
+      const missingEmail = result.activated.length - withEmail;
+      setMessage(
+        missingEmail === 0
+          ? result.activated.length === 1
+            ? `Loaded ${company.companyName} on Send with email — ready to schedule.`
+            : `Loaded ${result.activated.length} from ${company.companyName} on Send with emails — ready to schedule.`
+          : withEmail === 0
+            ? `Loaded ${result.activated.length} from ${company.companyName} on Send — find emails, then schedule.`
+            : `Loaded ${result.activated.length} from ${company.companyName} (${withEmail} with email, ${missingEmail} still need lookup).`,
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to load History company onto Send.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function dismissSendSession() {
+    setTrackedSendQueueIds([]);
+    writeTrackedSendQueueIds([]);
+    setTrackedSendMode(null);
+    writeTrackedSendMode(null);
+    setSendSession(null);
+    writeSendSession(null);
+    setTab("scheduled");
+    setMessage("Back on Scheduled.");
+    void refresh().catch(() => undefined);
   }
 
   async function removeScheduledCompany(company: string, items: UpcomingSendView[]) {
@@ -2279,7 +2742,7 @@ function App() {
     }
     setLeavingScheduledCompanies((current) => new Set(current).add(company));
     await new Promise<void>((resolve) => {
-      window.setTimeout(resolve, 280);
+      window.setTimeout(resolve, SCHEDULED_GROUP_LEAVE_MS);
     });
     setBusy(true);
     try {
@@ -2291,7 +2754,10 @@ function App() {
         cancelScheduledCompanyEdit();
       }
       if (rescheduleCompany === company) {
-        setRescheduleCompany(null);
+        closeReschedulePanel(false);
+      }
+      if (addPersonCompany === company) {
+        closeAddPersonPanel(false);
       }
       setExpandedScheduledCompanies((current) => {
         const next = new Set(current);
@@ -2319,6 +2785,40 @@ function App() {
   }
 
   async function runScheduleSends() {
+    const pausedIds = batchPausedQueueIds;
+    if (pausedIds.length > 0 && trackedSendMode === "now") {
+      const startAt =
+        activeSchedulePreset === "now" ? new Date() : parseDatetimeLocal(scheduleStartAt);
+      if (activeSchedulePreset === "now") {
+        setScheduleStartAt(toDatetimeLocalValue(startAt));
+      }
+      setBusy(true);
+      try {
+        const result = await resumePausedSends({
+          queueItemIds: pausedIds,
+          startAt: startAt.toISOString(),
+          intervalMinutes: scheduleIntervalMinutes,
+          resumeId: selectedResumeId || undefined,
+        });
+        if (result.resumed === 0) {
+          setMessage("Nothing paused to resume.");
+          return;
+        }
+        const sendMode = resolveTrackedSendMode(startAt, activeSchedulePreset);
+        setTrackedSendMode(sendMode);
+        writeTrackedSendMode(sendMode);
+        setMessage(
+          `Resumed ${result.resumed} paused send${result.resumed === 1 ? "" : "s"} with ${scheduleIntervalMinutes}m spacing.`,
+        );
+        await refresh();
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : "Failed to resume paused sends.");
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
     if (readyCandidates.length === 0) {
       setMessage("No ready recipients to schedule.");
       return;
@@ -2329,7 +2829,7 @@ function App() {
     }
     // Refresh "Now" to the current moment so the first slot is due immediately.
     const startAt =
-      activeSchedulePreset === "now" ? new Date() : new Date(scheduleStartAt);
+      activeSchedulePreset === "now" ? new Date() : parseDatetimeLocal(scheduleStartAt);
     if (activeSchedulePreset === "now") {
       setScheduleStartAt(toDatetimeLocalValue(startAt));
     }
@@ -2339,7 +2839,7 @@ function App() {
         candidateIds: readyCandidates.map((candidate) => candidate.id),
         startAt: startAt.toISOString(),
         intervalMinutes: scheduleIntervalMinutes,
-        mode: "schedule",
+        mode: isScheduleForNow(startAt, activeSchedulePreset) ? "send_now" : "schedule",
         resumeId: selectedResumeId || undefined,
       });
       const queued = result.queued ?? [];
@@ -2355,25 +2855,80 @@ function App() {
         setMessage(reasons ? `Nothing scheduled. ${reasons}` : "Nothing scheduled. No recipients were queued.");
         return;
       }
-      const shifted = result.shifted?.length ? ` ${result.shifted.length} time(s) shifted for pacing.` : "";
-      const rejected = result.rejected?.length ? ` ${result.rejected.length} rejected.` : "";
-      const failedNote = jobFailures.length ? ` ${jobFailures.length} could not be queued.` : "";
-      const sendMode = isScheduleForNow(startAt, activeSchedulePreset) ? "now" : "later";
+      const shifted = formatCompanyBlockShiftMessage(result.shifted, {
+        companyByCandidateId: new Map(
+          readyCandidates.map((candidate) => [
+            candidate.id,
+            candidate.company?.trim() || batchCompany || "Batch",
+          ]),
+        ),
+        formatWhen: formatShortWhen,
+      });
+      const rejectedCount = result.rejected?.length ?? 0;
+      const rejectedReasons = (result.rejected ?? [])
+        .map((entry) => entry.reason)
+        .filter(Boolean)
+        .slice(0, 3)
+        .join("; ");
+      const rejected =
+        rejectedCount > 0
+          ? ` ${rejectedCount} rejected${rejectedReasons ? ` (${rejectedReasons}${rejectedCount > 3 ? "…" : ""})` : ""}.`
+          : "";
+      const failedNote = jobFailures.length
+        ? ` ${jobFailures.length} could not be queued${
+            jobFailures[0]?.reason ? ` (${jobFailures[0].reason})` : ""
+          }.`
+        : "";
+      const sendMode = resolveTrackedSendMode(startAt, activeSchedulePreset);
       setTrackedSendMode(sendMode);
       writeTrackedSendMode(sendMode);
       setTrackedSendQueueIds(queued.map((item) => item.id));
-      // Recipients leave today's batch as soon as jobs are created (archived server-side).
-      setSelectedId(undefined);
-      setPreview(undefined);
-      setPreviewSubject("");
-      setPreviewBody("");
-      setPreviewLoadedId(undefined);
-      setPreviewDirty(false);
+      if (sendMode === "now") {
+        const byCandidate = new Map(queued.map((item) => [item.candidateId, item.id]));
+        const session = buildSendSessionFromUpcoming(
+          batchCompany ?? "Batch",
+          readyCandidates.map((candidate) => ({
+            queueItemId: byCandidate.get(candidate.id) ?? candidate.id,
+            candidateId: candidate.id,
+            fullName: candidate.fullName,
+            email: candidate.email ?? "",
+            company: candidate.company,
+            profilePhotoUrl: candidate.profilePhotoUrl,
+            subject: previewSubject || subject,
+            body: previewBody || body,
+          })),
+          { subject: previewSubject || subject, body: previewBody || body },
+        );
+        setSendSession(session);
+        writeSendSession(session);
+        // Keep the same Send layout + preview while jobs run (list is archived server-side).
+        setSelectedId(readyCandidates[0]?.id);
+      } else {
+        setSendSession(null);
+        writeSendSession(null);
+        // Recipients leave today's batch when scheduled for later.
+        setSelectedId(undefined);
+        setPreview(undefined);
+        setPreviewSubject("");
+        setPreviewBody("");
+        setPreviewLoadedId(undefined);
+        setPreviewDirty(false);
+        // Don't leave the user staring at an empty Send tab — later batches live on Scheduled.
+        setTab("scheduled");
+      }
       setMessage(
         sendMode === "now"
           ? `Queued ${jobs.length} email(s) for sending now.${shifted}${rejected}${failedNote} Track progress below.`
           : `Scheduled ${jobs.length} email(s) for later.${shifted}${rejected}${failedNote} Check the Scheduled tab to review or edit.`,
       );
+      if (jobFailures.length > 0 && jobs.length > 0) {
+        setMessage(
+          (sendMode === "now"
+            ? `Queued ${jobs.length} of ${readyCandidates.length} for sending now.`
+            : `Scheduled ${jobs.length} of ${readyCandidates.length}.`) +
+            `${shifted}${rejected}${failedNote}`,
+        );
+      }
     } catch (error) {
       const detail = error instanceof Error ? error.message : "Failed to schedule sends.";
       setMessage(detail);
@@ -2399,6 +2954,31 @@ function App() {
         result.retried > 0
           ? `Retrying ${result.retried} failed send(s).`
           : "No failed sends could be retried.",
+      );
+      await refresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to retry sends.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function retryFailedScheduledCompany(company: string, items: UpcomingSendView[]) {
+    const queueItemIds = items
+      .filter((item) => Boolean(item.failureReason) || item.jobStatus === "failed" || !item.jobId)
+      .map((item) => item.queueItemId)
+      .filter(Boolean);
+    if (queueItemIds.length === 0) {
+      setMessage(`No failed sends to retry for ${company}.`);
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await retryFailedSends({ queueItemIds });
+      setMessage(
+        result.retried > 0
+          ? `Retrying ${result.retried} failed ${company} send(s).`
+          : `No failed ${company} sends could be retried.`,
       );
       await refresh();
     } catch (error) {
@@ -3011,7 +3591,7 @@ function App() {
               }}
             />
             <button className={tab === "send" ? "tab active" : "tab"} onClick={() => setTab("send")}>
-              Send{candidates.length > 0 ? ` (${candidates.length})` : ""}
+              Send{displayCandidates.length > 0 ? ` (${displayCandidates.length})` : ""}
             </button>
             <button className={tab === "scheduled" ? "tab active" : "tab"} onClick={() => setTab("scheduled")}>
               Scheduled{scheduledLaterSends.length > 0 ? ` (${scheduledLaterSends.length})` : ""}
@@ -3173,8 +3753,13 @@ function App() {
             <p className="eyebrow">Next up</p>
             {upcomingSummary ? (
               <>
-                <strong className="next-send-name">{upcomingSummary.peopleLabel}</strong>
-                <span className="next-send-time">{formatShortWhen(upcomingSummary.nextTime)}</span>
+                <strong className="next-send-name">
+                  {upcomingSummary.nextName ?? upcomingSummary.peopleLabel}
+                </strong>
+                <span className="next-send-meta">{upcomingSummary.peopleLabel}</span>
+                <span className="next-send-time">
+                  {formatNextUpWhen(upcomingSummary.nextTime, upcomingSummary.dueNow)}
+                </span>
                 <button type="button" className="secondary subtle next-send-link" onClick={() => setTab("scheduled")}>
                   View queue
                 </button>
@@ -3187,27 +3772,48 @@ function App() {
             )}
           </aside>
 
-          <button
-            type="button"
-            className="panel send-streak-card"
-            onClick={() => setTab("analytics")}
-            aria-label={
-              analytics
-                ? `${analytics.goalProgress.sendStreak}-day streak. Open Grove.`
-                : "Open Grove to see your streak"
-            }
+          <div
+            className={`send-streak-wrap${
+              analytics && analytics.goalProgress.sendStreak > 0 && !analytics.goalProgress.activityToday
+                ? " at-risk"
+                : ""
+            }`}
           >
-            <StreakTreeBuddy />
-            <span className="send-streak-count">
-              {analytics ? analytics.goalProgress.sendStreak : "—"}
-            </span>
-            <span className="send-streak-label">day streak</span>
-            <span className="send-streak-grow-link">See grove →</span>
-          </button>
+            {analytics && analytics.goalProgress.sendStreak > 0 && !analytics.goalProgress.activityToday ? (
+              <span className="send-streak-risk-bubble" aria-hidden="true">
+                At risk!
+              </span>
+            ) : null}
+            <button
+              type="button"
+              className={`panel send-streak-card${
+                analytics && analytics.goalProgress.sendStreak > 0 && !analytics.goalProgress.activityToday
+                  ? " at-risk"
+                  : ""
+              }`}
+              onClick={() => setTab("analytics")}
+              aria-label={
+                analytics
+                  ? analytics.goalProgress.sendStreak > 0 && !analytics.goalProgress.activityToday
+                    ? `${analytics.goalProgress.sendStreak}-day streak at risk — send today. Open Grove.`
+                    : `${analytics.goalProgress.sendStreak}-day streak. Open Grove.`
+                  : "Open Grove to see your streak"
+              }
+            >
+              <div className="send-streak-tree-stage">
+                <StreakTreeBuddy />
+              </div>
+              <span className="send-streak-count">
+                {analytics ? analytics.goalProgress.sendStreak : "—"}
+              </span>
+              <span className="send-streak-label">day streak</span>
+              <span className="send-streak-grow-link">See grove →</span>
+            </button>
+          </div>
           </div>
           <section className="send-layout">
           <section className="panel batch-panel">
-            {candidates.length === 0 ? (
+            {displayCandidates.length === 0 ? (
               <div className="empty-state">
                 <h2>No recruiters in batch yet</h2>
                 <ol>
@@ -3250,14 +3856,14 @@ function App() {
                     )}
                   </div>
                   <div className="batch-progress">
-                    <strong>{discoveredCount}/{candidates.length}</strong> emails found
+                    <strong>{discoveredCount}/{displayCandidates.length}</strong> emails found
                     {notFoundCount > 0 ? ` · ${notFoundCount} not found` : ""}
                   </div>
                 </div>
 
                 <div className="step">
                   <div className="step-heading">
-                    <p className="step-label">1 · Recipients ({candidates.length})</p>
+                    <p className="step-label">1 · Recipients ({displayCandidates.length})</p>
                     <button type="button" className="subtle-danger" onClick={() => void clearSendList()}>
                       Remove all
                     </button>
@@ -3306,7 +3912,7 @@ function App() {
                         );
                       })}
                     </div>
-                    {candidates.length > RECIPIENT_PAGE_SIZE && (
+                    {displayCandidates.length > RECIPIENT_PAGE_SIZE && (
                       <div className="list-pagination">
                         <button
                           type="button"
@@ -3317,8 +3923,8 @@ function App() {
                         </button>
                         <span>
                           {safeRecipientPage * RECIPIENT_PAGE_SIZE + 1}–
-                          {Math.min((safeRecipientPage + 1) * RECIPIENT_PAGE_SIZE, candidates.length)} of{" "}
-                          {candidates.length}
+                          {Math.min((safeRecipientPage + 1) * RECIPIENT_PAGE_SIZE, displayCandidates.length)} of{" "}
+                          {displayCandidates.length}
                         </span>
                         <button
                           type="button"
@@ -3334,9 +3940,13 @@ function App() {
                       <div className="discovery-progress-meta">
                         <span className={`worker-dot ${workerStatus?.online ? "online" : "offline"}`} />
                         <strong>
-                          {workerStatus?.online
-                            ? workerStatus.status?.message ?? "Looking up emails"
-                            : "Starting email lookup…"}
+                          {discoveryStatusLabel({
+                            online: workerStatus?.online,
+                            phase: workerStatus?.status?.phase,
+                            message: workerStatus?.status?.message,
+                            pendingCount,
+                            nextName: nextDiscovery?.fullName,
+                          })}
                         </strong>
                       </div>
                       <div
@@ -3370,11 +3980,11 @@ function App() {
                         </span>
                       </label>
                     </div>
-                    {discoveredCount < candidates.length && (
+                    {discoveredCount < displayCandidates.length && (
                       <button disabled={salesqlSweepBusy} onClick={() => void runSalesqlSweep()}>
                         {salesqlSweepBusy
                           ? "Queueing SalesQL…"
-                          : `Check all ${candidates.length - discoveredCount} remaining via SalesQL`}
+                          : `Check all ${displayCandidates.length - discoveredCount} remaining via SalesQL`}
                       </button>
                     )}
                   </div>
@@ -3591,21 +4201,54 @@ function App() {
                     )}
                   </div>
                   <div className="actions">
-                    <button className="primary-cta" disabled={busy || readyCandidates.length === 0} onClick={() => void runScheduleSends()}>
-                      Schedule {readyCandidates.length} send{readyCandidates.length === 1 ? "" : "s"}
+                    <button
+                      className="primary-cta"
+                      disabled={
+                        busy ||
+                        (batchPausedQueueIds.length === 0 && readyCandidates.length === 0)
+                      }
+                      onClick={() => void runScheduleSends()}
+                    >
+                      {batchPausedQueueIds.length > 0
+                        ? isScheduleForNow(
+                            activeSchedulePreset === "now"
+                              ? new Date()
+                              : parseDatetimeLocal(scheduleStartAt),
+                            activeSchedulePreset,
+                          )
+                          ? `Send ${batchPausedQueueIds.length} remaining now`
+                          : `Schedule ${batchPausedQueueIds.length} remaining`
+                        : isScheduleForNow(
+                            activeSchedulePreset === "now"
+                              ? new Date()
+                              : parseDatetimeLocal(scheduleStartAt),
+                            activeSchedulePreset,
+                          )
+                          ? `Send ${readyCandidates.length} now`
+                          : `Schedule ${readyCandidates.length} send${readyCandidates.length === 1 ? "" : "s"}`}
                     </button>
                     {showSessionStop && (
-                      <button className="secondary subtle-danger" disabled={busy} onClick={() => void runStopScheduledSends()}>
-                        Stop remaining in this session
+                      <button className="secondary subtle-danger" disabled={busy} onClick={() => void runPausePendingSends()}>
+                        Pause remaining
                       </button>
                     )}
                   </div>
                   {showSendProgress && sendProgress && (
-                    <div className={`send-progress-panel ${sendProgress.active ? "" : "done"}`}>
+                    <div
+                      className={`send-progress-panel ${
+                        sendProgress.active ? "" : sendProgress.paused ? "paused" : "done"
+                      }`}
+                    >
                       <div className="discovery-progress-meta">
                         <span
                           className={`worker-dot ${
-                            !workerStatus?.online ? "offline" : sendProgress.active ? "working" : "online"
+                            !workerStatus?.online
+                              ? "offline"
+                              : sendProgress.active
+                                ? "working"
+                                : sendProgress.paused
+                                  ? "online"
+                                  : "online"
                           }`}
                         />
                         <strong>
@@ -3613,9 +4256,11 @@ function App() {
                             ? isSendingPhase
                               ? `Sending to ${sendProgress.current.name}`
                               : `Next up: ${sendProgress.current.name}`
-                            : sendProgress.failedCount > 0
-                              ? `Batch finished · ${sendProgress.failedCount} failed`
-                              : "Batch finished"}
+                            : sendProgress.paused
+                              ? `Paused · ${sendProgress.pausedCount} remaining`
+                              : sendProgress.failedCount > 0
+                                ? `Batch finished · ${sendProgress.failedCount} failed`
+                                : "Batch finished"}
                         </strong>
                         <span className="generate-progress-percent">
                           {sendProgress.doneCount}/{sendProgress.total}
@@ -3640,6 +4285,11 @@ function App() {
                             {" · "}
                             all done by ~{formatShortWhen(sendProgress.overallEnd.scheduledFor)}
                             {sendProgress.failedCount > 0 ? ` · ${sendProgress.failedCount} failed` : ""}
+                          </>
+                        ) : sendProgress.paused ? (
+                          <>
+                            {sendProgress.sentCount} sent · {sendProgress.pausedCount} paused — still on this list.
+                            Adjust timing above, then Send/Schedule remaining.
                           </>
                         ) : (
                           <>
@@ -3674,13 +4324,23 @@ function App() {
                                 ? "done"
                                 : row.status === "failed"
                                   ? "failed"
-                                  : row.status === "sending"
-                                    ? "active"
-                                    : "pending"
+                                  : row.status === "paused"
+                                    ? "paused"
+                                    : row.status === "sending"
+                                      ? "active"
+                                      : "pending"
                             }`}
                           >
                             <span className="send-check" aria-hidden="true">
-                              {row.status === "sent" ? "✓" : row.status === "failed" ? "!" : row.status === "sending" ? "●" : "○"}
+                              {row.status === "sent"
+                                ? "✓"
+                                : row.status === "failed"
+                                  ? "!"
+                                  : row.status === "paused"
+                                    ? "❚❚"
+                                    : row.status === "sending"
+                                      ? "●"
+                                      : "○"}
                             </span>
                             <span className="send-checklist-name">{row.name}</span>
                             <span className="send-checklist-when">
@@ -3688,9 +4348,11 @@ function App() {
                                 ? "Sent"
                                 : row.status === "failed"
                                   ? "Failed"
-                                  : row.status === "sending"
-                                    ? "Sending…"
-                                    : formatShortWhen(row.scheduledFor)}
+                                  : row.status === "paused"
+                                    ? "Paused"
+                                    : row.status === "sending"
+                                      ? "Sending…"
+                                      : formatShortWhen(row.scheduledFor)}
                             </span>
                           </li>
                         ))}
@@ -3870,7 +4532,7 @@ function App() {
                                 )}
                                 <p className={selectedResumeId ? "ok" : "warning"}>
                                   {selectedResumeId
-                                    ? `“${resumes.find((resume) => resume.id === selectedResumeId)?.nickname ?? "Resume"}” will be attached.`
+                                    ? `“${resumes.find((resume) => resume.id === selectedResumeId)?.fileName ?? "resume.pdf"}” will be attached.`
                                     : "No resume attachment found — upload one in Setup."}
                                 </p>
                               </div>
@@ -3936,9 +4598,11 @@ function App() {
               {upcomingSummary && (
                 <div className="scheduled-next-card">
                   <p className="eyebrow">Next up</p>
-                  <strong>{upcomingSummary.peopleLabel}</strong>
+                  <strong>{upcomingSummary.nextName ?? upcomingSummary.peopleLabel}</strong>
                   <span>{upcomingSummary.companiesLabel}</span>
-                  <span className="scheduled-next-time">{formatShortWhen(upcomingSummary.nextTime)}</span>
+                  <span className="scheduled-next-time">
+                    {formatNextUpWhen(upcomingSummary.nextTime, upcomingSummary.dueNow)}
+                  </span>
                 </div>
               )}
             </div>
@@ -3986,6 +4650,9 @@ function App() {
                                 ? `${overdueCount} past due`
                                 : `first ${formatShortWhen(items[0]!.scheduledFor)}`}
                               {attachedResume ? ` · ${attachedResume}` : ""}
+                              {items.some((item) => item.failureReason)
+                                ? ` · ${items.filter((item) => item.failureReason).length} need retry`
+                                : ""}
                             </span>
                           </div>
                         </button>
@@ -3999,6 +4666,17 @@ function App() {
                               aria-label={`${company} is past due — change send time`}
                             >
                               Past due
+                            </button>
+                          )}
+                          {items.some((item) => item.failureReason) && (
+                            <button
+                              type="button"
+                              className="scheduled-group-action"
+                              disabled={busy || scheduledEditBusy}
+                              onClick={() => void retryFailedScheduledCompany(company, items)}
+                              title="Recreate pending jobs for sends that failed in Gmail/Streak"
+                            >
+                              Retry failed
                             </button>
                           )}
                           <button
@@ -4141,30 +4819,120 @@ function App() {
                             </div>
                           </div>
                           <div className="scheduled-batch-actions">
+                            {items.some((item) => item.failureReason) && (
+                              <p className="warning" style={{ margin: "0 0 8px" }}>
+                                Last send attempt failed (Gmail compose). Items are still scheduled — fix Gmail, then use
+                                Send now or Change time to retry.
+                                {items.find((item) => item.failureReason)?.failureReason
+                                  ? ` (${String(items.find((item) => item.failureReason)?.failureReason).split("\n")[0]})`
+                                  : ""}
+                              </p>
+                            )}
                             <div className="scheduled-batch-actions-row">
                               <button
                                 type="button"
                                 className="secondary"
-                                disabled={busy || scheduledEditBusy || rescheduleBusy || removableCount === 0}
+                                disabled={busy || scheduledEditBusy || rescheduleBusy || addPersonBusy || removableCount === 0}
                                 onClick={() => openCompanyReschedulePanel(company, items)}
                               >
                                 {rescheduleCompany === company ? "Close" : "Change time"}
                               </button>
                               <button
                                 type="button"
+                                className="secondary"
+                                disabled={busy || scheduledEditBusy || rescheduleBusy || addPersonBusy}
+                                onClick={() => openAddPersonPanel(company)}
+                              >
+                                {addPersonCompany === company ? "Close" : "Add person"}
+                              </button>
+                              <button
+                                type="button"
                                 className="primary"
-                                disabled={busy || scheduledEditBusy || rescheduleBusy || removableCount === 0}
+                                disabled={busy || scheduledEditBusy || rescheduleBusy || addPersonBusy || removableCount === 0}
                                 onClick={() => void sendCompanyScheduledNow(company, items)}
                               >
                                 Send now
                               </button>
                             </div>
+                            {addPersonCompany === company && (
+                              <div
+                                className={`scheduled-reschedule-panel scheduled-add-person-panel${
+                                  closingScheduledPanel === "add" ? " is-closing" : ""
+                                }`}
+                              >
+                                <label className="scheduled-reschedule-field">
+                                  <span>Email</span>
+                                  <input
+                                    className="scheduled-reschedule-input"
+                                    type="email"
+                                    autoComplete="off"
+                                    placeholder="name@company.com"
+                                    value={addPersonEmail}
+                                    onChange={(event) => setAddPersonEmail(event.target.value)}
+                                    disabled={addPersonBusy}
+                                  />
+                                </label>
+                                <label className="scheduled-reschedule-field">
+                                  <span>LinkedIn URL <em>(optional)</em></span>
+                                  <input
+                                    className="scheduled-reschedule-input"
+                                    type="url"
+                                    autoComplete="off"
+                                    placeholder="https://www.linkedin.com/in/…"
+                                    value={addPersonLinkedIn}
+                                    onChange={(event) => setAddPersonLinkedIn(event.target.value)}
+                                    disabled={addPersonBusy}
+                                  />
+                                </label>
+                                <label className="scheduled-reschedule-field">
+                                  <span>Name <em>(optional)</em></span>
+                                  <input
+                                    className="scheduled-reschedule-input"
+                                    type="text"
+                                    autoComplete="off"
+                                    placeholder="Defaults from email or LinkedIn"
+                                    value={addPersonName}
+                                    onChange={(event) => setAddPersonName(event.target.value)}
+                                    disabled={addPersonBusy}
+                                  />
+                                </label>
+                                <p className="hint scheduled-reschedule-hint">
+                                  Appends after the last {company} slot using your schedule spacing
+                                  {addPersonLinkedIn.trim() ? ". With a LinkedIn URL, we’ll pull their photo when the worker is online." : "."}
+                                </p>
+                                <div className="scheduled-reschedule-actions">
+                                  <button
+                                    type="button"
+                                    className="primary"
+                                    disabled={addPersonBusy || !addPersonEmail.trim().includes("@")}
+                                    onClick={() => void saveAddPerson(company)}
+                                  >
+                                    {addPersonBusy ? "Adding…" : "Add to schedule"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="secondary"
+                                    disabled={addPersonBusy}
+                                    onClick={() => closeAddPersonPanel(true)}
+                                  >
+                                    Cancel
+                                  </button>
+                                </div>
+                              </div>
+                            )}
                             {rescheduleCompany === company && (
-                              <div className="scheduled-reschedule-panel">
+                              <div
+                                className={`scheduled-reschedule-panel${
+                                  closingScheduledPanel === "reschedule" ? " is-closing" : ""
+                                }`}
+                              >
                                 <div className="scheduled-reschedule-presets" role="group" aria-label="Quick times">
-                                  {SCHEDULE_PRESETS.filter((preset) => preset.id !== "now").map((preset) => {
+                                  {SCHEDULE_PRESETS.map((preset) => {
                                     const value = toDatetimeLocalValue(preset.resolve());
-                                    const active = rescheduleAt === value;
+                                    const active =
+                                      preset.id === "now"
+                                        ? false
+                                        : rescheduleAt === value;
                                     return (
                                       <button
                                         key={preset.id}
@@ -4204,7 +4972,7 @@ function App() {
                                     type="button"
                                     className="secondary"
                                     disabled={rescheduleBusy}
-                                    onClick={() => setRescheduleCompany(null)}
+                                    onClick={() => closeReschedulePanel(true)}
                                   >
                                     Cancel
                                   </button>
@@ -4224,7 +4992,9 @@ function App() {
                               const pastDue = isScheduledItemOverdue(item);
                               return (
                                 <li
-                                  className={`scheduled-item${pastDue ? " past-due" : ""}`}
+                                  className={`scheduled-item${pastDue ? " past-due" : ""}${
+                                    leavingScheduledPeople.has(item.queueItemId) ? " is-leaving" : ""
+                                  }`}
                                   key={item.queueItemId}
                                   style={{ ["--item-i" as string]: String(index) }}
                                 >
@@ -4457,7 +5227,7 @@ function App() {
 
           <section className="panel setup-span-full">
             <h2>Resumes</h2>
-            <p className="hint">Upload PDFs with optional nicknames. Choose which one to attach on Send.</p>
+            <p className="hint">Upload PDFs with optional nicknames (UI only). The email attaches the original uploaded filename.</p>
             <div className="resume-upload-row">
               <label>
                 Nickname
@@ -4830,41 +5600,56 @@ function App() {
                       className={`history-company-card ${expanded ? "expanded" : ""}`}
                       key={company.companyName}
                     >
-                      <button
-                        type="button"
-                        className="history-company-card-main"
-                        aria-expanded={expanded}
-                        onClick={(event) => {
-                          const name = company.companyName;
-                          const opening = !expandedCompanies.has(name) && !historyQuery.trim();
-                          setExpandedCompanies((prev) => {
-                            const next = new Set(prev);
-                            if (next.has(name)) {
-                              next.delete(name);
-                            } else {
-                              next.add(name);
-                            }
-                            return next;
-                          });
-                          if (!opening) return;
-                          const card = event.currentTarget.closest(".history-company-card");
-                          if (!(card instanceof HTMLElement)) return;
-                          // Let the expand layout settle, then bring the full people list into view.
-                          window.requestAnimationFrame(() => {
-                            window.setTimeout(() => {
-                              card.scrollIntoView({ behavior: "smooth", block: "start" });
-                            }, 80);
-                          });
-                        }}
-                      >
-                        <div className="history-company-card-top">
-                          <h3>{company.companyName}</h3>
-                          <span className="history-people-count">{peopleLabel}</span>
-                        </div>
-                        <span className={`history-card-chevron ${expanded ? "open" : ""}`} aria-hidden="true">
-                          ▾
-                        </span>
-                      </button>
+                      <div className="history-company-card-header">
+                        <button
+                          type="button"
+                          className="history-company-card-main"
+                          aria-expanded={expanded}
+                          onClick={(event) => {
+                            const name = company.companyName;
+                            const opening = !expandedCompanies.has(name) && !historyQuery.trim();
+                            setExpandedCompanies((prev) => {
+                              const next = new Set(prev);
+                              if (next.has(name)) {
+                                next.delete(name);
+                              } else {
+                                next.add(name);
+                              }
+                              return next;
+                            });
+                            if (!opening) return;
+                            const card = event.currentTarget.closest(".history-company-card");
+                            if (!(card instanceof HTMLElement)) return;
+                            // Let the expand layout settle, then bring the full people list into view.
+                            window.requestAnimationFrame(() => {
+                              window.setTimeout(() => {
+                                card.scrollIntoView({ behavior: "smooth", block: "start" });
+                              }, 80);
+                            });
+                          }}
+                        >
+                          <div className="history-company-card-top">
+                            <h3>{company.companyName}</h3>
+                            <span className="history-people-count">{peopleLabel}</span>
+                          </div>
+                          <span className={`history-card-chevron ${expanded ? "open" : ""}`} aria-hidden="true">
+                            ▾
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          className={expanded ? "history-add-to-send" : "history-add-to-send-icon"}
+                          aria-label={`Add ${company.companyName} to Send`}
+                          title="Add to Send"
+                          disabled={busy || company.recruiters.length === 0}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void addHistoryCompanyToSend(company);
+                          }}
+                        >
+                          {expanded ? "Add to Send" : "+"}
+                        </button>
+                      </div>
                       <div
                         className="history-people-shell"
                         aria-hidden={!expanded}
@@ -5105,8 +5890,8 @@ function App() {
                   <div className="village-stat-chips">
                     <div className="village-chip"><strong>{analytics.goalProgress.sentToday}</strong><span>Companies today</span></div>
                     <div className="village-chip"><strong>{analytics.week.sent}</strong><span>Sends this week</span></div>
-                    <div className="village-chip"><strong>{analytics.week.companiesReached}</strong><span>Companies reached</span></div>
-                    <div className="village-chip"><strong>{analytics.allTime.recruitersContacted}</strong><span>People</span></div>
+                    <div className="village-chip"><strong>{analytics.week.companiesReached}</strong><span>Companies this week</span></div>
+                    <div className="village-chip"><strong>{analytics.allTime.companiesTouched}</strong><span>Companies all-time</span></div>
                   </div>
                   <label className="goal-edit village-goal-edit">
                     Daily company goal
@@ -5153,9 +5938,12 @@ function App() {
                       <div>
                         <p className="eyebrow">Climb</p>
                         <h2>Cumulative companies</h2>
+                        <p className="hint">Distinct companies you&apos;ve emailed over time (same as companies reached).</p>
                       </div>
                     </div>
-                    <CumulativeSendsChart points={analytics.cumulativeSends} />
+                    <div className="analytics-chart-plot">
+                      <CumulativeSendsChart points={analytics.cumulativeSends} />
+                    </div>
                   </section>
 
                   <section className="panel analytics-card trend-card">
@@ -5163,6 +5951,7 @@ function App() {
                       <div>
                         <p className="eyebrow">Pace</p>
                         <h2>Last 14 days</h2>
+                        <p className="hint">Scheduled companies, emails found, and companies reached per day.</p>
                       </div>
                     </div>
                     <div className="trend-legend">
@@ -5170,7 +5959,7 @@ function App() {
                       <span><i className="legend-found" /> Emails found</span>
                       <span><i className="legend-company" /> Companies reached</span>
                     </div>
-                    <div className="trend-bars trend-bars-triple" aria-label="Companies scheduled, emails found, and companies reached per day">
+                    <div className="trend-bars trend-bars-triple analytics-chart-plot" aria-label="Companies scheduled, emails found, and companies reached per day">
                       {analytics.daily.slice(-14).map((day) => {
                         const max = Math.max(
                           1,
@@ -5227,11 +6016,15 @@ function App() {
                       <p className="eyebrow">Garden</p>
                       <h2>Contribution garden</h2>
                       <p className="hint">
-                        Six months, one plot per day — greener with every email sent, a blossom when the daily goal was met.
+                        Past ~6 months through today — greener with every email sent; blossom when the daily goal was met.
                       </p>
                     </div>
                   </div>
-                  <ContributionGarden daily={analytics.daily} goal={analytics.goalProgress.goal} />
+                  <ContributionGarden
+                    daily={analytics.daily}
+                    goal={analytics.goalProgress.goal}
+                    today={analytics.today.date}
+                  />
                 </section>
 
                 <section className="panel analytics-card companies-card">
@@ -5243,48 +6036,14 @@ function App() {
                     </div>
                   </div>
                   {analytics.companies.filter((row) => row.sent > 0).length > 0 ? (
-                    <>
-                      <CompanyBubbles
-                        companies={analytics.companies}
-                        onOpen={(companyName) => {
-                          setTab("history");
-                          setHistoryQuery("");
-                          setExpandedCompanies(new Set([companyName]));
-                        }}
-                      />
-                      <div className="table-wrap analytics-company-table">
-                        <table>
-                          <thead>
-                            <tr>
-                              <th>Company</th>
-                              <th>Sent</th>
-                              <th>People</th>
-                              <th>With email</th>
-                              <th>Ready</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {analytics.companies.map((row) => (
-                              <tr
-                                key={row.companyName}
-                                className="clickable-row"
-                                onClick={() => {
-                                  setTab("history");
-                                  setHistoryQuery("");
-                                  setExpandedCompanies(new Set([row.companyName]));
-                                }}
-                              >
-                                <td><strong>{row.companyName}</strong></td>
-                                <td>{row.sent}</td>
-                                <td>{row.peopleContacted}</td>
-                                <td>{row.withEmail}</td>
-                                <td>{row.readyUnsent}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </>
+                    <CompanyBubbles
+                      companies={analytics.companies}
+                      onOpen={(companyName) => {
+                        setTab("history");
+                        setHistoryQuery("");
+                        setExpandedCompanies(new Set([companyName]));
+                      }}
+                    />
                   ) : (
                     <div className="empty-state compact">
                       <h2>No company outreach yet</h2>
@@ -5315,6 +6074,7 @@ function App() {
                 <div className="stat-row fun-stats fun-stats-bright">
                   <div className="stat accent"><strong>{formatCompact(analytics.usage.jobrightLookups)}</strong><span>Jobright lookups</span></div>
                   <div className="stat"><strong>{analytics.usage.jobrightEmailsFound}</strong><span>Emails via Jobright</span></div>
+                  <div className="stat"><strong>{analytics.usage.salesqlEmailsFound}</strong><span>Emails via SalesQL</span></div>
                   <div className="stat"><strong>{formatCompact(analytics.usage.geminiCalls)}</strong><span>Gemini calls{analytics.usage.geminiCallsEstimated ? "*" : ""}</span></div>
                   <div className="stat"><strong>{formatCompact(analytics.usage.charactersGenerated)}</strong><span>Chars generated</span></div>
                   <div className="stat"><strong>{analytics.usage.linkedInCaptureSaves}</strong><span>LinkedIn captures</span></div>
@@ -5335,7 +6095,9 @@ function App() {
                         <p className="hint">Hour of day you clicked Schedule — and your weekday of choice.</p>
                       </div>
                     </div>
-                    <HourlySendsChart hourly={analytics.hourly} />
+                    <div className="analytics-chart-plot">
+                      <HourlySendsChart hourly={analytics.hourly} />
+                    </div>
                     <WeekdayRhythm daily={analytics.daily} />
                   </section>
 
@@ -5344,6 +6106,7 @@ function App() {
                       <div>
                         <p className="eyebrow">Mix</p>
                         <h2>Send queue</h2>
+                        <p className="hint">What&apos;s sitting in your send queue right now.</p>
                       </div>
                     </div>
                     <div className="donut-row">

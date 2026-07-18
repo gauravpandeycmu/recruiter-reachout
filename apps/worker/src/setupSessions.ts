@@ -1,7 +1,7 @@
 import type { BrowserContext, Page } from "playwright";
 import type { SetupLoginKind, SetupSessionStatus } from "@recruiter/shared";
+import { closePersistentBrowserContext, isChromiumProfileLocked, launchPersistentBrowserContext } from "./browserContext.js";
 import { resolveWorkerDataDir } from "./paths.js";
-import { launchPersistentBrowserContext } from "./browserContext.js";
 
 export const GMAIL_USER_DATA_DIR = resolveWorkerDataDir(process.env.GMAIL_USER_DATA_DIR, "apps/worker/data/gmail-profile");
 export const JOBRIGHT_USER_DATA_DIR = resolveWorkerDataDir(process.env.JOBRIGHT_USER_DATA_DIR, "apps/worker/data/jobright-profile");
@@ -41,13 +41,19 @@ async function cookiesIndicateLogin(
   return predicates.some((predicate) => cookies.some((cookie) => predicate(cookie)));
 }
 
+function isGoogleAuthCookie(cookie: { name: string; domain: string; value: string }): boolean {
+  if (!cookie.domain.includes("google.com") || cookie.value.length < 8) {
+    return false;
+  }
+  // Modern Google auth often uses __Secure-* / SAPISID variants; SID/SSID alone can be absent.
+  return /^(SID|SSID|HSID|APISID|SAPISID|__Secure-[13]PSID|__Secure-[13]PSIDTS|__Host-GAPS)$/i.test(
+    cookie.name,
+  );
+}
+
 /** Fast cookie-only probe — no network navigation. */
 export async function probeGmailSessionFast(context: BrowserContext): Promise<{ ready: boolean; message: string }> {
-  const ready = await cookiesIndicateLogin(context, [
-    (cookie) => cookie.domain.includes("google.com") && cookie.name === "SID",
-    (cookie) => cookie.domain.includes("google.com") && cookie.name === "SSID",
-    (cookie) => cookie.domain.includes("google.com") && cookie.name === "LSID",
-  ]);
+  const ready = await cookiesIndicateLogin(context, [isGoogleAuthCookie]);
   return ready
     ? { ready: true, message: "Gmail session ready." }
     : { ready: false, message: "Not logged in — open login browser and sign in to Gmail." };
@@ -75,17 +81,26 @@ export async function probeLinkedInSessionFast(context: BrowserContext): Promise
 /** Legacy navigation probes (kept for smoke scripts). */
 export async function probeGmailSession(page: Page): Promise<{ ready: boolean; message: string }> {
   await page.goto(GMAIL_URL, { waitUntil: "domcontentloaded", timeout: 45000 });
-  await page.waitForTimeout(2000);
+  await page.waitForTimeout(2500);
   const url = page.url();
-  if (url.includes("accounts.google.com") || url.includes("ServiceLogin")) {
-    return { ready: false, message: "Not logged in — sign in to Gmail in the automation browser." };
+  if (
+    url.includes("accounts.google.com") ||
+    url.includes("ServiceLogin") ||
+    (await page.getByText(/choose an account/i).first().isVisible({ timeout: 800 }).catch(() => false)) ||
+    (await page.getByText(/^signed out$/i).first().isVisible({ timeout: 400 }).catch(() => false))
+  ) {
+    return {
+      ready: false,
+      message: "Not logged in — Open login and sign in to Gmail (account shows Signed out).",
+    };
   }
   const compose = page.locator('[gh="cm"], div[role="button"][aria-label*="Compose"], [data-tooltip="Compose"]');
   if (await compose.first().isVisible({ timeout: 8000 }).catch(() => false)) {
     return { ready: true, message: "Gmail session ready." };
   }
+  // Inbox without an obvious Compose control still counts as signed in for Setup.
   if (url.includes("mail.google.com")) {
-    return { ready: true, message: "Gmail loaded (compose not confirmed)." };
+    return { ready: true, message: "Gmail session ready." };
   }
   return { ready: false, message: "Gmail login wall detected." };
 }
@@ -160,18 +175,52 @@ async function probeProfileFast(
     }
     return { ready: false, message };
   } finally {
-    await context?.close().catch(() => {});
+    await closePersistentBrowserContext(context, userDataDir);
   }
 }
 
-/** Cookie-based session status used by the Setup refresh button. */
-export async function probeAllSessionsFast(options?: {
-  gmailExtensionPaths?: string[];
-}): Promise<SetupSessionStatus> {
+/** Cookie / lock-based session status used by the Setup refresh button (never opens Open login). */
+export async function probeAllSessionsFast(): Promise<SetupSessionStatus> {
   const [gmail, jobright, linkedin] = await Promise.all([
-    probeProfileFast(GMAIL_USER_DATA_DIR, probeGmailSessionFast, options?.gmailExtensionPaths),
+    probeGmailProfileReady(),
     probeProfileFast(JOBRIGHT_USER_DATA_DIR, probeJobrightSessionFast),
     probeProfileFast(LINKEDIN_USER_DATA_DIR, probeLinkedInSessionFast),
   ]);
   return { gmail, jobright, linkedin, checkedAt: new Date().toISOString() };
+}
+
+/**
+ * Setup status must stay silent: no headed Chromium flash (that looked like auto Open login).
+ * If the worker already holds the profile, treat Gmail as ready. Otherwise read cookies headlessly.
+ */
+async function probeGmailProfileReady(): Promise<{ ready: boolean; message: string }> {
+  // Never launch against a live worker-owned Chromium — that closes/races the send browser.
+  if (isChromiumProfileLocked(GMAIL_USER_DATA_DIR)) {
+    return {
+      ready: true,
+      message: "Gmail session is held by the worker — signed in. Use Open login only if sends fail.",
+    };
+  }
+
+  let context: BrowserContext | undefined;
+  try {
+    // Cookie/session probe only — do NOT load Streak here. Extensions force headed Chromium
+    // and flash a window on every Setup refresh.
+    context = await launchPersistentBrowserContext({
+      userDataDir: GMAIL_USER_DATA_DIR,
+      headless: true,
+    });
+    return await probeGmailSessionFast(context);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/SingletonLock|ProcessSingleton|user data directory is already in use/i.test(message)) {
+      return {
+        ready: true,
+        message: "Gmail session is held by the worker — signed in. Use Open login only if sends fail.",
+      };
+    }
+    return { ready: false, message };
+  } finally {
+    await closePersistentBrowserContext(context, GMAIL_USER_DATA_DIR);
+  }
 }

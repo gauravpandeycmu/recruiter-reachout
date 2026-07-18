@@ -5,7 +5,11 @@
  * Important: stop the worker first if it already holds this profile lock.
  */
 import "../src/loadEnv.js";
-import { launchPersistentBrowserContext } from "../src/browserContext.js";
+import {
+  closePersistentBrowserContext,
+  launchPersistentBrowserContext,
+  prepareChromiumUserDataDir,
+} from "../src/browserContext.js";
 import { loginUrlFor, profileDirFor } from "../src/setupSessions.js";
 import { tryPrepareStreakExtension, waitForStreakServiceWorker } from "../src/streakExtension.js";
 
@@ -22,6 +26,8 @@ async function main(): Promise<void> {
   if (kind === "gmail" && !streakPath) {
     console.log("Note: Streak extension not found — Gmail login will still work; install Streak before sending.");
   }
+
+  prepareChromiumUserDataDir(profileDir);
 
   let context;
   try {
@@ -49,8 +55,30 @@ async function main(): Promise<void> {
   const page = context.pages()[0] ?? (await context.newPage());
   await page.goto(loginUrlFor(kind), { waitUntil: "domcontentloaded", timeout: 60000 });
 
+  let finished = false;
+  const finish = async () => {
+    if (finished) return;
+    finished = true;
+    await closePersistentBrowserContext(context, profileDir);
+    process.exit(0);
+  };
+
   // Keep process alive until the user closes the browser window.
-  context.on("close", () => process.exit(0));
+  context.on("close", () => {
+    void closePersistentBrowserContext(undefined, profileDir).finally(() => {
+      if (!finished) {
+        finished = true;
+        process.exit(0);
+      }
+    });
+  });
+  process.on("SIGINT", () => {
+    void finish();
+  });
+  process.on("SIGTERM", () => {
+    void finish();
+  });
+
   console.log("\nSign in if prompted. Close the browser window when done.");
   await new Promise(() => {});
 }

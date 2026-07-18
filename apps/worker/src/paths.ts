@@ -1,20 +1,12 @@
-import { existsSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
+import { findAuditRepoRoot } from "@recruiter/shared/auditLog";
 
-/** Monorepo root (directory containing the root .env). */
+/** Monorepo root. Delegates to the single canonical resolver in
+ *  packages/shared — see findAuditRepoRoot for why. Previously walked up
+ *  looking for a root .env file, which is gitignored/optional and produced a
+ *  wrong (too-shallow) resolution whenever it was missing. */
 export function findRepoRoot(startDir = process.cwd()): string {
-  let current = resolve(startDir);
-  for (let depth = 0; depth < 6; depth += 1) {
-    if (existsSync(resolve(current, ".env"))) {
-      return current;
-    }
-    const parent = dirname(current);
-    if (parent === current) {
-      break;
-    }
-    current = parent;
-  }
-  return resolve(startDir);
+  return findAuditRepoRoot(startDir);
 }
 
 /** Resolve worker data-dir env vars relative to the monorepo root, never process.cwd(). */

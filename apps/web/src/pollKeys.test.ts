@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AppData, UpcomingSendView, WorkerStatusView } from "./api";
-import { appDataPollKey, workerStatusPollKey } from "./pollKeys";
+import { appDataPollKey, shouldApplyPollResult, workerStatusPollKey } from "./pollKeys";
 import type { RecruiterCandidate, SendQueueItem, TrackingEvent } from "@recruiter/shared";
 
 function candidate(overrides: Partial<RecruiterCandidate> & Pick<RecruiterCandidate, "id">): RecruiterCandidate {
@@ -114,6 +114,69 @@ describe("appDataPollKey", () => {
     expect(appDataPollKey(a)).not.toBe(appDataPollKey(b));
   });
 
+  it("changes when queue failureReason changes without a status change", () => {
+    const a = baseData({
+      sendQueue: [
+        queueItem({
+          id: "q1",
+          candidateId: "c1",
+          status: "scheduled",
+          scheduledFor: "2026-07-12T10:00:00.000Z",
+        }),
+      ],
+    });
+    const b = baseData({
+      sendQueue: [
+        queueItem({
+          id: "q1",
+          candidateId: "c1",
+          status: "scheduled",
+          scheduledFor: "2026-07-12T10:00:00.000Z",
+          failureReason: "Streak tracking toggle not found",
+        }),
+      ],
+    });
+    expect(appDataPollKey(a)).not.toBe(appDataPollKey(b));
+  });
+
+  it("changes when queue jobId or attempts change", () => {
+    const a = baseData({
+      sendQueue: [
+        queueItem({
+          id: "q1",
+          candidateId: "c1",
+          scheduledFor: "2026-07-12T10:00:00.000Z",
+          jobId: "job-1",
+          attempts: 0,
+        }),
+      ],
+    });
+    const b = baseData({
+      sendQueue: [
+        queueItem({
+          id: "q1",
+          candidateId: "c1",
+          scheduledFor: "2026-07-12T10:00:00.000Z",
+          jobId: "job-2",
+          attempts: 0,
+        }),
+      ],
+    });
+    const c = baseData({
+      sendQueue: [
+        queueItem({
+          id: "q1",
+          candidateId: "c1",
+          scheduledFor: "2026-07-12T10:00:00.000Z",
+          jobId: "job-1",
+          attempts: 1,
+        }),
+      ],
+    });
+    expect(appDataPollKey(a)).not.toBe(appDataPollKey(b));
+    expect(appDataPollKey(a)).not.toBe(appDataPollKey(c));
+  });
+
   it("includes upcoming send fingerprint", () => {
     const upcoming: UpcomingSendView = {
       queueItemId: "q1",
@@ -128,6 +191,55 @@ describe("appDataPollKey", () => {
     const a = baseData({ upcomingSends: [upcoming] });
     const b = baseData({
       upcomingSends: [{ ...upcoming, scheduledFor: "2026-07-13T10:00:00.000Z" }],
+    });
+    expect(appDataPollKey(a)).not.toBe(appDataPollKey(b));
+  });
+
+  it("changes when upcoming jobMode, jobStatus, or failureReason flips", () => {
+    const base: UpcomingSendView = {
+      queueItemId: "q1",
+      candidateId: "c1",
+      fullName: "Ada",
+      email: "a@x.com",
+      scheduledFor: "2026-07-12T10:00:00.000Z",
+      queueStatus: "scheduled",
+      subject: "Hi",
+      body: "Hello",
+      jobMode: "send_now",
+      jobStatus: "pending",
+    };
+    const a = baseData({ upcomingSends: [base] });
+    const modeFlip = baseData({ upcomingSends: [{ ...base, jobMode: "schedule" }] });
+    const statusFlip = baseData({ upcomingSends: [{ ...base, jobStatus: "failed" }] });
+    const failFlip = baseData({
+      upcomingSends: [{ ...base, failureReason: "Streak tracking toggle not found" }],
+    });
+    expect(appDataPollKey(a)).not.toBe(appDataPollKey(modeFlip));
+    expect(appDataPollKey(a)).not.toBe(appDataPollKey(statusFlip));
+    expect(appDataPollKey(a)).not.toBe(appDataPollKey(failFlip));
+  });
+
+  it("fingerprints body-adjacent upcoming rows beyond [0]", () => {
+    const first: UpcomingSendView = {
+      queueItemId: "q1",
+      candidateId: "c1",
+      fullName: "Ada",
+      email: "a@x.com",
+      scheduledFor: "2026-07-12T10:00:00.000Z",
+      queueStatus: "scheduled",
+      subject: "Hi",
+      body: "Hello",
+    };
+    const second: UpcomingSendView = {
+      ...first,
+      queueItemId: "q2",
+      candidateId: "c2",
+      fullName: "Ben",
+      scheduledFor: "2026-07-12T10:04:00.000Z",
+    };
+    const a = baseData({ upcomingSends: [first, second] });
+    const b = baseData({
+      upcomingSends: [first, { ...second, failureReason: "compose failed" }],
     });
     expect(appDataPollKey(a)).not.toBe(appDataPollKey(b));
   });
@@ -170,5 +282,12 @@ describe("workerStatusPollKey", () => {
       },
     };
     expect(workerStatusPollKey(a)).not.toBe(workerStatusPollKey(b));
+  });
+});
+
+describe("shouldApplyPollResult", () => {
+  it("accepts only the latest generation", () => {
+    expect(shouldApplyPollResult(3, 3)).toBe(true);
+    expect(shouldApplyPollResult(2, 3)).toBe(false);
   });
 });

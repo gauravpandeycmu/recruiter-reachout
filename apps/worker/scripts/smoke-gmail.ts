@@ -9,7 +9,7 @@ import { GMAIL_USER_DATA_DIR } from "../src/setupSessions.js";
 import { prepareStreakExtension, waitForStreakServiceWorker } from "../src/streakExtension.js";
 
 async function main(): Promise<void> {
-  const headless = (process.env.GMAIL_HEADLESS ?? "true").toLowerCase() !== "false";
+  const headless = (process.env.GMAIL_HEADLESS ?? "false").toLowerCase() === "true";
   const extensionPath = prepareStreakExtension(process.env.STREAK_EXTENSION_PATH);
   console.log(`Gmail profile: ${GMAIL_USER_DATA_DIR}`);
   console.log(`Streak extension: ${extensionPath}`);

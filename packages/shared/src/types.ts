@@ -33,6 +33,11 @@ export interface RecruiterCandidate {
   archivedAt?: string;
   lastError?: string;
   lastDiscoveryAttemptAt?: string;
+  /** Set when a discovery pass claims this candidate, cleared when the result
+   *  is reported. Unlike send/LinkedIn jobs, discovery has no separate job
+   *  row — this field on the candidate itself is the claim marker, so two
+   *  overlapping discovery fetches can't pick the same candidate. */
+  discoveryClaimedAt?: string;
   /** When an email was first discovered for this person (ISO). Used by Analytics daily buckets. */
   emailDiscoveredAt?: string;
   discoveryAttempts?: number;
@@ -499,7 +504,7 @@ export interface AnalyticsSummary {
   };
   providerUsage: Array<{ provider: string; monthKey: string; count: number }>;
   daily: AnalyticsDayBucket[];
-  /** Running total of sends across the daily window. */
+  /** Running unique companies emailed (send events) across the daily window. */
   cumulativeSends: Array<{ date: string; total: number }>;
   hourly: AnalyticsHourBucket[];
   queueBreakdown: AnalyticsQueueBreakdown;
@@ -574,6 +579,21 @@ export interface LinkedInCaptureJob {
   status: LinkedInCaptureJobStatus;
   savedCount?: number;
   skippedCount?: number;
+  failureReason?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Worker job: visit one LinkedIn profile URL and attach photo (and name if missing). */
+export type LinkedInProfileEnrichJobStatus = "pending" | "in_progress" | "completed" | "failed";
+
+export interface LinkedInProfileEnrichJob {
+  id: string;
+  candidateId: string;
+  linkedinUrl: string;
+  status: LinkedInProfileEnrichJobStatus;
+  profilePhotoUrl?: string;
+  fullName?: string;
   failureReason?: string;
   createdAt: string;
   updatedAt: string;

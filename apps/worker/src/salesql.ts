@@ -29,9 +29,13 @@ export interface SalesqlDiscoveryOptions {
 
 export type SalesqlDiscoveryOutcome =
   | { status: "dry_run" }
-  | { status: "found"; email: string }
-  | { status: "not_found" }
-  | { status: "error"; message: string };
+  // creditSpent: true only when clickRevealInfo() actually ran — the
+  // "already visible" fast path and any failure before that click never
+  // spend a real SalesQL credit, so the local usage counter must not move
+  // for those, or it drifts from SalesQL's real account usage.
+  | { status: "found"; email: string; creditSpent: boolean }
+  | { status: "not_found"; creditSpent: boolean }
+  | { status: "error"; message: string; creditSpent: boolean };
 
 const DEFAULT_OVERLAY_TIMEOUT_MS = Number(process.env.SALESQL_OVERLAY_TIMEOUT_MS ?? 45000);
 const DEFAULT_REVEAL_TIMEOUT_MS = Number(process.env.SALESQL_REVEAL_TIMEOUT_MS ?? 15000);
@@ -42,14 +46,27 @@ export async function discoverEmailOnSalesql(
   options: SalesqlDiscoveryOptions,
 ): Promise<SalesqlDiscoveryOutcome> {
   if (!linkedinUrl?.trim()) {
-    return { status: "error", message: "LinkedIn URL is required." };
+    return { status: "error", message: "LinkedIn URL is required.", creditSpent: false };
   }
 
+  let creditSpent = false;
   try {
     await adapter.navigateToProfile(linkedinUrl.trim());
     const overlay = await adapter.waitForOverlay(options.overlayTimeoutMs ?? DEFAULT_OVERLAY_TIMEOUT_MS);
     if (!overlay.visible) {
-      return { status: "not_found" };
+      // The overlay never opening is NOT evidence this profile has no email —
+      // it collapses several distinct causes (badge slow to load, panel toggle
+      // glitch, expired widget login, LinkedIn page slowness/rate-limit), none
+      // of which mean "SalesQL looked and found nothing." A conclusive miss
+      // only ever comes from the panel explicitly saying so after it opens
+      // (readPanelStatus below) — treat this the same as any other transient
+      // automation failure so it doesn't spend the not_found retry budget or
+      // permanently park the candidate on a session hiccup.
+      return {
+        status: "error",
+        message: "SalesQL overlay did not open (session, panel, or LinkedIn page issue).",
+        creditSpent: false,
+      };
     }
 
     if (options.dryRun) {
@@ -62,26 +79,31 @@ export async function discoverEmailOnSalesql(
     const alreadyVisible = await adapter.readRevealedEmail(1500);
     if (alreadyVisible?.includes("@")) {
       await adapter.closeOverlay();
-      return { status: "found", email: alreadyVisible.trim().toLowerCase() };
+      return { status: "found", email: alreadyVisible.trim().toLowerCase(), creditSpent: false };
     }
 
     await adapter.clickRevealInfo();
+    creditSpent = true;
     const email = await adapter.readRevealedEmail(options.revealTimeoutMs ?? DEFAULT_REVEAL_TIMEOUT_MS);
     const panelHint = await adapter.readPanelStatus?.();
     await adapter.closeOverlay();
 
     if (email?.includes("@")) {
-      return { status: "found", email: email.trim().toLowerCase() };
+      return { status: "found", email: email.trim().toLowerCase(), creditSpent };
     }
 
     // Confirmed live: SalesQL shows "No Emails Found" for some profiles after
     // reveal — that is a conclusive miss, not a transient automation failure.
     if (panelHint === "no_emails" || panelHint === "not_found") {
-      return { status: "not_found" };
+      return { status: "not_found", creditSpent };
     }
 
-    return { status: "error", message: "SalesQL overlay did not reveal a usable email address." };
+    return { status: "error", message: "SalesQL overlay did not reveal a usable email address.", creditSpent };
   } catch (error) {
-    return { status: "error", message: error instanceof Error ? error.message : "Unknown SalesQL automation error." };
+    return {
+      status: "error",
+      message: error instanceof Error ? error.message : "Unknown SalesQL automation error.",
+      creditSpent,
+    };
   }
 }

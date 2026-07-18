@@ -88,7 +88,7 @@ describe("runDiscoveryPass", () => {
       autoSendAfterDiscovery: true,
     });
 
-    expect(result.result).toBe("worked");
+    expect(result.result).toBe("idle");
     expect(apiClient.reportDiscoveryResult).toHaveBeenCalledWith("candidate-1", { status: "dry_run", provider: "jobright" });
     expect(apiClient.triggerSend).not.toHaveBeenCalled();
   });
@@ -114,6 +114,59 @@ describe("runDiscoveryPass", () => {
     expect(apiClient.triggerSend).toHaveBeenCalledWith("candidate-1");
   });
 
+  it("retries a failed discovery-result report so a real find isn't silently discarded", async () => {
+    vi.useFakeTimers();
+    try {
+      const reportDiscoveryResult = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("API unreachable"))
+        .mockResolvedValueOnce(candidate());
+      const apiClient = createFakeApiClient({ reportDiscoveryResult });
+
+      const pending = runDiscoveryPass({
+        apiClient,
+        createJobrightAdapter,
+        jobrightDryRun: false,
+        salesqlDryRun: true,
+        autoSendAfterDiscovery: true,
+      });
+      await vi.runAllTimersAsync();
+      const result = await pending;
+
+      expect(result.result).toBe("worked");
+      expect(reportDiscoveryResult).toHaveBeenCalledTimes(2);
+      expect(apiClient.triggerSend).toHaveBeenCalledWith("candidate-1");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not auto-send when the discovery-result report never lands", async () => {
+    vi.useFakeTimers();
+    try {
+      const apiClient = createFakeApiClient({
+        reportDiscoveryResult: vi.fn().mockRejectedValue(new Error("API down")),
+      });
+
+      const pending = runDiscoveryPass({
+        apiClient,
+        createJobrightAdapter,
+        jobrightDryRun: false,
+        salesqlDryRun: true,
+        autoSendAfterDiscovery: true,
+      });
+      await vi.runAllTimersAsync();
+      const result = await pending;
+
+      expect(result.result).toBe("idle");
+      expect(apiClient.reportDiscoveryResult).toHaveBeenCalledTimes(5);
+      // The result was never durably saved — must not auto-send on unconfirmed data.
+      expect(apiClient.triggerSend).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("skips SalesQL fallback by default even when Jobright not_found and quota allows", async () => {
     const apiClient = createFakeApiClient();
     const salesqlSpy = vi.fn(createSalesqlAdapter);
@@ -122,7 +175,7 @@ describe("runDiscoveryPass", () => {
       waitForContactResult: vi.fn().mockResolvedValue({ found: false }),
     });
 
-    await runDiscoveryPass({
+    const result = await runDiscoveryPass({
       apiClient,
       createJobrightAdapter: notFoundJobright,
       createSalesqlAdapter: salesqlSpy,
@@ -131,12 +184,21 @@ describe("runDiscoveryPass", () => {
       autoSendAfterDiscovery: true,
     });
 
+    expect(result.result).toBe("idle");
     expect(salesqlSpy).not.toHaveBeenCalled();
     expect(apiClient.reportDiscoveryResult).toHaveBeenCalledWith("candidate-1", {
       status: "not_found",
       provider: "jobright",
     });
     expect(apiClient.triggerSend).not.toHaveBeenCalled();
+  });
+
+  it("backs off (idle) after not_found so the worker does not hot-loop", async () => {
+    const { discoveryPassResultForOutcome } = await import("../src/discoveryPass.js");
+    expect(discoveryPassResultForOutcome({ status: "found", email: "a@b.com", provider: "jobright" })).toBe("worked");
+    expect(discoveryPassResultForOutcome({ status: "not_found", provider: "jobright" })).toBe("idle");
+    expect(discoveryPassResultForOutcome({ status: "error", message: "x", provider: "jobright" })).toBe("idle");
+    expect(discoveryPassResultForOutcome({ status: "dry_run", provider: "jobright" })).toBe("idle");
   });
 
   it("tries SalesQL fallback when the dashboard auto-fallback toggle is on", async () => {
@@ -164,6 +226,7 @@ describe("runDiscoveryPass", () => {
       status: "found",
       email: "salesql@example.com",
       provider: "salesql",
+      creditSpent: false,
     });
     expect(apiClient.triggerSend).toHaveBeenCalled();
   });
@@ -213,6 +276,7 @@ describe("runDiscoveryPass", () => {
       status: "found",
       email: "salesql@example.com",
       provider: "salesql",
+      creditSpent: false,
     });
   });
 

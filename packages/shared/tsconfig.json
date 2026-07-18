@@ -5,7 +5,8 @@
     "rootDir": "src",
     "declaration": true,
     "module": "NodeNext",
-    "moduleResolution": "NodeNext"
+    "moduleResolution": "NodeNext",
+    "types": ["node"]
   },
   "include": ["src"]
 }
