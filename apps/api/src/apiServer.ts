@@ -34,8 +34,10 @@ import {
   nextDiscoveryCandidate,
   previewEmail,
   recordDiscoveryResult,
+  rerenderPendingSendJobsForCandidate,
   requestDiscovery,
   requestSalesqlSweep,
+  patchCandidateFromClient,
   canUseDiscoveryProvider,
   currentMonthKey,
   updateWorkerStatus,
@@ -82,10 +84,10 @@ import {
   replaceActiveFromHistory,
   normalizeCompanyKey,
 } from "./services.js";
-import { syncRelayEvents } from "./tracking.js";
+import { recordLocalTrackingHit, safeTrackingRedirectUrl, syncRelayEvents } from "./tracking.js";
 import { handleCors, readJson, readJsonAudited, sendJson, beginNdjson, writeNdjson, endNdjson, sendPixel, sendRedirect } from "./http.js";
 import type { Store } from "./store.js";
-import { ensureWorkerRunning, getWorkerStatusEnsured, getWorkerStatusForced, wakeWorkerForDiscovery } from "./workerSupervisor.js";
+import { ensureWorkerRunning, ensureWorkerRunningWithOptions, getWorkerStatusEnsured, getWorkerStatusForced, wakeWorkerForDiscovery } from "./workerSupervisor.js";
 
 const QUIET_GET_PATHS = new Set([
   "/health",
@@ -114,6 +116,10 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
   const maybeEnsure = () => {
     if (!autoEnsureWorker) return;
     void ensureWorkerRunning(store).catch(() => undefined);
+  };
+  const maybeWakeNow = () => {
+    if (!autoEnsureWorker) return;
+    void ensureWorkerRunningWithOptions(store, { wakeRunningWorker: true }).catch(() => undefined);
   };
   /** Always invoke wake so route wiring stays testable; real spawn is blocked via supervisor test hooks. */
   const maybeWakeDiscovery = () => {
@@ -334,9 +340,13 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
       return;
     }
 
-    if (req.method === "PATCH" && url.pathname.startsWith("/api/candidates/")) {
-      const id = url.pathname.split("/")[3];
-      const updated = store.updateCandidate(id ?? "", (await readJsonAudited(req, "http.body", { method: req.method, path: url.pathname })) as object);
+    if (req.method === "PATCH" && url.pathname.match(/^\/api\/candidates\/[^/]+$/)) {
+      const id = url.pathname.split("/")[3] ?? "";
+      const updated = patchCandidateFromClient(
+        store,
+        id,
+        (await readJsonAudited(req, "http.body", { method: req.method, path: url.pathname })) as Record<string, unknown>,
+      );
       if (!updated) {
         sendJson(res, 404, { error: "Candidate not found." });
         return;
@@ -401,6 +411,8 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
         company?: string;
         subject?: string;
         body?: string;
+        linkedinSubject?: string;
+        linkedinMessage?: string;
         sourceCandidateId?: string;
       };
       if (!body.company?.trim() || !body.subject?.trim() || !body.body?.trim() || !body.sourceCandidateId?.trim()) {
@@ -411,18 +423,23 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
         company: body.company,
         subject: body.subject,
         body: body.body,
+        linkedinSubject: body.linkedinSubject,
+        linkedinMessage: body.linkedinMessage,
         sourceCandidateId: body.sourceCandidateId,
       });
       sendJson(res, 200, result);
       return;
     }
 
+    // Mutating GET: claims the candidate (discoveryClaimedAt). Worker-only — the
+    // dashboard must never poll this or lookups stall until the claim goes stale.
     if (req.method === "GET" && url.pathname === "/api/automation/next-discovery") {
       const candidate = nextDiscoveryCandidate(store);
       if (!candidate) {
         sendJson(res, 404, { error: "No candidates need discovery." });
         return;
       }
+      await store.save();
       sendJson(res, 200, candidate);
       return;
     }
@@ -446,6 +463,7 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
         candidateId?: string;
         candidateName?: string;
         provider?: "jobright" | "salesql";
+        workerStartedAt?: string;
       };
       if (!body.phase || !body.message?.trim()) {
         sendJson(res, 400, { error: "phase and message are required." });
@@ -465,6 +483,8 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
           candidateId: body.candidateId,
           candidateName: body.candidateName,
           provider: body.provider,
+          workerStartedAt:
+            typeof body.workerStartedAt === "string" ? body.workerStartedAt : undefined,
         }),
       );
       return;
@@ -573,7 +593,13 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
         return;
       }
       const results = bulkCreateCandidates(store, body.candidates ?? [], job.companyName);
-      const savedCount = results.filter((row) => row.status === "saved_now" || row.status === "known_email").length;
+      // Count only rows that actually saved/reactivated a candidate (they carry a
+      // savedCandidateId). Status alone over-counts: `known_email` is returned BOTH
+      // for a real reactivation-save AND for an already-active duplicate that was
+      // merely skipped (no savedCandidateId). Keying off status inflated
+      // usage.linkedInCaptureSaves every time capture re-ran on a company whose
+      // recruiters were already in the active batch.
+      const savedCount = results.filter((row) => Boolean(row.savedCandidateId)).length;
       const skippedCount = results.length - savedCount;
       const completed = completeLinkedInCaptureJob(store, jobId, {
         success: true,
@@ -633,19 +659,17 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
         sendJson(res, 404, { error: "Enrich job not found." });
         return;
       }
-      if (!body.success) {
-        const failed = completeLinkedInProfileEnrichJob(store, jobId, {
-          success: false,
-          failureReason: body.failureReason ?? "Enrich failed.",
-        });
-        await store.save();
-        sendJson(res, 200, failed);
-        return;
-      }
+      // Apply the scraped name/photo BEFORE branching on success. LinkedIn enrich
+      // often finds the real name but no scrape-able profile photo (private/limited
+      // profiles, or the scraper refusing a generic/viewer avatar) and reports
+      // success:false WITH fullName set. The name is independent of the photo, so a
+      // photo-miss must not throw away a real name over a placeholder — otherwise a
+      // URL-only / manually-added person keeps greeting "Hi Recruiter," on an
+      // already-scheduled send.
       const existing = store.listCandidates().find((candidate) => candidate.id === job.candidateId);
       if (existing) {
         const patch: Partial<import("@recruiter/shared").RecruiterCandidate> = {};
-        if (body.profilePhotoUrl && !existing.profilePhotoUrl) {
+        if (body.success && body.profilePhotoUrl && !existing.profilePhotoUrl) {
           patch.profilePhotoUrl = body.profilePhotoUrl;
         }
         if (body.fullName?.trim()) {
@@ -660,7 +684,22 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
         }
         if (Object.keys(patch).length > 0) {
           store.updateCandidate(existing.id, patch);
+          // If enrich just filled the real name over a placeholder, any send job
+          // that was already scheduled still greets "Hi Recruiter,". Re-render the
+          // candidate's pending jobs so the queued email uses the real name.
+          if (patch.fullName) {
+            rerenderPendingSendJobsForCandidate(store, existing.id);
+          }
         }
+      }
+      if (!body.success) {
+        const failed = completeLinkedInProfileEnrichJob(store, jobId, {
+          success: false,
+          failureReason: body.failureReason ?? "Enrich failed.",
+        });
+        await store.save();
+        sendJson(res, 200, failed);
+        return;
       }
       const completed = completeLinkedInProfileEnrichJob(store, jobId, {
         success: true,
@@ -701,7 +740,7 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
       // Send now must wake the worker immediately — do not rely only on UI worker-status polling
       // (hidden tabs / API-only clients otherwise leave due jobs sitting).
       if (body.mode === "send_now" && (result.jobs?.length ?? 0) > 0) {
-        maybeEnsure();
+        maybeWakeNow();
       }
       sendJson(res, 200, result);
       return;
@@ -766,7 +805,7 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
         resumeId: body.resumeId,
       });
       if (result.resumed > 0) {
-        maybeEnsure();
+        maybeWakeNow();
       }
       sendJson(res, 200, result);
       return;
@@ -784,7 +823,7 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
         sendNow: body.sendNow,
       });
       if (body.sendNow || isDueSoon(body.scheduledFor) || isDueSoon(result?.scheduledFor)) {
-        maybeEnsure();
+        maybeWakeNow();
       }
       sendJson(res, 200, result);
       return;
@@ -800,7 +839,7 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
         startAt: body.startAt ?? "",
       });
       if (isDueSoon(body.startAt)) {
-        maybeEnsure();
+        maybeWakeNow();
       }
       sendJson(res, 200, result);
       return;
@@ -810,7 +849,7 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
       const body = (await readJsonAudited(req, "http.body", { method: req.method, path: url.pathname })) as { queueItemIds?: string[] };
       const result = await retryFailedSends(store, { queueItemIds: body.queueItemIds ?? [] });
       if (result.retried > 0) {
-        maybeEnsure();
+        maybeWakeNow();
       }
       sendJson(res, 200, result);
       return;
@@ -875,8 +914,8 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
     }
 
     if (req.method === "GET" && url.pathname.match(/^\/api\/automation\/can-use-provider\/[^/]+$/)) {
-      const provider = url.pathname.split("/")[4] as "jobright" | "salesql";
-      if (provider !== "jobright" && provider !== "salesql") {
+      const provider = url.pathname.split("/")[4] as "jobright" | "salesql" | "apollo";
+      if (provider !== "jobright" && provider !== "salesql" && provider !== "apollo") {
         sendJson(res, 400, { error: "Unknown provider." });
         return;
       }
@@ -890,6 +929,10 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
         salesql: {
           monthKey: currentMonthKey(),
           ...canUseDiscoveryProvider(store, "salesql"),
+        },
+        apollo: {
+          monthKey: currentMonthKey(),
+          ...canUseDiscoveryProvider(store, "apollo"),
         },
       });
       return;
@@ -1042,13 +1085,19 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
     }
 
     if (req.method === "GET" && url.pathname === "/api/backlog/jobs") {
-      sendJson(res, 200, { jobs: getJobBacklogSummaries(store) });
+      const tzRaw = url.searchParams.get("tzOffset");
+      const tz = tzRaw != null && tzRaw !== "" ? Number(tzRaw) : undefined;
+      sendJson(res, 200, {
+        jobs: getJobBacklogSummaries(store, Number.isFinite(tz) ? (tz as number) : undefined),
+      });
       return;
     }
 
     if (req.method === "GET" && url.pathname.match(/^\/api\/backlog\/jobs\/[^/]+$/)) {
       const id = url.pathname.split("/")[4] ?? "";
-      const summary = getJobBacklogSummary(store, id);
+      const tzRaw = url.searchParams.get("tzOffset");
+      const tz = tzRaw != null && tzRaw !== "" ? Number(tzRaw) : undefined;
+      const summary = getJobBacklogSummary(store, id, Number.isFinite(tz) ? (tz as number) : undefined);
       if (!summary) {
         sendJson(res, 404, { error: "Job not found." });
         return;
@@ -1079,14 +1128,12 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
     }
 
     if (req.method === "GET" && url.pathname.match(/^\/t\/open\/[^/]+\.gif$/)) {
-      const candidateId = url.pathname.split("/")[3]?.replace(".gif", "") ?? "";
-      store.addEvent({
-        id: randomUUID(),
-        candidateId,
+      const trackingId = url.pathname.split("/")[3]?.replace(".gif", "") ?? "";
+      recordLocalTrackingHit(store, {
+        trackingId,
         type: "open",
         userAgent: req.headers["user-agent"],
         ip: req.socket.remoteAddress,
-        createdAt: new Date().toISOString(),
       });
       await store.save();
       sendPixel(res);
@@ -1094,16 +1141,14 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
     }
 
     if (req.method === "GET" && url.pathname.match(/^\/t\/click\/[^/]+$/)) {
-      const candidateId = url.pathname.split("/")[3] ?? "";
-      const target = url.searchParams.get("url") ?? "https://mail.google.com";
-      store.addEvent({
-        id: randomUUID(),
-        candidateId,
+      const trackingId = url.pathname.split("/")[3] ?? "";
+      const target = safeTrackingRedirectUrl(url.searchParams.get("url"));
+      recordLocalTrackingHit(store, {
+        trackingId,
         type: "click",
         targetUrl: target,
         userAgent: req.headers["user-agent"],
         ip: req.socket.remoteAddress,
-        createdAt: new Date().toISOString(),
       });
       await store.save();
       sendRedirect(res, target);

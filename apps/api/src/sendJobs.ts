@@ -73,23 +73,66 @@ export function isWorkerHeartbeatFresh(store: Store, now: Date): boolean {
   return Number.isFinite(ageMs) && ageMs >= 0 && ageMs < WORKER_OFFLINE_AFTER_MS;
 }
 
+/** ISO boot time of the worker session currently checking in, or undefined if
+ *  unknown (older worker that never reports it — falls back to heartbeat-only). */
+function workerSessionStartMs(store: Store): number | undefined {
+  const started = store.getWorkerStatus()?.workerStartedAt;
+  if (!started) {
+    return undefined;
+  }
+  const ms = Date.parse(started);
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
+/**
+ * Should a stuck `in_progress` job (last touched at `touchedMs`) be reclaimed to
+ * pending now? Shared by every worker-job reclaim (send / LinkedIn capture /
+ * enrich) so they can't drift apart.
+ *
+ * A fresh heartbeat proves *a* worker is alive — not that it owns THIS job. A job
+ * last touched before the current worker session booted belongs to a crashed
+ * predecessor (the worker lock guarantees that old process is gone), so the live
+ * heartbeat is a different process and gives it no protection: reclaim it
+ * immediately, even before the stale window. Otherwise a leaked in_progress send
+ * blocks EVERY send forever (claimNextSendJob won't claim while one is in flight,
+ * and the supervisor keeps respawning a worker that re-freshens the heartbeat, so
+ * the age window never coincides with a stale heartbeat). Laptop sleep/wake
+ * resumes the SAME process, so workerStartedAt is unchanged and a genuinely slow
+ * job stays protected — no double-send / double-scrape.
+ */
+export function shouldReclaimStaleInProgress(
+  store: Store,
+  touchedMs: number,
+  now: Date,
+  staleMs: number,
+): boolean {
+  if (!Number.isFinite(touchedMs)) {
+    return false;
+  }
+  const workerLooksAlive = isWorkerHeartbeatFresh(store, now);
+  const sessionStartMs = workerSessionStartMs(store);
+  const orphanedByRespawn =
+    sessionStartMs !== undefined && workerLooksAlive && touchedMs < sessionStartMs;
+  const staleByAge = touchedMs <= now.getTime() - staleMs;
+  if (!staleByAge && !orphanedByRespawn) {
+    return false;
+  }
+  // Stale, but the current session is still checking in — it's slow, not crashed.
+  if (workerLooksAlive && !orphanedByRespawn) {
+    return false;
+  }
+  return true;
+}
+
 /** Reset jobs stuck in_progress after a worker crash so they can be claimed again. */
 export function reclaimStaleSendJobs(store: Store, now = new Date(), staleMs = 15 * 60 * 1000): number {
-  const cutoff = now.getTime() - staleMs;
-  const workerLooksAlive = isWorkerHeartbeatFresh(store, now);
   let reclaimed = 0;
   for (const job of store.listSendJobs()) {
     if (job.status !== "in_progress") {
       continue;
     }
     const touched = new Date(job.updatedAt || job.createdAt).getTime();
-    if (Number.isNaN(touched) || touched > cutoff) {
-      continue;
-    }
-    // The job is stale, but the worker is still checking in — it's slow, not
-    // crashed. Leave it; a fresh heartbeat means it will either finish and
-    // report normally, or eventually go stale itself and unblock reclaim.
-    if (workerLooksAlive) {
+    if (!shouldReclaimStaleInProgress(store, touched, now, staleMs)) {
       continue;
     }
     store.upsertSendJob({
@@ -351,7 +394,13 @@ export function cancelScheduledSends(
   }
 
   for (const item of store.listSendQueue()) {
-    if (item.status !== "scheduled" && item.status !== "queued") {
+    const isActive = item.status === "scheduled" || item.status === "queued";
+    // Terminal cancel (History → Send, batch remove) means "gone" — it must also
+    // neutralize resume-able `paused` reserves, or they keep reserving a packing
+    // window and stay Resume-able for a person the caller is rebuilding fresh.
+    // The non-terminal pause path leaves paused rows alone (re-pausing is a no-op).
+    const isTerminablePaused = Boolean(input.terminal) && item.status === "paused";
+    if (!isActive && !isTerminablePaused) {
       continue;
     }
     if (candidateFilter && !candidateFilter.has(item.candidateId)) {

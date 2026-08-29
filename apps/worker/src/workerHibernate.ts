@@ -124,6 +124,8 @@ export function decideHibernation(input: {
 
   // Discovery / capture / enrich while Gmail is asleep. Never alongside the send window
   // (one Chromium at a time — SalesQL stays closed until Gmail hibernates again).
+  // hasDiscovery from the API now stays true for in-flight claims too, so we do not
+  // self-exit mid-lookup and orphan discoveryClaimedAt.
   const needDiscovery = Boolean(
     !needGmail && (input.hasCaptureWork || input.hasEnrichWork || input.hasDiscoveryWork),
   );

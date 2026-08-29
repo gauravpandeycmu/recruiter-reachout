@@ -1,7 +1,10 @@
+import { defaultGapMinutes } from "./scheduleBlocks.js";
+
 export interface EnvReport {
   ok: boolean;
   warnings: string[];
   testMode: { enabled: boolean; recipient?: string };
+  sendIntervalMinutes: number;
 }
 
 export function validateEnv(env = process.env, testModeOverride?: { enabled: boolean; recipient?: string }): EnvReport {
@@ -35,5 +38,10 @@ export function validateEnv(env = process.env, testModeOverride?: { enabled: boo
     warnings.push("TEST_MODE is enabled but TEST_MODE_RECIPIENT_EMAIL is not set; sends will fail until it is.");
   }
 
-  return { ok: warnings.length === 0, warnings, testMode: { enabled: testModeEnabled, recipient: testModeRecipient } };
+  return {
+    ok: warnings.length === 0,
+    warnings,
+    testMode: { enabled: testModeEnabled, recipient: testModeRecipient },
+    sendIntervalMinutes: defaultGapMinutes(),
+  };
 }

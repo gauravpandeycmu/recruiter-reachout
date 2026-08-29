@@ -40,9 +40,9 @@ export interface ExplicitScheduleResult {
 
 const defaultConfig = (startDate = new Date()): SchedulerConfig => ({
   intakeCapPerDay: 300,
-  sendCapPerDay: 50,
-  perHourCap: 5,
-  perDomainCap: 5,
+  sendCapPerDay: 200,
+  perHourCap: 100,
+  perDomainCap: 100,
   startDate,
 });
 
@@ -131,8 +131,15 @@ export function assertWithinPacingCaps(
     hourBucketMode === "calendar"
       ? sendEvents.filter((event) => localYmdHour(new Date(event.createdAt)) === localYmdHour(now))
       : sendEvents.filter((event) => {
-          const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
-          return new Date(event.createdAt).getTime() >= oneHourAgo.getTime();
+          // A send collides with one happening at `now` only if it can fall in a
+          // 60-min window that also contains `now` — i.e. |t - now| < 1h. The
+          // old check bounded only the past side (`t >= now - 1h`), so a
+          // pending job scheduled far in the future (fed in as a synthetic
+          // pacing event dated at its scheduledFor) counted against the CURRENT
+          // clock hour and falsely blocked a Send-now for as long as a future
+          // batch sat on the schedule. A send next week shares no hour with now.
+          const deltaMs = Math.abs(new Date(event.createdAt).getTime() - now.getTime());
+          return deltaMs < 60 * 60 * 1000;
         });
   if (sentLastHour.length >= caps.hourlySendCap) {
     throw new Error(`Hourly send limit reached (${caps.hourlySendCap}/hour).`);
@@ -275,16 +282,39 @@ export function scheduleCandidatesExplicit(
   suppressions: SuppressionEntry[] = [],
 ): ExplicitScheduleResult {
   const settings = { ...defaultConfig(), ...config };
-  const eligible = dedupeCandidates(candidates).filter((candidate) => {
+  const queued: SendQueueItem[] = [];
+  const rejected: ExplicitScheduleResult["rejected"] = [];
+  const shifted: ExplicitScheduleResult["shifted"] = [];
+
+  function ineligibleReason(candidate: RecruiterCandidate): string | undefined {
     const email = candidate.email ?? candidate.emailCandidates?.[0]?.email;
     const confidence = email ? resolveEmailConfidence(candidate, email) : "unknown";
-    return email && confidence === "high" && !isSuppressed(email, suppressions);
-  });
+    if (!email) return "Candidate needs an email before sending.";
+    if (confidence !== "high") return "Only high-confidence verified emails can be sent directly.";
+    if (isSuppressed(email, suppressions)) return "Candidate email is suppressed.";
+    return undefined;
+  }
+
+  const eligible = dedupeCandidates(candidates).filter((candidate) => !ineligibleReason(candidate));
 
   const targetIds = input.candidateIds?.length
     ? new Set(input.candidateIds)
     : undefined;
   const filtered = targetIds ? eligible.filter((candidate) => targetIds.has(candidate.id)) : eligible;
+
+  // Explicit Schedule of named people must not silently drop ineligible rows —
+  // the Send tab would show 0 queued with no reason (missing email, bounce, etc).
+  if (targetIds) {
+    const byId = new Map(candidates.map((candidate) => [candidate.id, candidate] as const));
+    for (const id of targetIds) {
+      if (filtered.some((candidate) => candidate.id === id)) continue;
+      const candidate = byId.get(id);
+      rejected.push({
+        candidateId: id,
+        reason: candidate ? (ineligibleReason(candidate) ?? "Not eligible for sending.") : "Candidate not found.",
+      });
+    }
+  }
 
   const perCandidateSchedule = new Map(
     (input.schedules ?? []).map((entry) => [entry.candidateId, new Date(entry.scheduledFor)] as const),
@@ -296,9 +326,6 @@ export function scheduleCandidatesExplicit(
     input.jitterSeconds ??
     settings.jitterSeconds ??
     Math.min(50, Math.max(20, Math.round(intervalMinutes * 8)));
-  const queued: SendQueueItem[] = [];
-  const rejected: ExplicitScheduleResult["rejected"] = [];
-  const shifted: ExplicitScheduleResult["shifted"] = [];
 
   // Explicit schedules honor the user's start time + interval exactly.
   // Volume / domain caps are left to the user — do not reject or roll over.

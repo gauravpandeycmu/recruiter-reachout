@@ -156,6 +156,35 @@ describe("linkedin capture/enrich job lifecycle", () => {
       expect(claimed).toBeUndefined();
       expect(store.getLinkedInProfileEnrichJob(job.id)?.status).toBe("in_progress");
     });
+
+    it("reclaims an enrich job orphaned by a crash+respawn even while the new worker heartbeats", async () => {
+      // Same crash+respawn hazard as send jobs: the leaked in_progress job was
+      // claimed by a now-dead worker, but a fresh heartbeat from the RESPAWNED
+      // worker (a different session) used to shield it forever. A job touched
+      // before the current session booted can't belong to it — reclaim it.
+      const store = await freshStore();
+      const job = createLinkedInProfileEnrichJob(store, {
+        candidateId: "candidate-1",
+        linkedinUrl: "https://www.linkedin.com/in/jane-doe",
+      });
+      const claimedAt = new Date("2026-07-17T12:00:00.000Z");
+      store.upsertLinkedInProfileEnrichJob({ ...job, status: "in_progress", updatedAt: claimedAt.toISOString() });
+      // New worker booted 1 minute AFTER the leaked job was last touched, and is
+      // heartbeating now — it never claimed this job.
+      const heartbeatAt = new Date(claimedAt.getTime() + 90 * 1000);
+      store.setWorkerStatus({
+        phase: "capturing",
+        message: "Enriching…",
+        lastHeartbeatAt: heartbeatAt.toISOString(),
+        updatedAt: heartbeatAt.toISOString(),
+        workerStartedAt: new Date(claimedAt.getTime() + 60 * 1000).toISOString(),
+      });
+
+      // Even though the job is not yet 5 minutes old, it's a proven orphan → reclaimed.
+      const claimed = claimNextLinkedInProfileEnrichJob(store, new Date(claimedAt.getTime() + 2 * 60 * 1000));
+      expect(claimed?.id).toBe(job.id);
+      expect(claimed?.status).toBe("in_progress");
+    });
   });
 
   describe("createLinkedInCaptureJob dedup", () => {

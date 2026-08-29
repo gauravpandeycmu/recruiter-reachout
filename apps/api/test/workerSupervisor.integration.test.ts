@@ -190,10 +190,10 @@ describe("workerSupervisor integration", () => {
 
     it("uses the claim gate, not just the schedule, when the gate pushes the effective due time out", async () => {
       const now = new Date("2026-07-17T12:00:00.000Z");
-      // A send completed 30s ago; the default 4-minute global gap pushes the
-      // next allowed claim to 3.5 minutes from now — beyond the 3-minute
-      // lookahead — even though this OTHER pending job's own scheduledFor is
-      // already overdue.
+      // A send completed 30s ago; the 1-minute global gap pushes the next
+      // allowed claim 30s into the future. The pending job is overdue, but the
+      // worker should still wake because that gated send is now within the
+      // lookahead window.
       store.upsertSendJob(
         baseSendJob({
           id: "just-completed",
@@ -209,7 +209,7 @@ describe("workerSupervisor integration", () => {
         }),
       );
       await store.save();
-      expect(shouldWorkerBeRunning(store, now)).toBe(false);
+      expect(shouldWorkerBeRunning(store, now)).toBe(true);
     });
 
     it("is false for a bare just-completed-send claim gate with nothing queued (phantom-warmup guard)", async () => {

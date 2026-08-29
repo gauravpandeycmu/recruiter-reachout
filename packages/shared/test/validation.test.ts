@@ -31,6 +31,13 @@ describe("extractFirstName", () => {
     expect(extractFirstName("Jane Doe, MBA")).toBe("Jane");
     expect(extractFirstName("José Smith (Hiring)")).toBe("José");
   });
+
+  it("normalizes obvious all-caps and all-lowercase greetings", () => {
+    expect(extractFirstName("SWAMINATHAN PISUPATI")).toBe("Swaminathan");
+    expect(extractFirstName("christopher magalotti")).toBe("Christopher");
+    expect(extractFirstName("AJ Lee")).toBe("AJ");
+    expect(extractFirstName("DeShawn Smith")).toBe("DeShawn");
+  });
 });
 
 describe("isValidEmail / validateCandidateInput", () => {

@@ -2,12 +2,13 @@ import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { normalizeWhitespace } from "@recruiter/shared";
 import { isLinkedInProfileUrl, type PageCandidate } from "./parser";
+import { pickExtensionCompanyPrefill } from "./companyPrefill";
 import "./popup.css";
 
 const apiBase = "http://localhost:4000";
 const savedCompanyKey = "recruiter-reachout-current-company";
 const dashboardChannel = "recruiter-reachout-saved";
-const extensionVersion = "0.1.4";
+const extensionVersion = "2.0.0";
 
 type PageMode = "profile" | "search" | "other";
 type CandidateResultStatus =
@@ -38,6 +39,7 @@ interface CheckResult {
   knownEmail?: string;
   knownEmails?: string[];
   company?: string;
+  suggestedCompany?: string;
 }
 
 interface CollectOptions {
@@ -45,9 +47,18 @@ interface CollectOptions {
   prepareLazyLoad?: boolean;
 }
 
+function BrandTree() {
+  return <img className="popup-brand-tree" src="brand-mascot.svg" alt="Recruiter Reachout tree" />;
+}
+
+function normalizeCompanyPrefillKey(value: string | undefined): string {
+  return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
 function Popup() {
   const [rows, setRows] = useState<CandidateRow[]>([]);
   const [company, setCompany] = useState("");
+  const [companyTouched, setCompanyTouched] = useState(false);
   const [pageMode, setPageMode] = useState<PageMode>("other");
   const [preview, setPreview] = useState<PageCandidate | undefined>();
   const [knownEmail, setKnownEmail] = useState<string | undefined>();
@@ -59,7 +70,6 @@ function Popup() {
   const [sourceTabUrl, setSourceTabUrl] = useState<string | undefined>();
 
   useEffect(() => {
-    setCompany(localStorage.getItem(savedCompanyKey) ?? "");
     void Promise.all([inspectActiveTab(), pingApi()]).then(([, online]) => {
       if (!online) {
         setStatus((prev) =>
@@ -72,23 +82,27 @@ function Popup() {
   }, []);
 
   function updateCompany(value: string) {
+    setCompanyTouched(true);
     setCompany(value);
     localStorage.setItem(savedCompanyKey, value);
   }
 
-  /** Only auto-fill company when the user has not typed one — never overwrite manual input. */
-  function applyCompanySuggestion(suggested: string | undefined) {
-    const saved = (localStorage.getItem(savedCompanyKey) ?? "").trim();
-    if (saved) {
-      setCompany(saved);
-      return saved;
-    }
-    const next = suggested?.trim();
-    if (next) {
-      updateCompany(next);
-      return next;
-    }
-    return "";
+  function prefillCompany(
+    input: {
+      pageMode: PageMode;
+      parsedCompany?: string;
+      suggestedCompany?: string;
+    },
+    options: { ignoreEdits?: boolean } = {},
+  ) {
+    const next = pickExtensionCompanyPrefill({
+      ...input,
+      stickyCompany: localStorage.getItem(savedCompanyKey) ?? "",
+      userEdited: options.ignoreEdits ? false : companyTouched,
+      userValue: company,
+    });
+    setCompany(next);
+    return next;
   }
 
   async function pingApi(): Promise<boolean> {
@@ -153,15 +167,33 @@ function Popup() {
 
       if (isLinkedInProfileUrl(tab.url)) {
         setPageMode("profile");
+        setCompanyTouched(false);
         setStatus("Reading this LinkedIn profile…");
         try {
           const response = await collectFromTab(tab.id, { prepareLazyLoad: false });
           const person = response.candidates[0];
           setPreview(person);
-          const activeCompany = applyCompanySuggestion(response.companySuggestion?.trim() || person?.company?.trim());
+          const parsedCompany = response.companySuggestion?.trim() || person?.company?.trim();
+          let suggestedCompany: string | undefined;
           if (person) {
-            const checks = await lookupKnown([person], activeCompany || undefined);
+            const checks = await lookupKnown([person], parsedCompany);
             const hit = checks[0];
+            suggestedCompany = hit?.suggestedCompany?.trim() || hit?.company?.trim();
+            if (
+              parsedCompany &&
+              suggestedCompany &&
+              normalizeCompanyPrefillKey(parsedCompany) !== normalizeCompanyPrefillKey(suggestedCompany)
+            ) {
+              suggestedCompany = parsedCompany;
+            }
+            const activeCompany = prefillCompany(
+              {
+                pageMode: "profile",
+                parsedCompany,
+                suggestedCompany,
+              },
+              { ignoreEdits: true },
+            );
             if (hit?.knownEmail) {
               setKnownEmail(hit.knownEmail);
               setStatus(`Known contact: ${person.fullName} · ${hit.knownEmail}`);
@@ -169,10 +201,11 @@ function Popup() {
               setStatus(
                 activeCompany
                   ? `Ready to add ${person.fullName} at ${activeCompany}.`
-                  : `Ready to add ${person.fullName}. Enter the company below.`,
+                  : `Ready to add ${person.fullName}. Edit the company below if the prefill is blank or wrong.`,
               );
             }
           } else {
+            prefillCompany({ pageMode: "profile", parsedCompany }, { ignoreEdits: true });
             setStatus(
               response.error
                 ? `Profile read failed: ${response.error}`
@@ -187,7 +220,13 @@ function Popup() {
 
       if (/linkedin\.com\/search\/results\/people/i.test(tab.url)) {
         setPageMode("search");
-        const saved = (localStorage.getItem(savedCompanyKey) ?? "").trim();
+        const saved = prefillCompany(
+          {
+            pageMode: "search",
+            parsedCompany: undefined,
+          },
+          { ignoreEdits: true },
+        );
         setStatus(
           saved
             ? `Ready to save visible profiles for ${saved}.`
@@ -236,14 +275,33 @@ function Popup() {
           },
         ];
       }
-      const captureCompany =
-        manualCompany ||
+      const parsedCompany =
         response.companySuggestion?.trim() ||
         collected[0]?.company?.trim() ||
-        preview?.company?.trim() ||
+        preview?.company?.trim();
+      let catalogCompany = "";
+      if (pageMode === "profile" && !manualCompany && collected[0]) {
+        const checks = await lookupKnown(collected, parsedCompany);
+        catalogCompany = (checks[0]?.suggestedCompany ?? checks[0]?.company ?? "").trim();
+        if (
+          parsedCompany &&
+          catalogCompany &&
+          normalizeCompanyPrefillKey(parsedCompany) !== normalizeCompanyPrefillKey(catalogCompany)
+        ) {
+          catalogCompany = parsedCompany;
+        }
+      }
+      const captureCompany =
+        manualCompany ||
+        parsedCompany ||
+        catalogCompany ||
+        (pageMode === "search" ? (localStorage.getItem(savedCompanyKey) ?? "").trim() : "") ||
         "General";
-      if (!manualCompany && captureCompany !== "General") {
-        updateCompany(captureCompany);
+      if (captureCompany && captureCompany !== "General") {
+        localStorage.setItem(savedCompanyKey, captureCompany);
+        if (!manualCompany) {
+          setCompany(captureCompany);
+        }
       }
       if (collected.length === 0) {
         setStatus(
@@ -417,9 +475,12 @@ function Popup() {
   return (
     <main className={pageMode === "profile" ? "mode-profile" : undefined}>
       <header className="popup-header">
-        <div>
-          <p className="eyebrow">Recruiter Reachout · v{extensionVersion}</p>
-          <h1>{pageMode === "profile" ? "Add this recruiter" : "Capture recruiters"}</h1>
+        <div className="popup-brand-block">
+          <BrandTree />
+          <div>
+            <p className="eyebrow">Recruiter Reachout · v{extensionVersion}</p>
+            <h1>{pageMode === "profile" ? "Add this recruiter" : "Capture recruiters"}</h1>
+          </div>
         </div>
         <span className={`mode-chip ${pageMode}`}>
           {pageMode === "profile" ? "Profile" : pageMode === "search" ? "Search" : "Page"}
@@ -456,7 +517,9 @@ function Popup() {
         <input
           value={company}
           onChange={(event) => updateCompany(event.target.value)}
-          placeholder={pageMode === "profile" ? "e.g. Google" : "Company name for this batch"}
+          placeholder={
+            pageMode === "profile" ? "Prefills from this profile — edit if it's wrong" : "Company name for this batch"
+          }
         />
       </label>
 

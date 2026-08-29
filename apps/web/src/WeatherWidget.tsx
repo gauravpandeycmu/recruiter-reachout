@@ -112,7 +112,7 @@ export function PreciseLocationSetup() {
       <div className="setup-section-head">
         <div>
           <h2>Grove weather</h2>
-          <p className="hint">Auto-detects your city. Override it below if you want — units apply on Grove.</p>
+          <p className="hint">Choose the location and temperature units shown on Grove.</p>
         </div>
         <div className="temp-unit-toggle" role="group" aria-label="Temperature unit">
           <button

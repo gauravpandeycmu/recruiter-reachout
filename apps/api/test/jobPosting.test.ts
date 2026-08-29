@@ -232,6 +232,9 @@ describe("schema.org JobPosting JSON-LD", () => {
   it("reads job ids from careers URLs", () => {
     expect(jobIdFromJobUrl(publicisUrl)).toBe("154242");
     expect(jobIdFromJobUrl("https://jobs.apple.com/en-us/details/200670689/x")).toBe("200670689");
+    expect(jobIdFromJobUrl("https://jobright.ai/jobs/info/6a7348d4e55c73319eb16346")).toBe(
+      "6a7348d4e55c73319eb16346",
+    );
   });
 
   it("formats a JobPosting object into a usable JD", () => {

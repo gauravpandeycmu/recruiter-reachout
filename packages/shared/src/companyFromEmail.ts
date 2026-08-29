@@ -172,12 +172,58 @@ function emailBelongsToCompany(email: string, company: string): boolean {
   return domain.replace(/\./g, "").includes(token) || token.includes(domain.split(".")[0] ?? "");
 }
 
-function normalizeCompanyToken(value: string): string {
+export type OutreachEmailClass = "current_company" | "personal" | "previous_company";
+
+/** Classify an address for outreach: current employer, personal mailbox, or some other company. */
+export function classifyOutreachEmail(email: string, company?: string): OutreachEmailClass {
+  const trimmed = email.trim().toLowerCase();
+  const domain = emailDomain(trimmed);
+  if (!domain) {
+    return "previous_company";
+  }
+  if (isPersonalEmailDomain(domain)) {
+    return "personal";
+  }
+  const tagged = company?.trim();
+  if (!tagged) {
+    return "current_company";
+  }
+  return emailBelongsToCompany(trimmed, tagged) ? "current_company" : "previous_company";
+}
+
+/**
+ * Choose an address to send to: current-company work, else personal.
+ * Never returns a previous-employer work email.
+ */
+export function pickOutreachEmail(emails: string[], company?: string): string | undefined {
+  const unique: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of emails) {
+    const email = raw.trim().toLowerCase();
+    if (!email.includes("@") || seen.has(email)) {
+      continue;
+    }
+    seen.add(email);
+    unique.push(email);
+  }
+  const current = unique.find((email) => classifyOutreachEmail(email, company) === "current_company");
+  if (current) {
+    return current;
+  }
+  return unique.find((email) => classifyOutreachEmail(email, company) === "personal");
+}
+
+/** Collapse a company label for matching ("Google Inc." → "google"). */
+export function normalizeCompanyToken(value: string): string {
   return value
     .toLowerCase()
     .replace(/&/g, " and ")
     .replace(/\b(inc|incorporated|llc|ltd|limited|corp|corporation|co|company|the)\b/g, "")
     .replace(/[^a-z0-9]/g, "");
+}
+
+export function wellKnownCompanyNames(): string[] {
+  return [...new Set(Object.values(DOMAIN_TO_COMPANY))];
 }
 
 function titleCaseLabel(label: string): string {

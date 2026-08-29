@@ -148,4 +148,28 @@ describe("core discovery HTTP integration", () => {
     expect(status.body.used).toBe(2);
     expect(status.body.limit).toBe(2);
   });
+
+  it("Apollo quota gate blocks after monthly limit", async () => {
+    app = await startHttpApp();
+    process.env.APOLLO_MONTHLY_LIMIT = "2";
+
+    await incrementProviderUsage(app.store, "apollo");
+    await incrementProviderUsage(app.store, "apollo");
+    await app.store.save();
+
+    const status = await app.fetchJson<{ allowed: boolean; used: number; limit?: number }>(
+      "/api/automation/can-use-provider/apollo",
+      { expectStatus: 200 },
+    );
+    expect(status.body.allowed).toBe(false);
+    expect(status.body.used).toBe(2);
+    expect(status.body.limit).toBe(2);
+
+    const usage = await app.fetchJson<{ apollo: { allowed: boolean; used: number } }>(
+      "/api/automation/provider-usage",
+      { expectStatus: 200 },
+    );
+    expect(usage.body.apollo.allowed).toBe(false);
+    expect(usage.body.apollo.used).toBe(2);
+  });
 });

@@ -45,9 +45,14 @@ describe("linkedIn navigation helpers", () => {
 });
 
 describe("pickBestEmail", () => {
-  it("prefers a verified email over one flagged as an error", () => {
+  it("prefers a verified email over one flagged as an error when the company is unknown", () => {
     const text = "Open in dashboard error ephinj@google.com Work content_copy thumb_up thumb_down verified ephinjose@gmail.com Personal";
     expect(pickBestEmail(text)).toBe("ephinjose@gmail.com");
+  });
+
+  it("keeps catch-all current-company work over verified Direct/personal", () => {
+    const text = "Open in dashboard error ephinj@google.com Work content_copy thumb_up thumb_down verified ephinjose@gmail.com Personal";
+    expect(pickBestEmail(text, "Google")).toBe("ephinj@google.com");
   });
 
   it("falls back to the first email when none are flagged verified", () => {
@@ -68,5 +73,28 @@ describe("pickBestEmail", () => {
     const panel =
       "Upgrade open_in_new remove Sara Manchester Technical Recruiter at Google Open in dashboard verified lustberg@google.com Work content_copy thumb_up thumb_down";
     expect(pickBestEmail(panel)).toBe("lustberg@google.com");
+  });
+
+  it("prefers current-company work over personal when both are on the panel", () => {
+    const text =
+      "verified atalnikov@gmail.com Personal content_copy verified atalnikov@apple.com Work content_copy";
+    expect(pickBestEmail(text, "Apple")).toBe("atalnikov@apple.com");
+  });
+
+  it("picks Apple work from the live Andy Talnikov SalesQL panel (catch-all Work + verified Direct)", () => {
+    const panel =
+      "Upgrade open_in_new remove Andy Talnikov Software Engineer at Apple Open in dashboard error atalnikov@apple.com Work content_copy thumb_up thumb_down verified a.v.talnikov@gmail.com Direct content_copy thumb_up thumb_down verified +1 4...... Work lock Unlock phone numbers.";
+    expect(pickBestEmail(panel, "Apple")).toBe("atalnikov@apple.com");
+    expect(pickBestEmail(panel)).toBe("a.v.talnikov@gmail.com");
+  });
+
+  it("prefers personal over a previous-employer work address", () => {
+    const text = "verified old.job@google.com Work content_copy verified atalnikov@gmail.com Personal";
+    expect(pickBestEmail(text, "Apple")).toBe("atalnikov@gmail.com");
+  });
+
+  it("does not pick a previous-employer work email when it is the only option", () => {
+    const text = "verified old.job@google.com Work content_copy";
+    expect(pickBestEmail(text, "Apple")).toBeUndefined();
   });
 });

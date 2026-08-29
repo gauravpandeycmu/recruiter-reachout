@@ -46,7 +46,7 @@ export type JobrightDiscoveryOutcome =
   | { status: "error"; message: string };
 
 /** Live Jobright toasts often need ~20–40s; 8s/20s produced false timeouts under load. */
-export const DEFAULT_RESULT_TIMEOUT_MS = 45_000;
+export const DEFAULT_RESULT_TIMEOUT_MS = 90_000;
 const DEFAULT_REVEAL_TIMEOUT_MS = 20_000;
 
 export async function discoverEmailOnJobright(

@@ -7,17 +7,21 @@ import {
   addEmailSample,
   bulkCreateCandidates,
   checkCandidateStatuses,
+  listKnownCompanyNames,
+  type CaptureCompanyHints,
   clearActiveCandidates,
   createCandidate,
   createEvent,
   generateContentForCompany,
   listEmailSamples,
   MAX_DISCOVERY_ATTEMPTS,
+  hasEligibleDiscoveryCandidate,
   nextDiscoveryCandidate,
   recordDiscoveryResult,
   removeEmailSample,
   requestDiscovery,
   requestSalesqlSweep,
+  patchCandidateFromClient,
   resolveContentForCandidate,
   setOutreachContent,
   previewEmail,
@@ -150,6 +154,76 @@ describe("api services", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("suggests a catalog company for a new LinkedIn profile and reuses a stored tag", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    bulkCreateCandidates(store, [
+      { fullName: "Ada Recruiter", linkedinUrl: "https://www.linkedin.com/in/ada-recruiter", company: "Citi" },
+    ]);
+    expect(listKnownCompanyNames(store)).toContain("Citi");
+
+    const [fresh] = checkCandidateStatuses(store, [
+      {
+        fullName: "Emily McLaughlin",
+        linkedinUrl: "https://www.linkedin.com/in/emilyomclaughlin",
+        title: "Leading product vision serving Citi's Investment Bank",
+        linkedinCompanySlug: "citi",
+      } as CaptureCompanyHints,
+    ]);
+    expect(fresh?.status).toBe("new");
+    expect(fresh?.suggestedCompany).toBe("Citi");
+
+    const [known] = checkCandidateStatuses(store, [
+      { fullName: "Ada Recruiter", linkedinUrl: "https://www.linkedin.com/in/ada-recruiter" },
+    ]);
+    expect(known?.suggestedCompany).toBe("Citi");
+    expect(known?.company).toBe("Citi");
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("keeps two distinct same-name recruiters at different companies when neither has a LinkedIn URL", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    // Same name, no LinkedIn URL, different companies — genuinely different people.
+    // The batch-internal dedupe used to key URL-less rows by name alone, silently
+    // dropping the second even though findExistingCandidate treats name+company as
+    // the identity (so it would never merge them at save time either).
+    const run = bulkCreateCandidates(store, [
+      { fullName: "John Smith", company: "Google" },
+      { fullName: "John Smith", company: "Meta" },
+    ]);
+
+    expect(run.map((result) => result.status)).toEqual(["saved_now", "saved_now"]);
+    expect(store.listCandidates()).toHaveLength(2);
+    expect(store.listCandidates().map((candidate) => candidate.company).sort()).toEqual(["Google", "Meta"]);
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("still dedupes two URL-less same-name rows at the SAME company within one import", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const run = bulkCreateCandidates(store, [
+      { fullName: "Jane Roe", company: "Google" },
+      { fullName: "Jane Roe", company: "Google" },
+    ]);
+
+    expect(run.map((result) => result.status)).toEqual(["saved_now"]);
+    expect(store.listCandidates()).toHaveLength(1);
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("patches missing profile photos when re-adding an active duplicate", async () => {
     const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
     const store = new Store(join(directory, "store.sqlite"));
@@ -174,6 +248,45 @@ describe("api services", () => {
     );
 
     store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("repairs saved company content with stale T-Mobile wording and missing LinkedIn message", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const dbPath = join(directory, "store.sqlite");
+    {
+      const store = new Store(dbPath);
+      await store.load();
+      store.upsertCompanyContent({
+        id: "apple",
+        company: "apple",
+        companyDisplayName: "Apple",
+        subject: "Software Engineer - CMU grad, 3 yrs exp",
+        body:
+          "Hi {firstName},\n\nI'm reaching out about req 200674361-0836.\n\nI am a graduate student at Carnegie Mellon University with 3 years of software engineering experience at Epsilon, and I'm currently interning at T-Mobile building AI infrastructure and backend systems.",
+        source: "generated",
+        generationContext: {
+          roleTitle: "Software Engineer - Darwin Server, Core OS",
+          jobUrl: "https://jobs.apple.com/en-us/details/200674361-0836/software-engineer-darwin-server-core-os",
+          linkedinPost: "Hiring software engineers for OS and systems technologies in Cupertino.",
+        },
+        createdAt: new Date(0).toISOString(),
+        updatedAt: new Date(0).toISOString(),
+      });
+      store.close();
+    }
+
+    const reopened = new Store(dbPath);
+    await reopened.load();
+    const repaired = reopened.getCompanyContent("apple");
+
+    expect(repaired?.body).toContain("I recently completed an Agentic AI internship at T-Mobile");
+    expect(repaired?.body).not.toContain("currently interning at T-Mobile");
+    expect(repaired?.linkedinSubject).toContain("Software Engineer - Darwin Server, Core OS");
+    expect(repaired?.linkedinMessage).toContain("Hi {firstName},");
+    expect(repaired?.linkedinMessage).toContain("I saw your post about");
+    expect(repaired?.linkedinMessage).toContain("attached my resume");
+    reopened.close();
     await rm(directory, { recursive: true, force: true });
   });
 
@@ -276,7 +389,15 @@ describe("email samples and per-company personalization", () => {
         new Response(
           JSON.stringify({
             candidates: [
-              { content: { parts: [{ text: '{"subject": "Hi {firstName} from Acme", "body": "Acme body"}' }] } },
+              {
+                content: {
+                  parts: [
+                    {
+                      text: '{"subject": "Hi {firstName} from Acme", "body": "Acme body", "linkedinSubject": "Acme role", "linkedinMessage": "Hi {firstName},\\n\\nI am reaching out about Acme Corp. I have attached my resume and would appreciate it if you could take a quick look at my application."}',
+                    },
+                  ],
+                },
+              },
             ],
           }),
           { status: 200 },
@@ -356,6 +477,9 @@ describe("email samples and per-company personalization", () => {
                     text: JSON.stringify({
                       subject: "SWE - Java, K8s",
                       body: "Hi {firstName},\n\nReaching out about 778812 (https://jobs.acme.com/778812).",
+                      linkedinSubject: "778812 at Acme Corp",
+                      linkedinMessage:
+                        "Hi {firstName},\n\nI'm reaching out about 778812 at Acme Corp. I have attached my resume and would appreciate it if you could take a quick look at my application.",
                     }),
                   },
                 ],
@@ -408,6 +532,31 @@ describe("automatic email discovery bookkeeping", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("read-only pending-work eligibility does not claim, and stays true while a claim is in flight", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const person = store.upsertCandidate(
+      createCandidate({
+        fullName: "Needs Lookup",
+        linkedinUrl: "https://linkedin.com/in/needs-lookup-peek",
+      }),
+    );
+
+    expect(hasEligibleDiscoveryCandidate(store)).toBe(true);
+    expect(store.listCandidates().find((row) => row.id === person.id)?.discoveryClaimedAt).toBeUndefined();
+
+    expect(nextDiscoveryCandidate(store)?.id).toBe(person.id);
+    expect(store.listCandidates().find((row) => row.id === person.id)?.discoveryClaimedAt).toBeTruthy();
+    // Dashboard / pending-work must keep waking the worker; counting only
+    // unclaimed people used to flip this false mid-lookup.
+    expect(hasEligibleDiscoveryCandidate(store)).toBe(true);
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("records a found email with high-confidence api_verified evidence", async () => {
     const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
     const store = new Store(join(directory, "store.sqlite"));
@@ -423,6 +572,140 @@ describe("automatic email discovery bookkeeping", () => {
     expect(updated.status).toBe("email_guessed");
     expect(updated.emailCandidates).toMatchObject([{ pattern: "api_verified", confidence: "high", evidence: "jobright" }]);
     expect(updated.lastDiscoveryAttemptAt).toBeDefined();
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("does not overwrite a user-chosen email when a late lookup reports found", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const candidate = store.upsertCandidate(
+      createCandidate({
+        fullName: "Jane Doe",
+        company: "Acme",
+        linkedinUrl: "https://linkedin.com/in/jane-doe-chosen",
+        email: "jane.chosen@acme.com",
+        emailCandidates: [
+          {
+            email: "jane.chosen@acme.com",
+            pattern: "first.last",
+            confidence: "high",
+            reason: "Pasted by user",
+          },
+        ],
+        status: "email_guessed",
+      }),
+    );
+
+    const updated = await recordDiscoveryResult(store, candidate.id, {
+      status: "found",
+      email: "jane.other@netflix.com",
+      provider: "jobright",
+    });
+
+    expect(updated.email).toBe("jane.chosen@acme.com");
+    expect(updated.company).toBe("Acme");
+    expect(updated.discoveryClaimedAt).toBeUndefined();
+    expect(updated.emailCandidates).toMatchObject([{ email: "jane.chosen@acme.com" }]);
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("patchCandidateFromClient applies email and copy, not claim or status", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const candidate = store.upsertCandidate(
+      createCandidate({
+        fullName: "Patch Person",
+        linkedinUrl: "https://linkedin.com/in/patch-person",
+        status: "new",
+      }),
+    );
+    store.updateCandidate(candidate.id, { discoveryClaimedAt: new Date().toISOString() });
+
+    expect(() =>
+      patchCandidateFromClient(store, candidate.id, {
+        discoveryClaimedAt: "2099-01-01T00:00:00.000Z",
+        status: "sent",
+        discoveryAttempts: 9,
+      }),
+    ).toThrow(/No updatable candidate fields/);
+
+    const updated = patchCandidateFromClient(store, candidate.id, {
+      email: "patch.person@acme.com",
+      discoveryClaimedAt: "2099-01-01T00:00:00.000Z",
+      status: "sent",
+      customSubject: "Hi there",
+      customBody: "Body for Patch",
+    });
+    expect(updated?.email).toBe("patch.person@acme.com");
+    expect(updated?.status).toBe("email_guessed");
+    expect(updated?.discoveryClaimedAt).toBeUndefined();
+    expect(updated?.customSubject).toBe("Hi there");
+    expect(updated?.customBody).toBe("Body for Patch");
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("does not save a previous-employer work email; personal mail still keeps the tagged company", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    // Tagged company is the current employer from the LinkedIn search. A work
+    // address at some other company is a previous job — do not send there.
+    const previousEmployer = store.upsertCandidate(
+      createCandidate({
+        fullName: "Jane Doe",
+        company: "Apple",
+        linkedinUrl: "https://linkedin.com/in/jane-doe-nflx",
+      }),
+    );
+    const skipped = await recordDiscoveryResult(store, previousEmployer.id, {
+      status: "found",
+      email: "jane.doe@google.com",
+    });
+    expect(skipped.email).toBeUndefined();
+    expect(skipped.status).not.toBe("email_guessed");
+    expect(skipped.company).toBe("Apple");
+    expect(skipped.lastError).toMatch(/previous employer/);
+
+    const currentWork = store.upsertCandidate(
+      createCandidate({
+        fullName: "Alex Talnikov",
+        company: "Apple",
+        linkedinUrl: "https://linkedin.com/in/atalnikov",
+      }),
+    );
+    const keptWork = await recordDiscoveryResult(store, currentWork.id, {
+      status: "found",
+      email: "atalnikov@apple.com",
+    });
+    expect(keptWork.email).toBe("atalnikov@apple.com");
+    expect(keptWork.company).toBe("Apple");
+
+    // A discovered PERSONAL-domain email is not an employer signal — the tagged
+    // company must be preserved (inferCompanyFromEmail returns undefined → no branch fires).
+    const personal = store.upsertCandidate(
+      createCandidate({
+        fullName: "John Roe",
+        company: "Stripe",
+        linkedinUrl: "https://linkedin.com/in/john-roe-personal",
+      }),
+    );
+    const keptTag = await recordDiscoveryResult(store, personal.id, {
+      status: "found",
+      email: "john.roe.personal@gmail.com",
+    });
+    expect(keptTag.email).toBe("john.roe.personal@gmail.com");
+    expect(keptTag.company).toBe("Stripe");
 
     store.close();
     await rm(directory, { recursive: true, force: true });
@@ -560,7 +843,74 @@ describe("automatic email discovery bookkeeping", () => {
     expect(revived.status).toBe("new");
     expect(revived.discoveryAttempts).toBe(0);
     expect(revived.lastDiscoveryAttemptAt).toBeUndefined();
+    // Manual "look up now" must queue, not claim — otherwise the dashboard
+    // steals the person from the worker the same way polling next-discovery did.
+    expect(revived.discoveryClaimedAt).toBeUndefined();
     expect(nextDiscoveryCandidate(store)?.id).toBe(stuck.id);
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("requestDiscovery releases an in-flight worker claim so lookup can run immediately", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const candidate = store.upsertCandidate(
+      createCandidate({ fullName: "Stuck Claim", linkedinUrl: "https://linkedin.com/in/stuck-claim" }),
+    );
+    const claimed = nextDiscoveryCandidate(store);
+    expect(claimed?.id).toBe(candidate.id);
+    expect(claimed?.discoveryClaimedAt).toBeTruthy();
+    expect(nextDiscoveryCandidate(store)).toBeUndefined();
+
+    const released = await requestDiscovery(store, candidate.id);
+    expect(released.discoveryClaimedAt).toBeUndefined();
+    expect(nextDiscoveryCandidate(store)?.id).toBe(candidate.id);
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("gives a re-added (bulk) previously-parked candidate a fresh discovery budget", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const linkedinUrl = "https://linkedin.com/in/parked-person";
+    const candidate = store.upsertCandidate(
+      createCandidate({ fullName: "Parked Person", linkedinUrl }),
+    );
+    // Exhaust the discovery budget so the candidate is parked at email_not_found.
+    for (let i = 0; i < MAX_DISCOVERY_ATTEMPTS; i += 1) {
+      await recordDiscoveryResult(store, candidate.id, { status: "not_found" });
+    }
+    const parked = store.listCandidates().find((c) => c.id === candidate.id)!;
+    expect(parked.status).toBe("email_not_found");
+    expect(parked.discoveryAttempts).toBe(MAX_DISCOVERY_ATTEMPTS);
+
+    // User removes the (never-contacted) candidate from today's batch...
+    await removeActiveCandidate(store, candidate.id);
+    expect(store.listActiveCandidates()).toHaveLength(0);
+
+    // ...then re-adds the same person via a fresh capture. No contact history, so
+    // saveOneBulkCandidate reactivates onto the batch and resets status to "new".
+    const [result] = bulkCreateCandidates(store, [{ fullName: "Parked Person", linkedinUrl }]);
+    expect(result?.existingCandidateId).toBe(candidate.id);
+
+    const reAdded = store.listCandidates().find((c) => c.id === candidate.id)!;
+    expect(reAdded.status).toBe("new");
+    // A fresh "new" status must come with a fresh discovery budget — otherwise the
+    // worker re-parks the re-added person after a single miss (attempts 3 -> 4 >= 3),
+    // silently giving them one attempt instead of the intended MAX_DISCOVERY_ATTEMPTS.
+    expect(reAdded.discoveryAttempts ?? 0).toBe(0);
+    expect(reAdded.lastError).toBeUndefined();
+
+    // Teeth: one miss after re-add must not immediately re-park the person.
+    const afterOneMiss = await recordDiscoveryResult(store, candidate.id, { status: "not_found" });
+    expect(afterOneMiss.status).not.toBe("email_not_found");
+    expect(afterOneMiss.discoveryAttempts).toBe(1);
 
     store.close();
     await rm(directory, { recursive: true, force: true });

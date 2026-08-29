@@ -43,6 +43,7 @@ describe("discovery -> send pipeline (TEST_MODE integration)", () => {
     process.env.TEST_MODE = "true";
     process.env.TEST_MODE_RECIPIENT_EMAIL = "tester@example.com";
     process.env.SALESQL_MONTHLY_LIMIT = "50";
+    process.env.APOLLO_MONTHLY_LIMIT = "50";
 
     store.setGmailAccount({
       id: "me@example.com",
@@ -85,6 +86,41 @@ describe("discovery -> send pipeline (TEST_MODE integration)", () => {
     expect(updated.email).toBe("jane.recruiter@acme.com");
     expect(updated.emailCandidates[0]?.evidence).toBe("salesql");
     expect(getProviderUsageCount(store, "salesql")).toBe(1);
+  });
+
+  it("records an Apollo discovery with apollo evidence and increments monthly quota", async () => {
+    const candidate = store.upsertCandidate(
+      createCandidate({ fullName: "Nick Recruiter", company: "Snowflake", linkedinUrl: "https://linkedin.com/in/nick" }),
+    );
+
+    expect(canUseDiscoveryProvider(store, "apollo").allowed).toBe(true);
+
+    const updated = await recordDiscoveryResult(store, candidate.id, {
+      status: "found",
+      email: "nick.choumitsky@snowflake.com",
+      provider: "apollo",
+      creditSpent: true,
+    });
+
+    expect(updated.email).toBe("nick.choumitsky@snowflake.com");
+    expect(updated.emailCandidates[0]?.evidence).toBe("apollo");
+    expect(getProviderUsageCount(store, "apollo")).toBe(1);
+    expect(getProviderUsageCount(store, "salesql")).toBe(0);
+  });
+
+  it("does not spend an Apollo credit when the email was already visible", async () => {
+    const candidate = store.upsertCandidate(
+      createCandidate({ fullName: "Nick Recruiter", company: "Snowflake", linkedinUrl: "https://linkedin.com/in/nick" }),
+    );
+
+    await recordDiscoveryResult(store, candidate.id, {
+      status: "found",
+      email: "nick.choumitsky@snowflake.com",
+      provider: "apollo",
+      creditSpent: false,
+    });
+
+    expect(getProviderUsageCount(store, "apollo")).toBe(0);
   });
 
   it("does not spend a SalesQL credit when the email was already visible (no Reveal Info click)", async () => {
@@ -215,6 +251,15 @@ describe("discovery -> send pipeline (TEST_MODE integration)", () => {
     }
 
     expect(canUseDiscoveryProvider(store, "salesql").allowed).toBe(false);
+  });
+
+  it("blocks Apollo usage once monthly quota is exhausted", async () => {
+    for (let index = 0; index < 50; index += 1) {
+      await incrementProviderUsage(store, "apollo");
+    }
+
+    expect(canUseDiscoveryProvider(store, "apollo").allowed).toBe(false);
+    expect(canUseDiscoveryProvider(store, "salesql").allowed).toBe(true);
   });
 
   it("clears forceProvider on conclusive SalesQL quota error", async () => {

@@ -4,7 +4,6 @@ import { resolve } from "node:path";
 import type { SetupLoginKind, SetupSessionStatus } from "@recruiter/shared";
 import { findRepoRoot } from "./repoRoot.js";
 
-const PROBE_TIMEOUT_MS = Number(process.env.SETUP_PROBE_TIMEOUT_MS ?? 90_000);
 const CACHE_MS = 30_000;
 
 let cachedStatus: SetupSessionStatus | undefined;
@@ -103,7 +102,10 @@ export async function spawnOpenLogin(kind: SetupLoginKind): Promise<{ started: b
 
   return {
     started: true,
-    note: `Opened headed Chromium for ${kind}. Sign in if prompted — check the Dock if you don't see the window.`,
+    note:
+      kind === "linkedin"
+        ? "Opened headed Chromium for LinkedIn with SalesQL and Apollo loaded. Sign in to LinkedIn, then to each sidebar if asked — check the Dock if you don't see the window."
+        : `Opened headed Chromium for ${kind}. Sign in if prompted — check the Dock if you don't see the window.`,
   };
 }
 
@@ -113,6 +115,13 @@ export async function probeSetupSessions(force = false): Promise<SetupSessionSta
     return cachedStatus;
   }
 
+  // HTTP integration tests must not launch Playwright session probes — that hung
+  // dashboard-poll tests on /api/setup/session-status (default 90s timeout).
+  if ((process.env.RECRUITER_SKIP_SESSION_PROBE ?? "").trim() === "1") {
+    return fallbackStatus("Session probe skipped in tests.");
+  }
+
+  const probeTimeoutMs = Number(process.env.SETUP_PROBE_TIMEOUT_MS ?? 90_000);
   const script = resolve(workerPackageDir(), "scripts/probe-sessions.ts");
   const tsx = tsxBinary();
 
@@ -127,8 +136,8 @@ export async function probeSetupSessions(force = false): Promise<SetupSessionSta
       let stderr = "";
       const timer = setTimeout(() => {
         child.kill("SIGTERM");
-        reject(new Error(`Session probe timed out after ${PROBE_TIMEOUT_MS / 1000}s. Close any stuck Chromium windows and retry.`));
-      }, PROBE_TIMEOUT_MS);
+        reject(new Error(`Session probe timed out after ${probeTimeoutMs / 1000}s. Close any stuck Chromium windows and retry.`));
+      }, Number.isFinite(probeTimeoutMs) ? probeTimeoutMs : 90_000);
 
       child.stdout.on("data", (chunk: Buffer) => {
         stdout += chunk.toString();

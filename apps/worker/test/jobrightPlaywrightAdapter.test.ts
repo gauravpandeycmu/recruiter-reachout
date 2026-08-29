@@ -168,71 +168,115 @@ describe("dismissJobrightPromoOverlays", () => {
 });
 
 describe("readRevealedEmail", () => {
-  it("reads the email from within the modal, ignoring a stale input elsewhere on the page", async () => {
-    // Regression: an unscoped page-wide input search can return a leftover
-    // email from a PRIOR candidate's modal, since Ant Design doesn't always
-    // destroy the modal DOM on close. Only the input inside THIS modal
-    // container (found via the visible "Connect Via Email" heading) must win.
-    const staleInputOutsideModal = {
-      inputValue: vi.fn(async () => "stale-previous-candidate@example.com"),
-    };
-    const freshInputInsideModal = {
-      inputValue: vi.fn(async () => "fresh-current-candidate@example.com"),
-    };
-    const modalContainer = {
+  function pageWithRevealModal(inputValues: string[]) {
+    const modal = {
+      waitFor: vi.fn(async () => undefined),
+      innerText: vi.fn(async () => ""),
       locator: vi.fn((selector: string) => {
-        expect(selector).toContain("input");
+        expect(selector).toBe("input, textarea");
         return {
-          count: vi.fn(async () => 1),
-          nth: vi.fn(() => freshInputInsideModal),
+          count: vi.fn(async () => inputValues.length),
+          nth: vi.fn((index: number) => ({
+            inputValue: vi.fn(async () => inputValues[index] ?? ""),
+          })),
         };
       }),
     };
-    const modalHeading = {
-      waitFor: vi.fn(async () => undefined),
-      locator: vi.fn((selector: string) => {
-        expect(selector).toContain("ancestor::div");
-        expect(selector).toContain("ant-modal");
-        return modalContainer;
-      }),
+    const chain = {
+      filter: vi.fn(() => chain),
+      or: vi.fn(() => chain),
+      last: vi.fn(() => modal),
     };
     const page = {
-      getByText: vi.fn(() => ({ first: () => modalHeading })),
-      // A page-wide input locator must never be consulted by readRevealedEmail.
-      locator: vi.fn(() => ({
-        count: vi.fn(async () => 1),
-        nth: vi.fn(() => staleInputOutsideModal),
-      })),
+      locator: vi.fn((selector: string) => {
+        if (selector === ".ant-modal") {
+          return chain;
+        }
+        return {
+          count: vi.fn(async () => 1),
+          nth: vi.fn(() => ({ inputValue: vi.fn(async () => "stale-previous-candidate@example.com") })),
+        };
+      }),
+      getByRole: vi.fn(() => chain),
+      getByText: vi.fn(() => ({ first: () => ({ waitFor: vi.fn(), locator: vi.fn() }) })),
     };
+    return { page, modal };
+  }
 
+  it("reads the email from the Connect Via Email modal, ignoring a stale input elsewhere on the page", async () => {
+    const { page } = pageWithRevealModal([
+      "https://www.linkedin.com/in/ephinjose/",
+      "fresh-current-candidate@example.com",
+      "Seeking Your Advice",
+    ]);
     const adapter = createJobrightPlaywrightAdapter(page as never);
-    const email = await adapter.readRevealedEmail(5000);
-
-    expect(email).toBe("fresh-current-candidate@example.com");
-    expect(staleInputOutsideModal.inputValue).not.toHaveBeenCalled();
-    expect(freshInputInsideModal.inputValue).toHaveBeenCalled();
+    await expect(adapter.readRevealedEmail(50)).resolves.toBe("fresh-current-candidate@example.com");
+    expect(page.locator).toHaveBeenCalledWith(".ant-modal");
   });
 
   it("returns undefined when no input inside the modal contains an email", async () => {
-    const modalContainer = {
-      locator: vi.fn(() => ({
-        count: vi.fn(async () => 0),
-        nth: vi.fn(),
-      })),
-    };
-    const modalHeading = {
-      waitFor: vi.fn(async () => undefined),
-      locator: vi.fn(() => modalContainer),
-    };
-    const page = {
-      getByText: vi.fn(() => ({ first: () => modalHeading })),
-      locator: vi.fn(() => ({
-        count: vi.fn(async () => 1),
-        nth: vi.fn(() => ({ inputValue: vi.fn(async () => "should-never-be-read@example.com") })),
-      })),
-    };
-
+    const { page } = pageWithRevealModal(["https://www.linkedin.com/in/jane/"]);
     const adapter = createJobrightPlaywrightAdapter(page as never);
-    expect(await adapter.readRevealedEmail(5000)).toBeUndefined();
+    await expect(adapter.readRevealedEmail(50)).resolves.toBeUndefined();
+  });
+});
+
+describe("waitForContactResult", () => {
+  function resultLocator(text: string, visible: boolean) {
+    const loc: {
+      waitFor: () => Promise<void>;
+      isVisible: () => Promise<boolean>;
+      textContent: () => Promise<string>;
+      first: () => unknown;
+      or: () => unknown;
+      locator: () => { textContent: () => Promise<string> };
+    } = {
+      waitFor: async () => {
+        if (!visible) {
+          throw new Error("Timeout");
+        }
+      },
+      isVisible: async () => visible,
+      textContent: async () => text,
+      first: () => loc,
+      or: () => loc,
+      locator: () => ({ textContent: async () => text }),
+    };
+    return loc;
+  }
+
+  it("returns found: false (not timedOut) when Jobright shows a miss toast", async () => {
+    const miss = resultLocator("Contact Info Not Found!", true);
+    const connectNow = resultLocator("", false);
+    const page = {
+      getByText: vi.fn(() => miss),
+      getByRole: vi.fn(() => connectNow),
+    };
+    const adapter = createJobrightPlaywrightAdapter(page as never);
+    await expect(adapter.waitForContactResult(1_000)).resolves.toEqual({ found: false });
+  });
+
+  it("returns timedOut when neither a result toast nor Connect Now appears", async () => {
+    const none = resultLocator("", false);
+    const page = {
+      getByText: vi.fn(() => none),
+      getByRole: vi.fn(() => none),
+    };
+    const adapter = createJobrightPlaywrightAdapter(page as never);
+    await expect(adapter.waitForContactResult(1_000)).resolves.toEqual({ found: false, timedOut: true });
+  });
+
+  it("returns found when the Contact Info Found toast is visible", async () => {
+    const found = resultLocator("✅ Contact Info Found! Ephin Principal Recruiter @ Google", true);
+    const connectNow = resultLocator("Connect Now", true);
+    const page = {
+      getByText: vi.fn(() => found),
+      getByRole: vi.fn(() => connectNow),
+    };
+    const adapter = createJobrightPlaywrightAdapter(page as never);
+    await expect(adapter.waitForContactResult(1_000)).resolves.toMatchObject({
+      found: true,
+      titleAndCompany: expect.stringContaining("Ephin"),
+    });
   });
 });

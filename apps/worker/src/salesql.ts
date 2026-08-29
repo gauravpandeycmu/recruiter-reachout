@@ -14,7 +14,7 @@ export interface SalesqlPageAdapter {
   navigateToProfile(linkedinUrl: string): Promise<void>;
   waitForOverlay(timeoutMs: number): Promise<SalesqlOverlayResult>;
   clickRevealInfo(): Promise<void>;
-  readRevealedEmail(timeoutMs: number): Promise<string | undefined>;
+  readRevealedEmail(timeoutMs: number, company?: string): Promise<string | undefined>;
   /** Optional: classify the open panel when no email was parsed (e.g. "No Emails Found"). */
   readPanelStatus?(): Promise<"no_emails" | "not_found" | "unknown">;
   closeOverlay(): Promise<void>;
@@ -25,6 +25,8 @@ export interface SalesqlDiscoveryOptions {
   dryRun: boolean;
   overlayTimeoutMs?: number;
   revealTimeoutMs?: number;
+  /** Tagged company from capture — used to prefer current-employer work mail over personal / old jobs. */
+  company?: string;
 }
 
 export type SalesqlDiscoveryOutcome =
@@ -76,7 +78,7 @@ export async function discoverEmailOnSalesql(
     // SalesQL often already shows a verified email for previously-revealed
     // profiles (no Reveal click needed). Read first so we don't burn a credit
     // or miss an already-visible address when Reveal Info is absent/disabled.
-    const alreadyVisible = await adapter.readRevealedEmail(1500);
+    const alreadyVisible = await adapter.readRevealedEmail(1500, options.company);
     if (alreadyVisible?.includes("@")) {
       await adapter.closeOverlay();
       return { status: "found", email: alreadyVisible.trim().toLowerCase(), creditSpent: false };
@@ -84,7 +86,7 @@ export async function discoverEmailOnSalesql(
 
     await adapter.clickRevealInfo();
     creditSpent = true;
-    const email = await adapter.readRevealedEmail(options.revealTimeoutMs ?? DEFAULT_REVEAL_TIMEOUT_MS);
+    const email = await adapter.readRevealedEmail(options.revealTimeoutMs ?? DEFAULT_REVEAL_TIMEOUT_MS, options.company);
     const panelHint = await adapter.readPanelStatus?.();
     await adapter.closeOverlay();
 

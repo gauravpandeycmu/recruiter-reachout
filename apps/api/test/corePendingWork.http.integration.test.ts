@@ -103,6 +103,35 @@ describe("core pending-work HTTP integration", () => {
     expect(pending.body.hasCapture).toBe(true);
   });
 
+  it("flags hasDiscovery while a claim is in flight (does not treat claim as idle)", async () => {
+    app = await startHttpApp();
+    const person = app.store.upsertCandidate(
+      createCandidate({
+        fullName: "In Flight Lookup",
+        firstName: "In",
+        company: "ClaimCo",
+        linkedinUrl: "https://www.linkedin.com/in/in-flight-lookup",
+        status: "new",
+      }),
+    );
+    await app.store.save();
+
+    const before = await app.fetchJson<{ hasDiscovery: boolean }>("/api/automation/pending-work", {
+      expectStatus: 200,
+    });
+    expect(before.body.hasDiscovery).toBe(true);
+
+    await app.fetchJson("/api/automation/next-discovery", { expectStatus: 200 });
+    expect(app.store.listCandidates().find((c) => c.id === person.id)?.discoveryClaimedAt).toBeTruthy();
+
+    const mid = await app.fetchJson<{ hasDiscovery: boolean }>("/api/automation/pending-work", {
+      expectStatus: 200,
+    });
+    // Previously this flipped false while claimed, which let the worker self-exit
+    // and orphan Jobright/SalesQL mid-lookup.
+    expect(mid.body.hasDiscovery).toBe(true);
+  });
+
   it("flags hasEnrich when a scheduled person is added with LinkedIn", async () => {
     app = await startHttpApp();
     const seed = seedReady("First", "EnrichHttp", "first@enrichhttp.com");

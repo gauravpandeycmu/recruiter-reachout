@@ -1,7 +1,7 @@
 import type { Page } from "playwright";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SendJob } from "@recruiter/shared";
-import { runSendPass } from "../src/sendPass.js";
+import { isSafeClosedBrowserRetry, runSendPass } from "../src/sendPass.js";
 
 vi.mock("../src/gmailSend.js", () => ({
   executeSendJob: vi.fn(),
@@ -27,6 +27,44 @@ function baseJob(overrides: Partial<SendJob> = {}): SendJob {
 }
 
 const fakePage = {} as Page;
+
+// Direct teeth on the double-send guard's reason-string classifier. Only a
+// browser death that happened *before* Send could have been clicked is safe to
+// relaunch+retry; anything that could have already sent (post-send page
+// teardown / waitForTimeout) must NOT retry. Widening this set silently
+// re-opens the 2026-07-15 double-send class.
+describe("isSafeClosedBrowserRetry", () => {
+  it("retries a browser death during compose/fill/streak/pre-send navigation", () => {
+    expect(isSafeClosedBrowserRetry("openCompose: Target page has been closed")).toBe(true);
+    expect(isSafeClosedBrowserRetry("fillCompose recipients field: browser has been closed")).toBe(true);
+    expect(isSafeClosedBrowserRetry("ensureStreakTrackingOn: context has been closed")).toBe(true);
+    expect(isSafeClosedBrowserRetry("page.goto inbox: Target page, context or browser has been closed")).toBe(true);
+    expect(isSafeClosedBrowserRetry("Message Body field gone: browser closed")).toBe(true);
+  });
+
+  it("NEVER retries a post-send teardown (waitForTimeout close = maybe already sent)", () => {
+    // This is the exact string that double-sent every morning mail on 2026-07-15.
+    expect(
+      isSafeClosedBrowserRetry("page.waitForTimeout: Target page, context or browser has been closed"),
+    ).toBe(false);
+    // Even if a "safe" pre-send keyword also appears, waitForTimeout wins (no retry).
+    expect(
+      isSafeClosedBrowserRetry("streak settle page.waitForTimeout: browser has been closed"),
+    ).toBe(false);
+  });
+
+  it("does not retry a non-closed-browser error (genuine failure, not a browser death)", () => {
+    expect(isSafeClosedBrowserRetry("Could not find Gmail Send button.")).toBe(false);
+    expect(isSafeClosedBrowserRetry("Streak tracking toggle in unexpected state")).toBe(false);
+    expect(isSafeClosedBrowserRetry("Timed out waiting for compose")).toBe(false);
+  });
+
+  it("does not retry a closed browser after an unclassified (possibly post-send) stage", () => {
+    // Closed, but no pre-send keyword → we can't prove it was before Send → don't retry.
+    expect(isSafeClosedBrowserRetry("Target page has been closed")).toBe(false);
+    expect(isSafeClosedBrowserRetry("send_settle_done: browser closed")).toBe(false);
+  });
+});
 
 describe("runSendPass", () => {
   beforeEach(() => {
@@ -257,6 +295,52 @@ describe("runSendPass", () => {
     expect(getPage).toHaveBeenCalledTimes(2);
     expect(executeSendJob).toHaveBeenCalledTimes(2);
     expect(result).toEqual({ result: "worked", jobId: job.id, outcome: "sent" });
+  });
+
+  it("treats a retried attempt that clicked Send then tore down as sent (no double-send)", async () => {
+    // Attempt 1: browser dies BEFORE Send (safe → relaunch + retry).
+    // Attempt 2: Send is clicked, then the page tears down during settle.
+    // The assume-sent guard must apply to the RETRIED outcome too, otherwise the
+    // likely-sent email is reported failed → user retry → double send.
+    const job = baseJob();
+    vi.mocked(executeSendJob)
+      .mockImplementationOnce(async () => ({
+        status: "error",
+        reason: "Could not open Gmail Compose: Target page, context or browser has been closed",
+      }))
+      .mockImplementationOnce(async ({ onStage }) => {
+        onStage?.("send_clicked");
+        return {
+          status: "error",
+          reason: "page.waitForTimeout: Target page, context or browser has been closed",
+        };
+      });
+    const getPage = vi.fn().mockResolvedValue(fakePage);
+    const apiClient = {
+      fetchNextSendJob: vi.fn().mockResolvedValue(job),
+      fetchSendJob: vi.fn().mockResolvedValue(job),
+      reportWorkerStatus: vi.fn().mockResolvedValue(undefined),
+      reportSendResult: vi.fn().mockResolvedValue(undefined),
+      touchSendJob: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const result = await runSendPass({
+      apiClient: apiClient as never,
+      getPage,
+      log: () => {},
+    });
+
+    expect(executeSendJob).toHaveBeenCalledTimes(2);
+    expect(result).toEqual({ result: "worked", jobId: job.id, outcome: "sent" });
+    expect(apiClient.reportSendResult).toHaveBeenCalledWith(job.id, {
+      success: true,
+      scheduledInGmail: false,
+    });
+    // Never reported as a failure (that is the double-send trap).
+    expect(apiClient.reportSendResult).not.toHaveBeenCalledWith(
+      job.id,
+      expect.objectContaining({ success: false }),
+    );
   });
 
   it("treats post-Send page teardown as success and does not re-send", async () => {

@@ -104,6 +104,33 @@ function workerLogPath(): string {
   return resolve(dir, "worker-supervisor.log");
 }
 
+function signalRunningWorker(signal: NodeJS.Signals = "SIGUSR1"): boolean {
+  const pid = managedChild?.pid;
+  if (pid && isPidAlive(pid)) {
+    try {
+      process.kill(pid, signal);
+      return true;
+    } catch {
+      // fall through to lock-based pid
+    }
+  }
+
+  const lockPath = resolve(workerPackageDir(), "data", "worker.pid");
+  if (!existsSync(lockPath)) {
+    return false;
+  }
+  try {
+    const lockPid = Number(readFileSync(lockPath, "utf8").trim());
+    if (!isPidAlive(lockPid)) {
+      return false;
+    }
+    process.kill(lockPid, signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * If background automation is offline (or left a stale "online" heartbeat), spawn the worker.
  * Safe to call often — cooldown + live-pid checks prevent duplicate starts.
@@ -114,15 +141,33 @@ export async function ensureWorkerRunning(store: Store): Promise<{
   started: boolean;
   note?: string;
 }> {
+  return ensureWorkerRunningWithOptions(store);
+}
+
+export async function ensureWorkerRunningWithOptions(
+  store: Store,
+  options: { wakeRunningWorker?: boolean } = {},
+): Promise<{
+  online: boolean;
+  starting: boolean;
+  started: boolean;
+  note?: string;
+}> {
   const view = getWorkerStatusView(store);
   const processAlive = isManagedProcessAlive() || isWorkerLockAlive();
   // Heartbeat alone is not enough — a crashed worker can look "online" for up to 3 minutes.
   if (view.online && processAlive) {
     startingUntil = 0;
+    if (options.wakeRunningWorker) {
+      signalRunningWorker();
+    }
     return { online: true, starting: false, started: false };
   }
 
   if (processAlive || Date.now() < startingUntil) {
+    if (processAlive && options.wakeRunningWorker) {
+      signalRunningWorker();
+    }
     return {
       online: view.online && processAlive,
       starting: !view.online || !processAlive,

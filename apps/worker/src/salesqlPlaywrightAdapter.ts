@@ -1,5 +1,8 @@
 import type { Frame, Page } from "playwright";
 import type { SalesqlPageAdapter } from "./salesql.js";
+import { pickBestEmail } from "./overlayEmail.js";
+
+export { pickBestEmail } from "./overlayEmail.js";
 
 /**
  * SalesQL's LinkedIn widget ships with per-build obfuscated CSS-module class
@@ -450,7 +453,7 @@ export function createSalesqlPlaywrightAdapter(page: Page): SalesqlPageAdapter {
       }
     },
 
-    async readRevealedEmail(timeoutMs: number): Promise<string | undefined> {
+    async readRevealedEmail(timeoutMs: number, company?: string): Promise<string | undefined> {
       const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
         // IMPORTANT: only read from the open SalesQL panel. Scanning page-wide
@@ -460,7 +463,7 @@ export function createSalesqlPlaywrightAdapter(page: Page): SalesqlPageAdapter {
         // from Shannon Garrett's prior lookup).
         const panelText = await readOpenPanelText(page);
         if (panelText) {
-          const email = pickBestEmail(panelText);
+          const email = pickBestEmail(panelText, company);
           if (email) {
             return email;
           }
@@ -530,32 +533,3 @@ async function readOpenPanelText(page: Page): Promise<string> {
   return "";
 }
 
-const EMAIL_PATTERN = /[\w.+-]+@[\w.-]+\.\w+/g;
-const CONTEXT_WINDOW = 30;
-
-/** Picks the best candidate email from panel text, preferring "verified" over error-flagged entries. */
-export function pickBestEmail(text: string): string | undefined {
-  const matches = Array.from(text.matchAll(EMAIL_PATTERN));
-  if (matches.length === 0) {
-    return undefined;
-  }
-
-  const candidates = matches.map((match) => {
-    const start = Math.max(0, (match.index ?? 0) - CONTEXT_WINDOW);
-    const end = Math.min(text.length, (match.index ?? 0) + match[0].length + CONTEXT_WINDOW);
-    const context = text.slice(start, end).toLowerCase();
-    return { email: match[0].toLowerCase(), context };
-  });
-
-  const verified = candidates.find((candidate) => candidate.context.includes("verified") && !candidate.context.includes("error"));
-  if (verified) {
-    return verified.email;
-  }
-
-  const notFlaggedError = candidates.find((candidate) => !candidate.context.includes("error"));
-  if (notFlaggedError) {
-    return notFlaggedError.email;
-  }
-
-  return candidates[0]?.email;
-}

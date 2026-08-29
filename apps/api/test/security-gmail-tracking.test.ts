@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createGmailAccount, getFreshAccessToken, getGmailAuthUrl } from "../src/gmail.js";
 import { decryptSecret, encryptSecret } from "../src/security.js";
-import { addPublicTracking, getPublicTrackingBaseUrl, mapRelayEventToLocal } from "../src/tracking.js";
+import { addPublicTracking, getOrCreateTrackingLink, getPublicTrackingBaseUrl, mapRelayEventToLocal, safeTrackingRedirectUrl } from "../src/tracking.js";
 import { Store } from "../src/store.js";
 
 describe("security gmail and tracking", () => {
@@ -71,5 +71,23 @@ describe("security gmail and tracking", () => {
 
     store.close();
     await rm(directory, { recursive: true, force: true });
+  });
+
+  it("reuses one tracking link per candidate instead of minting a new id on every preview", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+    const first = getOrCreateTrackingLink(store, "candidate-1");
+    const second = getOrCreateTrackingLink(store, "candidate-1");
+    expect(second.id).toBe(first.id);
+    expect(store.listTrackingLinks()).toHaveLength(1);
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("rejects javascript and data click redirect targets", () => {
+    expect(safeTrackingRedirectUrl("javascript:alert(1)")).toBe("https://mail.google.com");
+    expect(safeTrackingRedirectUrl("data:text/html,hi")).toBe("https://mail.google.com");
+    expect(safeTrackingRedirectUrl("https://example.com/job")).toBe("https://example.com/job");
   });
 });

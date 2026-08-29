@@ -71,6 +71,7 @@ export interface EnvReport {
   ok: boolean;
   warnings: string[];
   testMode: { enabled: boolean; recipient?: string };
+  sendIntervalMinutes: number;
 }
 
 export interface CompanyHistoryResponse {
@@ -264,6 +265,8 @@ export function applyBatchPreviewEdits(input: {
   company: string;
   subject: string;
   body: string;
+  linkedinSubject?: string;
+  linkedinMessage?: string;
   sourceCandidateId: string;
 }): Promise<{ companyContent: CompanyContent; updatedCandidates: number }> {
   return request("/api/batch-preview-edits", {
@@ -526,7 +529,11 @@ export function updateTestModeSettings(patch: {
 }
 
 export function getJobBacklog(): Promise<{ jobs: JobBacklogSummary[] }> {
-  return request<{ jobs: JobBacklogSummary[] }>("/api/backlog/jobs");
+  // Send the browser's UTC offset so "scheduled today" uses the user's local-day
+  // boundary, not UTC (else morning sends drop off the count each evening once
+  // UTC rolls to the next date in a negative-offset timezone).
+  const tzOffset = -new Date().getTimezoneOffset();
+  return request<{ jobs: JobBacklogSummary[] }>(`/api/backlog/jobs?tzOffset=${tzOffset}`);
 }
 
 export function syncBounces(): Promise<{ parsed: number; events: BounceEvent[] }> {
@@ -632,15 +639,6 @@ async function generateCompanyContentStream(
     throw new Error("Generation stream ended without a result.");
   }
   return result;
-}
-
-export function nextDiscoveryCandidate(): Promise<RecruiterCandidate | undefined> {
-  return request<RecruiterCandidate | undefined>("/api/automation/next-discovery").catch((error: Error) => {
-    if (error.message.includes("No candidates need discovery")) {
-      return undefined;
-    }
-    throw error;
-  });
 }
 
 export function requestDiscovery(id: string, options: { forceSalesql?: boolean } = {}): Promise<RecruiterCandidate> {

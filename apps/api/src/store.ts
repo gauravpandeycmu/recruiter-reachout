@@ -23,6 +23,7 @@ import type {
   DiscoverySettings,
   TestModeSettings,
   SendJob,
+  SendJobStatus,
   LinkedInCaptureJob,
   LinkedInProfileEnrichJob,
   AnalyticsGoalSettings,
@@ -89,6 +90,7 @@ export class Store {
     this.repairCompaniesFromEmails();
     this.repairDoubledNames();
     this.repairLinkedInDuplicates();
+    this.repairLegacyCompanyContent();
   }
 
   async load(): Promise<void> {
@@ -163,6 +165,26 @@ export class Store {
           isActive: mergedActive ? true : false,
           archivedAt: mergedActive ? undefined : keeper.archivedAt ?? duplicate.archivedAt,
         });
+        // Re-point the merged-away row's outreach history onto the keeper before
+        // deleting it. Otherwise the duplicate's send/open/click events are
+        // orphaned (candidateId points at a now-deleted row), which makes
+        // hasContactHistory() report the person as never-contacted — re-adding
+        // them stops being flagged "previously contacted" and could re-email
+        // someone already reached — and drops their history from company analytics.
+        this.reassignCandidateEvents(duplicate.id, keeper.id);
+        // Re-point the duplicate's send queue rows + jobs too. The events move
+        // (above) fixed hasContactHistory, but scheduleToday's own double-send
+        // guard keys off `sent` queue rows / `completed` jobs by candidateId — if
+        // those stay orphaned on the deleted duplicate the keeper looks
+        // never-emailed and the backlog scheduler re-sends to someone already
+        // contacted.
+        this.reassignCandidateSendState(duplicate.id, keeper.id);
+        // Re-point the duplicate's LinkedIn profile-enrich jobs too. A pending
+        // enrich job orphaned onto the deleted candidate keeps `hasEnrich` true
+        // (getPendingWorkerWork), so the worker keeps waking + launching a browser
+        // to enrich a candidate that no longer exists — a battery leak — and the
+        // keeper (who could use the photo) never gets enriched.
+        this.reassignCandidateEnrichJobs(duplicate.id, keeper.id);
         this.deleteRecord("candidates", duplicate.id);
         this.contactIndex.unindexCandidate(duplicate);
         removed.add(duplicate.id);
@@ -173,6 +195,171 @@ export class Store {
       this.contactIndex.rebuild(this.listCandidates());
     }
     return fixed;
+  }
+
+  repairLegacyCompanyContent(): number {
+    let fixed = 0;
+    for (const content of this.listCompanyContent()) {
+      const nextBody = normalizeCompletedInternshipPhrasing(content.body);
+      const nextLinkedinSubject = content.linkedinSubject?.trim() || buildFallbackLinkedinSubject(content);
+      const nextLinkedin = content.linkedinMessage?.trim()
+        ? normalizeLinkedinMessage(normalizeCompletedInternshipPhrasing(content.linkedinMessage))
+        : buildFallbackLinkedinMessage(content);
+      if (
+        nextBody === content.body &&
+        nextLinkedinSubject === content.linkedinSubject &&
+        nextLinkedin === content.linkedinMessage
+      ) {
+        continue;
+      }
+      this.upsertCompanyContent({
+        ...content,
+        body: nextBody,
+        linkedinSubject: nextLinkedinSubject,
+        linkedinMessage: nextLinkedin,
+        updatedAt: new Date().toISOString(),
+      });
+      fixed += 1;
+    }
+    return fixed;
+  }
+
+  /** Move a merged duplicate's tracking events onto the keeper so its outreach
+   *  history survives the row deletion (events are keyed by id, so re-pointing
+   *  candidateId never duplicates them). */
+  private reassignCandidateEvents(fromId: string, toId: string): void {
+    for (const event of this.listEvents()) {
+      if (event.candidateId !== fromId) {
+        continue;
+      }
+      this.putJson("tracking_events", event.id, { ...event, candidateId: toId });
+    }
+  }
+
+  /**
+   * Move a merged duplicate's send queue rows + send jobs onto the keeper so the
+   * "already emailed / already scheduled" signals survive the row deletion.
+   * Terminal rows/jobs (sent/completed/failed) re-point unchanged. A LIVE
+   * (pending/in_progress) job is only re-pointed if the keeper has no live job of
+   * its own — otherwise re-pointing a second live job for the same person would
+   * make the worker send twice, so the redundant one is failed instead (and its
+   * still-active queue row neutralized so nothing resurrects it).
+   */
+  private reassignCandidateSendState(fromId: string, toId: string): void {
+    const now = new Date().toISOString();
+    const supersededReason = "Superseded by duplicate-candidate merge";
+    const isLive = (status: SendJobStatus): boolean => status === "pending" || status === "in_progress";
+    let keeperHasLiveJob = this.listSendJobs().some(
+      (job) => job.candidateId === toId && isLive(job.status),
+    );
+    const redundantQueueIds = new Set<string>();
+    for (const job of this.listSendJobs()) {
+      if (job.candidateId !== fromId) {
+        continue;
+      }
+      if (isLive(job.status)) {
+        if (keeperHasLiveJob) {
+          if (job.queueItemId) {
+            redundantQueueIds.add(job.queueItemId);
+          }
+          this.putJson("send_jobs", job.id, {
+            ...job,
+            candidateId: toId,
+            status: "failed",
+            failureReason: supersededReason,
+            updatedAt: now,
+          });
+          continue;
+        }
+        keeperHasLiveJob = true;
+      }
+      this.putJson("send_jobs", job.id, { ...job, candidateId: toId });
+    }
+    // A queue row that still has ANY job (pending/failed/completed) is never
+    // re-healed; a job-LESS `scheduled`/`queued` row IS — `healOrphanedScheduled-
+    // SendJobs` mints a fresh pending job for it. So a job-less active row the
+    // duplicate brings over can manufacture a SECOND live send for the same
+    // person even though the redundant-live-job guard above found nothing to fail.
+    const queueIdsWithAnyJob = new Set(
+      this.listSendJobs().map((job) => job.queueItemId).filter((id): id is string => Boolean(id)),
+    );
+    // Does the surviving person already have a send from a source other than the
+    // duplicate's job-less rows — a live job, or the keeper's own active
+    // (scheduled/queued) row (which heal will back, or which already represents an
+    // in-flight / already-sent send)? If so, each job-less active row the
+    // duplicate contributes is a redundant re-send.
+    let keeperHasSend =
+      keeperHasLiveJob ||
+      this.listSendQueue().some(
+        (item) => item.candidateId === toId && (item.status === "scheduled" || item.status === "queued"),
+      );
+    for (const item of this.listSendQueue()) {
+      if (item.candidateId !== fromId) {
+        continue;
+      }
+      let neutralize =
+        redundantQueueIds.has(item.id) &&
+        (item.status === "scheduled" || item.status === "queued" || item.status === "paused");
+      if (
+        !neutralize &&
+        (item.status === "scheduled" || item.status === "queued") &&
+        !queueIdsWithAnyJob.has(item.id)
+      ) {
+        // Job-less active row inherited from the duplicate. Keep exactly one such
+        // send for the person — neutralize the rest so the same recruiter can't be
+        // scheduled (and emailed) twice once heal recreates their jobs.
+        if (keeperHasSend) {
+          neutralize = true;
+        } else {
+          keeperHasSend = true;
+        }
+      }
+      this.putJson("send_queue", item.id, {
+        ...item,
+        candidateId: toId,
+        ...(neutralize
+          ? { status: "failed" as const, failureReason: supersededReason, updatedAt: now }
+          : {}),
+      });
+    }
+  }
+
+  /**
+   * Move a merged duplicate's LinkedIn profile-enrich jobs onto the keeper. A
+   * live (pending/in_progress) job whose profile the keeper already has a live
+   * enrich job for is redundant — failing it avoids a second wasted LinkedIn
+   * scrape — while any other job re-points so the keeper still gets enriched
+   * instead of the enrichment being lost on a deleted candidate id.
+   */
+  private reassignCandidateEnrichJobs(fromId: string, toId: string): void {
+    const now = new Date().toISOString();
+    const isLive = (status: LinkedInProfileEnrichJob["status"]): boolean =>
+      status === "pending" || status === "in_progress";
+    const keeperLiveUrls = new Set(
+      this.listLinkedInProfileEnrichJobs()
+        .filter((job) => job.candidateId === toId && isLive(job.status))
+        .map((job) => normalizeLinkedInUrl(job.linkedinUrl)),
+    );
+    for (const job of this.listLinkedInProfileEnrichJobs()) {
+      if (job.candidateId !== fromId) {
+        continue;
+      }
+      const url = normalizeLinkedInUrl(job.linkedinUrl);
+      if (isLive(job.status) && keeperLiveUrls.has(url)) {
+        this.putJson("linkedin_profile_enrich_jobs", job.id, {
+          ...job,
+          candidateId: toId,
+          status: "failed",
+          failureReason: "Superseded by duplicate-candidate merge",
+          updatedAt: now,
+        });
+        continue;
+      }
+      if (isLive(job.status)) {
+        keeperLiveUrls.add(url);
+      }
+      this.putJson("linkedin_profile_enrich_jobs", job.id, { ...job, candidateId: toId });
+    }
   }
 
   private areSamePerson(left: RecruiterCandidate, right: RecruiterCandidate): boolean {
@@ -575,6 +762,13 @@ export class Store {
     return this.getJson<TrackingLink>("tracking_links", id);
   }
 
+  /** Stable per-person link. `getTrackingLink` is keyed by link id, not candidate id. */
+  getTrackingLinkForCandidate(candidateId: string): TrackingLink | undefined {
+    return this.listTrackingLinks()
+      .filter((link) => link.candidateId === candidateId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
+  }
+
   listTrackingLinks(): TrackingLink[] {
     return this.listJson<TrackingLink>("tracking_links");
   }
@@ -802,4 +996,96 @@ export class Store {
 
 function countEvents(events: TrackingEvent[], type: TrackingEvent["type"]): number {
   return events.filter((event) => event.type === type).length;
+}
+
+function normalizeCompletedInternshipPhrasing(value: string): string {
+  return value
+    .replace(
+      /\bI(?:'m| am)\s+currently\s+interning\s+at\s+T-Mobile\s+building\s+AI\s+infrastructure\s+and\s+backend\s+systems\b/gi,
+      "I recently completed an Agentic AI internship at T-Mobile, where I built AI infrastructure and backend systems",
+    )
+    .replace(
+      /\bI(?:'m| am)\s+currently\s+interning\s+at\s+T-Mobile\s+building\s+backend\s+systems\b/gi,
+      "I recently completed an internship at T-Mobile, where I built backend systems",
+    )
+    .replace(
+      /\bI(?:'m| am)\s+currently\s+interning\s+at\s+T-Mobile\s+focusing\s+on\s+backend\s+systems\s+and\s+AI\s+infrastructure\b/gi,
+      "I recently completed an Agentic AI internship at T-Mobile, focused on backend systems and AI infrastructure",
+    );
+}
+
+function buildFallbackLinkedinMessage(content: CompanyContent): string {
+  const company = content.companyDisplayName || content.company;
+  const roleTitle = content.generationContext?.roleTitle?.trim();
+  const jobId =
+    content.body.match(/\b(?:req|job(?:\s+id)?)\s+([A-Z0-9][A-Z0-9/_-]{2,36})\b/i)?.[1] ??
+    content.body.match(/\b(\d{5,12})\b/)?.[1];
+  const openingRef =
+    roleTitle && jobId
+      ? `${roleTitle} (${jobId})`
+      : roleTitle
+        ? roleTitle
+        : jobId
+          ? `req ${jobId}`
+          : `software engineering roles at ${company}`;
+  const postHook = content.generationContext?.linkedinPost?.trim()
+    ? `I saw your post about ${summarizePostTopic(content.generationContext.linkedinPost)} and wanted to reach out about ${openingRef} at ${company}.`
+    : `I'm reaching out about ${openingRef} at ${company}.`;
+  return [
+    "Hi {firstName},",
+    "",
+    postHook,
+    "I'm a CMU graduate student with 3 years of software engineering experience at Epsilon, and I recently completed an Agentic AI internship at T-Mobile.",
+    "",
+    "I've attached my resume and would appreciate it if you could take a quick look at my application.",
+  ].join("\n");
+}
+
+function buildFallbackLinkedinSubject(content: CompanyContent): string {
+  const company = content.companyDisplayName || content.company;
+  const roleTitle = content.generationContext?.roleTitle?.trim();
+  const jobId =
+    content.body.match(/\b(?:req|job(?:\s+id)?)\s+([A-Z0-9][A-Z0-9/_-]{2,36})\b/i)?.[1] ??
+    content.body.match(/\b(\d{5,12})\b/)?.[1];
+  if (roleTitle && jobId) {
+    return `${roleTitle} (${jobId})`;
+  }
+  if (roleTitle) {
+    return roleTitle;
+  }
+  if (jobId) {
+    return `${company} (${jobId})`;
+  }
+  return `${company} role`;
+}
+
+function summarizePostTopic(post: string): string {
+  const firstLine = post
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .find(Boolean);
+  if (!firstLine) {
+    return "hiring";
+  }
+  return firstLine
+    .replace(/^i(?:'m| am)\s+/i, "")
+    .replace(/^we(?:'re| are)\s+/i, "")
+    .replace(/^my team is\s+/i, "")
+    .replace(/^hiring\s+/i, "hiring ")
+    .replace(/[.!?].*$/, "")
+    .slice(0, 80);
+}
+
+function normalizeLinkedinMessage(value: string): string {
+  return value
+    .replace(/\bI saw your post about My team is hiring\b/gi, "I saw your post about hiring")
+    .replace(/\bWould you be open to connecting\??\b/gi, "I've attached my resume and would appreciate it if you could take a quick look at my application.")
+    .replace(/^Hi ([^\n,]+),\s+/i, "Hi $1,\n\n")
+    .replace(
+      /(I recently completed an Agentic AI internship at T-Mobile\.[ \t]*)\n?(I've attached my resume and would appreciate it if you could take a quick look at my application\.)/gi,
+      "$1\n\n$2",
+    )
+    .replace(/application\.\?/gi, "application.")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }

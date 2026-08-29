@@ -1,5 +1,5 @@
-import { cpSync, existsSync, readFileSync, rmSync } from "node:fs";
-import { resolve } from "node:path";
+import { cpSync, existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { basename, dirname, resolve } from "node:path";
 import { findRepoRoot } from "./paths.js";
 
 const DEFAULT_EXTENSION_PATH =
@@ -8,6 +8,43 @@ const DEFAULT_EXTENSION_PATH =
 /** Stable unpacked copy Playwright can load via --load-extension (see Playwright chrome-extensions docs). */
 export function salesqlExtensionCacheDir(): string {
   return resolve(findRepoRoot(), "apps/worker/data/salesql-extension");
+}
+
+function compareExtensionVersions(a: string, b: string): number {
+  const parse = (value: string) =>
+    value
+      .replace(/_[^/]+$/, "")
+      .split(".")
+      .map((part) => Number(part) || 0);
+  const aParts = parse(a);
+  const bParts = parse(b);
+  const maxLength = Math.max(aParts.length, bParts.length);
+  for (let index = 0; index < maxLength; index += 1) {
+    const diff = (aParts[index] ?? 0) - (bParts[index] ?? 0);
+    if (diff !== 0) {
+      return diff;
+    }
+  }
+  return 0;
+}
+
+function resolveInstalledSalesqlExtension(source: string): string | undefined {
+  if (existsSync(source)) {
+    return source;
+  }
+
+  const versionsDir = dirname(source);
+  if (!existsSync(versionsDir)) {
+    return undefined;
+  }
+
+  const newestInstalled = readdirSync(versionsDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort(compareExtensionVersions)
+    .at(-1);
+
+  return newestInstalled ? resolve(versionsDir, newestInstalled) : undefined;
 }
 
 function readExtensionVersion(extensionDir: string): string | undefined {
@@ -23,13 +60,17 @@ function readExtensionVersion(extensionDir: string): string | undefined {
  * Copy the SalesQL unpacked extension into the repo cache dir.
  * Google Chrome no longer honors --load-extension; Playwright's bundled Chromium does.
  */
-export function prepareSalesqlExtension(envPath?: string): string {
-  const source = (envPath?.trim() || DEFAULT_EXTENSION_PATH).trim();
-  if (!existsSync(source)) {
-    throw new Error(`SalesQL extension not found at ${source}. Set SALESQL_EXTENSION_PATH in .env.`);
+export function prepareSalesqlExtension(envPath?: string, cacheDir = salesqlExtensionCacheDir()): string {
+  const configuredSource = (envPath?.trim() || DEFAULT_EXTENSION_PATH).trim();
+  const source = resolveInstalledSalesqlExtension(configuredSource);
+  if (!source) {
+    if (existsSync(resolve(cacheDir, "manifest.json"))) {
+      return cacheDir;
+    }
+    throw new Error(
+      `SalesQL extension not found at ${configuredSource}. Set SALESQL_EXTENSION_PATH in .env or restore the cached copy.`,
+    );
   }
-
-  const cacheDir = salesqlExtensionCacheDir();
   const sourceVersion = readExtensionVersion(source);
   const cacheVersion = existsSync(cacheDir) ? readExtensionVersion(cacheDir) : undefined;
 

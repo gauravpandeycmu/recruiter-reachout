@@ -142,6 +142,30 @@ describe("rescheduleQueuedSend integration", () => {
     expect(scheduledTab).toHaveLength(0);
   });
 
+  it("refuses to reschedule / Send-now a row whose send already completed (scheduledInGmail double-send guard)", async () => {
+    const startAt = new Date(Date.now() + 60 * 60_000).toISOString();
+    const { queueItemId } = await seedAndSchedule("Done Person", "done@acme.com", startAt);
+    // Simulate a scheduledInGmail:true completion: the send JOB is `completed`
+    // but the queue row is left `scheduled` (it lives on as a Gmail-native draft).
+    // Only reachable if native schedule-send is enabled; a normal completion sets
+    // the row to `sent`. Rescheduling / Send-now must NOT mint a second live job.
+    const job = store.listSendJobs().find((entry) => entry.queueItemId === queueItemId)!;
+    store.upsertSendJob({ ...job, status: "completed", updatedAt: new Date().toISOString() });
+
+    await expect(
+      rescheduleQueuedSend(store, {
+        queueItemId,
+        scheduledFor: new Date(Date.now() + 3 * 60 * 60_000).toISOString(),
+      }),
+    ).rejects.toThrow(/already been sent/i);
+    await expect(rescheduleQueuedSend(store, { queueItemId, sendNow: true })).rejects.toThrow(/already been sent/i);
+
+    const liveJobs = store
+      .listSendJobs()
+      .filter((entry) => entry.queueItemId === queueItemId && (entry.status === "pending" || entry.status === "in_progress"));
+    expect(liveJobs).toHaveLength(0);
+  });
+
   it("Change time → tomorrow 8am keeps the whole company batch (no mid-loop rebalance yank)", async () => {
     // Use relative times so the test does not flake after local 8pm
     // (when "tonight 8pm" rolls to tomorrow and lands after "tomorrow 8am").

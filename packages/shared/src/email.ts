@@ -146,7 +146,7 @@ export function renderEmail(
     jobIds?: string[];
   },
 ): RenderedEmail {
-  const firstName = candidate.firstName || extractFirstName(candidate.fullName);
+  const firstName = extractFirstName(candidate.firstName || candidate.fullName);
   const usingCustomCopy = Boolean(candidate.customSubject?.trim() && candidate.customBody?.trim());
   const validationWarnings: string[] = [];
   if (!usingCustomCopy && !content.subject.includes("{firstName}") && !content.body.includes("{firstName}")) {
@@ -186,6 +186,7 @@ export function renderEmail(
     linkTexts: collectJobLinkTexts({
       jobUrl: content.jobUrl,
       emailBody: bodyText,
+      roleTitle: content.roleTitle,
       // Prefer explicit jobIds from generation when present.
       jobDescription: content.jobIds?.length ? `Job ID: ${content.jobIds[0]}` : undefined,
     }),

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { RecruiterCandidate } from "@recruiter/shared";
 import type { UpcomingSendView } from "./api.js";
 import {
   groupUpcomingByCompany,
@@ -14,6 +15,7 @@ import {
   deriveBatchScheduleTiming,
   formatCompanyBlockShiftMessage,
   discoveryStatusLabel,
+  peekNextDiscoveryCandidate,
   trackedSendQueueIdsAreOrphaned,
 } from "./sendHelpers.js";
 import { parseDatetimeLocal } from "./scheduleTime.js";
@@ -111,6 +113,64 @@ describe("groupUpcomingByCompany", () => {
       }),
     ]);
     expect(groups[0]?.[1].map((item) => item.fullName)).toEqual(["Early", "Late"]);
+  });
+});
+
+describe("peekNextDiscoveryCandidate", () => {
+  const person = (overrides: Partial<RecruiterCandidate> & { id: string }): RecruiterCandidate => ({
+    isActive: true,
+    fullName: "Ada",
+    firstName: "Ada",
+    emailCandidates: [],
+    status: "new",
+    createdAt: "2026-07-01T00:00:00.000Z",
+    updatedAt: "2026-07-01T00:00:00.000Z",
+    linkedinUrl: "https://www.linkedin.com/in/ada",
+    ...overrides,
+  });
+
+  it("returns the oldest-attempted person still missing an email", () => {
+    expect(
+      peekNextDiscoveryCandidate([
+        person({ id: "newer", fullName: "Newer", lastDiscoveryAttemptAt: "2026-08-02T00:00:00.000Z" }),
+        person({ id: "older", fullName: "Older", lastDiscoveryAttemptAt: "2026-08-01T00:00:00.000Z" }),
+      ])?.id,
+    ).toBe("older");
+  });
+
+  it("prefers the worker's in-flight lookup when set", () => {
+    expect(
+      peekNextDiscoveryCandidate(
+        [
+          person({ id: "a", fullName: "A" }),
+          person({ id: "b", fullName: "B" }),
+        ],
+        "b",
+      )?.id,
+    ).toBe("b");
+  });
+
+  it("still returns a claimed person so the dashboard can show next-up without calling next-discovery", () => {
+    expect(
+      peekNextDiscoveryCandidate([
+        person({
+          id: "claimed",
+          fullName: "Joe Chen",
+          discoveryClaimedAt: "2026-08-25T22:41:50.523Z",
+        }),
+      ])?.id,
+    ).toBe("claimed");
+  });
+
+  it("skips people who already have email or a conclusive miss", () => {
+    expect(
+      peekNextDiscoveryCandidate([
+        person({ id: "found", email: "a@x.com", status: "email_guessed" }),
+        person({ id: "miss", status: "email_not_found" }),
+        person({ id: "no-li", linkedinUrl: undefined }),
+        person({ id: "need", fullName: "Need" }),
+      ])?.id,
+    ).toBe("need");
   });
 });
 

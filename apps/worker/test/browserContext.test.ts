@@ -8,6 +8,7 @@ import {
   clearChromiumCrashRestore,
   clearChromiumSessionRestoreFiles,
   clearStaleChromiumSingletonLocks,
+  isChromiumProfileLocked,
   markChromiumExitClean,
   prepareChromiumUserDataDir,
   resolveLaunchChannel,
@@ -82,10 +83,13 @@ describe("chromium profile prep", () => {
 
   it("removes stale SingletonLock when the owner PID is dead", async () => {
     await seedProfile();
+    // Dangling symlink (dead pid) — the real Chromium lock shape. readFile alone
+    // throws on any dangling link, so assert the symlink ENTRY itself is gone (lstat).
     await symlink("host-99999999", join(directory, "SingletonLock"));
     await writeFile(join(directory, "SingletonCookie"), "x");
     clearStaleChromiumSingletonLocks(directory);
-    await expect(readFile(join(directory, "SingletonLock"))).rejects.toThrow();
+    const { lstatSync } = await import("node:fs");
+    expect(() => lstatSync(join(directory, "SingletonLock"))).toThrow();
     await expect(readFile(join(directory, "SingletonCookie"))).rejects.toThrow();
   });
 
@@ -120,5 +124,47 @@ describe("chromium profile prep", () => {
     };
     expect(prefs.profile.exit_type).toBe("Normal");
     expect(prefs.profile.exited_cleanly).toBe(true);
+  });
+});
+
+// Gates the Setup Gmail-ready probe (setupSessions.probeGmailProfileReady): a wrong
+// `false` while the worker holds the Gmail profile makes Setup launch a SECOND Chromium
+// on the same locked profile — racing/closing the live send browser. A wrong `true` on a
+// free profile lies "signed in" when Gmail may not be logged in. Both directions matter,
+// so pin every branch. (clearStaleChromiumSingletonLocks is tested above but DELETES —
+// this read-only probe has its own PID-liveness logic that was untested.)
+describe("isChromiumProfileLocked", () => {
+  let directory: string;
+
+  afterEach(async () => {
+    if (directory) await rm(directory, { recursive: true, force: true });
+  });
+
+  it("is false when no SingletonLock exists (free profile — probe may proceed)", async () => {
+    directory = await mkdtemp(join(tmpdir(), "chromium-lock-"));
+    expect(isChromiumProfileLocked(directory)).toBe(false);
+  });
+
+  it("is false when the SingletonLock points at a dead PID (stale lock)", async () => {
+    directory = await mkdtemp(join(tmpdir(), "chromium-lock-"));
+    await symlink("host-99999999", join(directory, "SingletonLock"));
+    expect(isChromiumProfileLocked(directory)).toBe(false);
+  });
+
+  it("is true when the SingletonLock points at a live PID (worker holds the profile)", async () => {
+    directory = await mkdtemp(join(tmpdir(), "chromium-lock-"));
+    // Real Chromium SingletonLock is a DANGLING symlink ("<host>-<pid>" is a
+    // label, not a real file) — the exact shape that made the old existsSync
+    // guard report a live lock as absent.
+    await symlink(`host-${process.pid}`, join(directory, "SingletonLock"));
+    expect(isChromiumProfileLocked(directory)).toBe(true);
+  });
+
+  it("is true for an unknown (non-symlink) lock shape — conservatively locked", async () => {
+    directory = await mkdtemp(join(tmpdir(), "chromium-lock-"));
+    // A plain-file SingletonLock (not the usual host-PID symlink): PID liveness is
+    // unknowable, so the probe must assume the profile is in use rather than fight for it.
+    await writeFile(join(directory, "SingletonLock"), "not-a-symlink");
+    expect(isChromiumProfileLocked(directory)).toBe(true);
   });
 });

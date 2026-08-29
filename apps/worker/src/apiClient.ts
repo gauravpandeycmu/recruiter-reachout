@@ -11,6 +11,10 @@ import type { DiscoveryOutcome } from "./discoveryOutcome.js";
 
 export interface ApiClientOptions {
   baseUrl?: string;
+  /** ISO boot time of this worker process — stamped on every status heartbeat
+   *  so the API can distinguish this session's slow send from a crashed
+   *  predecessor's leaked in_progress job. */
+  workerStartedAt?: string;
 }
 
 export interface ProviderQuotaStatus {
@@ -26,7 +30,9 @@ export interface WorkerStatusUpdate {
   message: string;
   candidateId?: string;
   candidateName?: string;
-  provider?: "jobright" | "salesql";
+  provider?: "jobright" | "salesql" | "apollo";
+  /** Usually injected by the client from ApiClientOptions.workerStartedAt. */
+  workerStartedAt?: string;
 }
 
 /** Bound how long a send-related request can hang. fetchNextSendJob claims a
@@ -59,7 +65,7 @@ export interface WorkerApiClient {
   fetchNextDiscoveryCandidate(): Promise<RecruiterCandidate | undefined>;
   reportDiscoveryResult(candidateId: string, outcome: DiscoveryOutcome): Promise<RecruiterCandidate>;
   triggerSend(candidateId: string): Promise<unknown>;
-  fetchCanUseProvider(provider: "salesql" | "jobright"): Promise<ProviderQuotaStatus>;
+  fetchCanUseProvider(provider: "salesql" | "jobright" | "apollo"): Promise<ProviderQuotaStatus>;
   reportWorkerStatus(update: WorkerStatusUpdate): Promise<WorkerStatus>;
   fetchDiscoverySettings(): Promise<DiscoverySettings>;
   fetchNextSendJob(): Promise<SendJob | undefined>;
@@ -101,6 +107,7 @@ export interface WorkerApiClient {
 /** Thin fetch wrapper against the local API, using the same endpoints the dashboard already uses. */
 export function createApiClient(options: ApiClientOptions = {}): WorkerApiClient {
   const baseUrl = (options.baseUrl ?? process.env.WORKER_API_BASE_URL ?? "http://localhost:4000").replace(/\/$/, "");
+  const workerStartedAt = options.workerStartedAt;
 
   return {
     async fetchNextDiscoveryCandidate(): Promise<RecruiterCandidate | undefined> {
@@ -142,7 +149,7 @@ export function createApiClient(options: ApiClientOptions = {}): WorkerApiClient
       return payload;
     },
 
-    async fetchCanUseProvider(provider: "salesql" | "jobright"): Promise<ProviderQuotaStatus> {
+    async fetchCanUseProvider(provider: "salesql" | "jobright" | "apollo"): Promise<ProviderQuotaStatus> {
       const response = await fetch(`${baseUrl}/api/automation/can-use-provider/${provider}`);
       if (!response.ok) {
         throw new Error(`Failed to fetch provider quota (${response.status}): ${await response.text()}`);
@@ -154,7 +161,7 @@ export function createApiClient(options: ApiClientOptions = {}): WorkerApiClient
       const response = await fetch(`${baseUrl}/api/automation/worker-status`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(update),
+        body: JSON.stringify({ workerStartedAt, ...update }),
       });
       if (!response.ok) {
         throw new Error(`Failed to report worker status (${response.status}): ${await response.text()}`);

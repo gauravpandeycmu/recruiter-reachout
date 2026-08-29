@@ -1,20 +1,29 @@
+import { isFinderForce, pickOutreachEmail } from "@recruiter/shared";
+import { discoverEmailOnApollo, type ApolloDiscoveryOptions, type ApolloPageAdapter } from "./apollo.js";
 import { discoverEmailOnJobright, type JobrightDiscoveryOptions, type JobrightPageAdapter } from "./jobright.js";
 import { discoverEmailOnSalesql, type SalesqlDiscoveryOptions, type SalesqlPageAdapter } from "./salesql.js";
 import type { DiscoveryOutcome } from "./discoveryOutcome.js";
+import { runFinderChain, type FinderStep } from "./finderChain.js";
 
 export interface DiscoveryChainDeps {
   jobrightAdapter: JobrightPageAdapter;
-  /** Lazy factory — only invoked when Jobright returns not_found and quota allows (or forceProvider is salesql). */
+  /** Lazy factory — only invoked when Jobright returns not_found and quota allows (or forceProvider is finder/salesql). */
   createSalesqlAdapter?: () => SalesqlPageAdapter | Promise<SalesqlPageAdapter>;
+  createApolloAdapter?: () => ApolloPageAdapter | Promise<ApolloPageAdapter>;
   jobrightDryRun: boolean;
   salesqlDryRun: boolean;
-  /** When false (quota exhausted or SalesQL disabled), Jobright not_found is final. */
-  canUseSalesql: () => Promise<boolean> | boolean;
+  apolloDryRun?: boolean;
+  /** When false, Jobright not_found/error is final unless reason is previous_employer. */
+  canUseSalesql: (reason?: "auto" | "previous_employer") => Promise<boolean> | boolean;
+  canUseApollo?: (reason?: "auto" | "previous_employer") => Promise<boolean> | boolean;
   jobrightOptions?: Partial<JobrightDiscoveryOptions>;
   salesqlOptions?: Partial<SalesqlDiscoveryOptions>;
+  apolloOptions?: Partial<ApolloDiscoveryOptions>;
   log?: (message: string) => void;
-  /** When "salesql", skip Jobright entirely — used for manual "check via SalesQL" retries. */
-  forceProvider?: "salesql";
+  /** Tagged company from capture — skip previous-employer work addresses. */
+  company?: string;
+  /** When set, skip Jobright entirely — used for manual "check via Finder" retries. */
+  forceProvider?: "salesql" | "finder";
 }
 
 function mapJobrightOutcome(outcome: Awaited<ReturnType<typeof discoverEmailOnJobright>>): DiscoveryOutcome {
@@ -49,32 +58,85 @@ function mapSalesqlOutcome(outcome: Awaited<ReturnType<typeof discoverEmailOnSal
   return { status: "error", message: outcome.message, provider: "salesql", creditSpent: outcome.creditSpent };
 }
 
+function mapApolloOutcome(outcome: Awaited<ReturnType<typeof discoverEmailOnApollo>>): DiscoveryOutcome {
+  if (outcome.status === "found") {
+    return { status: "found", email: outcome.email, provider: "apollo", creditSpent: outcome.creditSpent };
+  }
+  if (outcome.status === "dry_run") {
+    return { status: "dry_run", provider: "apollo" };
+  }
+  if (outcome.status === "not_found") {
+    return { status: "not_found", provider: "apollo", creditSpent: outcome.creditSpent };
+  }
+  return { status: "error", message: outcome.message, provider: "apollo", creditSpent: outcome.creditSpent };
+}
+
+function buildFinderSteps(
+  linkedinUrl: string,
+  deps: DiscoveryChainDeps,
+  reason: "auto" | "previous_employer",
+): FinderStep[] {
+  const steps: FinderStep[] = [];
+  if (deps.createSalesqlAdapter) {
+    steps.push({
+      id: "salesql",
+      canUse: () => deps.canUseSalesql(reason),
+      run: async () =>
+        mapSalesqlOutcome(
+          await discoverEmailOnSalesql(await deps.createSalesqlAdapter!(), linkedinUrl, {
+            dryRun: deps.salesqlDryRun,
+            ...deps.salesqlOptions,
+            company: deps.company ?? deps.salesqlOptions?.company,
+          }),
+        ),
+    });
+  }
+  if (deps.createApolloAdapter) {
+    steps.push({
+      id: "apollo",
+      canUse: () => deps.canUseApollo?.(reason) ?? true,
+      run: async () =>
+        mapApolloOutcome(
+          await discoverEmailOnApollo(await deps.createApolloAdapter!(), linkedinUrl, {
+            dryRun: deps.apolloDryRun ?? false,
+            ...deps.apolloOptions,
+            company: deps.company ?? deps.apolloOptions?.company,
+          }),
+        ),
+    });
+  }
+  return steps;
+}
+
 /**
- * Tries Jobright first. Falls through to SalesQL only when Jobright explicitly
- * returns not_found (not on error/dry_run) AND canUseSalesql() is true.
- * By default the dashboard keeps auto-fallback OFF so SalesQL's ~50/month
- * credits are only spent via the toggle or an explicit "Check via SalesQL" action.
+ * Tries Jobright first. Current-company work and personal mailboxes (Gmail, etc.)
+ * are kept. Previous-employer work is treated as a miss so SalesQL, then Apollo,
+ * can still run when quota remains, even if dashboard auto-fallback is off.
+ * Other Jobright not_found/error fallback only when canUse*("auto") is true.
  */
 export async function runDiscoveryChain(
   linkedinUrl: string,
   deps: DiscoveryChainDeps,
 ): Promise<DiscoveryOutcome> {
   const log = deps.log ?? (() => {});
+  const forced = isFinderForce(deps.forceProvider);
 
-  if (deps.forceProvider === "salesql") {
-    if (!deps.createSalesqlAdapter) {
-      return { status: "error", message: "SalesQL is not configured.", provider: "salesql", creditSpent: false };
-    }
-    const allowed = await deps.canUseSalesql();
-    if (!allowed) {
-      return { status: "error", message: "SalesQL monthly quota exhausted.", provider: "salesql", creditSpent: false };
-    }
-    log("Forced SalesQL check requested; skipping Jobright.");
-    const forcedOutcome = await discoverEmailOnSalesql(await deps.createSalesqlAdapter(), linkedinUrl, {
-      dryRun: deps.salesqlDryRun,
-      ...deps.salesqlOptions,
+  if (forced) {
+    log("Forced Finder check requested; skipping Jobright.");
+    const forcedOutcome = await runFinderChain({
+      steps: buildFinderSteps(linkedinUrl, deps, "auto"),
+      company: deps.company,
+      log,
+      required: true,
     });
-    return mapSalesqlOutcome(forcedOutcome);
+    return (
+      forcedOutcome ?? {
+        status: "error",
+        message: "SalesQL is not configured.",
+        provider: "salesql",
+        creditSpent: false,
+      }
+    );
   }
 
   const jobrightOutcome = await discoverEmailOnJobright(deps.jobrightAdapter, linkedinUrl, {
@@ -82,25 +144,56 @@ export async function runDiscoveryChain(
     ...deps.jobrightOptions,
   });
   const mappedJobright = mapJobrightOutcome(jobrightOutcome);
-
-  if (mappedJobright.status !== "not_found") {
-    return mappedJobright;
+  let jobrightResult = mappedJobright;
+  let skippedPreviousEmployer = false;
+  if (mappedJobright.status === "found") {
+    const usable = pickOutreachEmail([mappedJobright.email], deps.company);
+    if (!usable) {
+      log(
+        `Jobright email ${mappedJobright.email} is a previous-employer address for ${deps.company?.trim() || "the tagged company"} — not sending there.`,
+      );
+      skippedPreviousEmployer = true;
+      jobrightResult = { status: "not_found", provider: "jobright" };
+    }
   }
 
-  if (!deps.createSalesqlAdapter) {
-    return mappedJobright;
+  // Current-company work or personal (Gmail, etc.) ends the chain.
+  // Previous-employer work is treated as a miss so Finder can still try.
+  if (jobrightResult.status === "found" || jobrightResult.status === "dry_run") {
+    return jobrightResult;
   }
 
-  const allowed = await deps.canUseSalesql();
-  if (!allowed) {
-    log("SalesQL fallback skipped (auto-fallback off, quota exhausted, or SalesQL disabled).");
-    return mappedJobright;
-  }
-
-  log("Jobright not_found; trying SalesQL fallback.");
-  const salesqlOutcome = await discoverEmailOnSalesql(await deps.createSalesqlAdapter(), linkedinUrl, {
-    dryRun: deps.salesqlDryRun,
-    ...deps.salesqlOptions,
+  const reason = skippedPreviousEmployer ? "previous_employer" : "auto";
+  const finderOutcome = await runFinderChain({
+    steps: buildFinderSteps(linkedinUrl, deps, reason),
+    company: deps.company,
+    log: (message) => {
+      if (message.startsWith("Trying ")) {
+        const source = message.replace(/^Trying /, "").replace(/\.$/, "");
+        log(
+          skippedPreviousEmployer
+            ? `Jobright returned a previous-employer address; trying ${source}.`
+            : jobrightResult.status === "not_found"
+              ? `Jobright not_found; trying ${source}.`
+              : `Jobright error (${"message" in jobrightResult ? jobrightResult.message : "unknown"}); trying ${source}.`,
+        );
+      } else {
+        log(message);
+      }
+    },
+    required: false,
   });
-  return mapSalesqlOutcome(salesqlOutcome);
+
+  if (!finderOutcome) {
+    if (!deps.createSalesqlAdapter && !deps.createApolloAdapter) {
+      return jobrightResult;
+    }
+    log(
+      jobrightResult.status === "not_found"
+        ? "Finder fallback skipped (auto-fallback off, quota exhausted, or sources disabled)."
+        : "Finder fallback after Jobright error skipped (auto-fallback off, quota exhausted, or sources disabled).",
+    );
+    return jobrightResult;
+  }
+  return finderOutcome;
 }

@@ -146,6 +146,10 @@ export function jobIdFromJobUrl(jobUrl?: string): string | undefined {
     if (uuid?.[1]) {
       return uuid[1];
     }
+    const opaqueHex = url.pathname.match(/\/([0-9a-f]{20,32})(?:\/|$)/i);
+    if (opaqueHex?.[1]) {
+      return opaqueHex[1];
+    }
     const match = url.pathname.match(/\/(?:jobs|details|job|position)\/(\d{4,12})(?:\/|$)/i);
     return match?.[1];
   } catch {

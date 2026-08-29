@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { LinkedInCaptureJob } from "@recruiter/shared";
 import type { Store } from "./store.js";
 import { buildLinkedInPeopleSearchUrl } from "./search.js";
-import { isWorkerHeartbeatFresh } from "./sendJobs.js";
+import { shouldReclaimStaleInProgress } from "./sendJobs.js";
 
 export function createLinkedInCaptureJob(
   store: Store,
@@ -43,18 +43,18 @@ export function createLinkedInCaptureJob(
 }
 
 export function claimNextLinkedInCaptureJob(store: Store, now: Date = new Date()): LinkedInCaptureJob | undefined {
-  const nowMs = now.getTime();
   const STALE_MS = 10 * 60 * 1000;
   // A slow-but-alive capture (LinkedIn rate-limiting, a multi-page scrape) can
   // run past this window without the worker having crashed — reclaiming it in
-  // that case claims the same company a second time and doubles the scrape.
-  const workerLooksAlive = isWorkerHeartbeatFresh(store, now);
+  // that case claims the same company a second time and doubles the scrape. The
+  // shared guard also reclaims a job orphaned by a crash+respawn (touched before
+  // the current worker session booted) so it can't leak past a fresh heartbeat.
   for (const job of store.listLinkedInCaptureJobs()) {
     if (job.status !== "in_progress") {
       continue;
     }
-    const age = nowMs - new Date(job.updatedAt).getTime();
-    if (Number.isFinite(age) && age > STALE_MS && !workerLooksAlive) {
+    const touched = new Date(job.updatedAt).getTime();
+    if (shouldReclaimStaleInProgress(store, touched, now, STALE_MS)) {
       store.upsertLinkedInCaptureJob({
         ...job,
         status: "pending",

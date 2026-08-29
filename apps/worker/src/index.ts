@@ -8,8 +8,11 @@ import { runLinkedInCapturePass } from "./linkedinCapturePass.js";
 import { runLinkedInProfileEnrichPass } from "./linkedinProfileEnrichPass.js";
 import { createJobrightPlaywrightAdapter, dismissJobrightBlockingOverlays } from "./jobrightPlaywrightAdapter.js";
 import { createSalesqlPlaywrightAdapter } from "./salesqlPlaywrightAdapter.js";
+import { createApolloPlaywrightAdapter } from "./apolloPlaywrightAdapter.js";
 import { resolveWorkerDataDir } from "./paths.js";
-import { prepareSalesqlExtension, waitForSalesqlServiceWorker } from "./salesqlExtension.js";
+import { waitForSalesqlServiceWorker } from "./salesqlExtension.js";
+import { waitForApolloServiceWorker } from "./apolloExtension.js";
+import { resolveLinkedInOverlayExtensions } from "./linkedinOverlayExtensions.js";
 import { tryPrepareStreakExtension, waitForStreakServiceWorker } from "./streakExtension.js";
 import { GMAIL_USER_DATA_DIR } from "./setupSessions.js";
 import { runSendPass } from "./sendPass.js";
@@ -19,11 +22,13 @@ import { shouldPreferSalesqlBrowserForLinkedInCapture } from "./linkedinCaptureB
 
 const JOBRIGHT_DRY_RUN = (process.env.JOBRIGHT_DRY_RUN ?? "true").toLowerCase() !== "false";
 const SALESQL_DRY_RUN = (process.env.SALESQL_DRY_RUN ?? "true").toLowerCase() !== "false";
+const APOLLO_DRY_RUN = (process.env.APOLLO_DRY_RUN ?? process.env.SALESQL_DRY_RUN ?? "true").toLowerCase() !== "false";
 const WORKER_AUTO_SEND = (process.env.WORKER_AUTO_SEND ?? "false").toLowerCase() === "true";
 const JOBRIGHT_JOB_URL = process.env.JOBRIGHT_JOB_URL;
 const JOBRIGHT_USER_DATA_DIR = resolveWorkerDataDir(process.env.JOBRIGHT_USER_DATA_DIR, "apps/worker/data/jobright-profile");
 const SALESQL_USER_DATA_DIR = resolveWorkerDataDir(process.env.SALESQL_USER_DATA_DIR, "apps/worker/data/salesql-profile");
-const SALESQL_EXTENSION_PATH = process.env.SALESQL_EXTENSION_PATH;
+const APOLLO_OVERLAY_TIMEOUT_MS = Number(process.env.APOLLO_OVERLAY_TIMEOUT_MS ?? 45000);
+const APOLLO_REVEAL_TIMEOUT_MS = Number(process.env.APOLLO_REVEAL_TIMEOUT_MS ?? 15000);
 const DISCOVERY_DELAY_MS = Number(process.env.WORKER_DISCOVERY_DELAY_MS ?? 1500);
 const SEND_DELAY_MS = Number(process.env.WORKER_SEND_DELAY_MS ?? 3000);
 const IDLE_DELAY_MS = Number(process.env.WORKER_IDLE_DELAY_MS ?? 30000);
@@ -80,6 +85,27 @@ function log(message: string): void {
 
 function delay(ms: number): Promise<void> {
   return new Promise((res) => setTimeout(res, ms));
+}
+
+let wakeIdleSleep: (() => void) | undefined;
+
+function interruptibleIdleSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (wakeIdleSleep === finish) {
+        wakeIdleSleep = undefined;
+      }
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    wakeIdleSleep = () => {
+      clearTimeout(timer);
+      finish();
+    };
+  });
 }
 
 function isGmailHeadless(): boolean {
@@ -142,7 +168,10 @@ async function main(): Promise<void> {
     );
   }
 
-  const salesqlEnabled = Boolean(SALESQL_EXTENSION_PATH?.trim());
+  const overlayExtensions = resolveLinkedInOverlayExtensions();
+  const salesqlEnabled = Boolean(overlayExtensions.salesqlPath);
+  const apolloEnabled = Boolean(overlayExtensions.apolloPath);
+  const finderEnabled = salesqlEnabled || apolloEnabled;
   const streakExtensionPath = tryPrepareStreakExtension(process.env.STREAK_EXTENSION_PATH);
   if (!streakExtensionPath) {
     log(
@@ -153,8 +182,8 @@ async function main(): Promise<void> {
   }
 
   log(
-    `Starting worker (hibernating Chromium until work is due). JOBRIGHT_DRY_RUN=${JOBRIGHT_DRY_RUN} SALESQL_DRY_RUN=${SALESQL_DRY_RUN} ` +
-      `WORKER_AUTO_SEND=${WORKER_AUTO_SEND} SALESQL_ENABLED=${salesqlEnabled} GMAIL_HEADLESS=${isGmailHeadless()}`,
+    `Starting worker (hibernating Chromium until work is due). JOBRIGHT_DRY_RUN=${JOBRIGHT_DRY_RUN} SALESQL_DRY_RUN=${SALESQL_DRY_RUN} APOLLO_DRY_RUN=${APOLLO_DRY_RUN} ` +
+      `WORKER_AUTO_SEND=${WORKER_AUTO_SEND} SALESQL_ENABLED=${salesqlEnabled} APOLLO_ENABLED=${apolloEnabled} GMAIL_HEADLESS=${isGmailHeadless()}`,
   );
 
   let jobrightContext: Awaited<ReturnType<typeof launchPersistentBrowserContext>> | undefined;
@@ -220,27 +249,33 @@ async function main(): Promise<void> {
   }
 
   async function ensureSalesqlPage(): Promise<Page | undefined> {
-    if (!salesqlEnabled) return undefined;
+    if (!finderEnabled) return undefined;
     if (!pageLooksDead(salesqlPage, salesqlContext)) {
       return salesqlPage;
     }
     try {
       await closeSiblingSalesqlDirContext("salesql");
-      log("Waking SalesQL browser for discovery…");
-      const salesqlExtensionPath = prepareSalesqlExtension(SALESQL_EXTENSION_PATH);
+      log("Waking LinkedIn fallback browser (SalesQL, then Apollo) for discovery…");
       salesqlContext = await launchPersistentBrowserContext({
         userDataDir: SALESQL_USER_DATA_DIR,
         headless: (process.env.SALESQL_HEADLESS ?? "true").toLowerCase() !== "false",
-        extensionPaths: [salesqlExtensionPath],
+        extensionPaths: overlayExtensions.paths,
       });
-      await waitForSalesqlServiceWorker(salesqlContext).catch(() => {
-        log("SalesQL service worker slow to start; content script may be delayed.");
-      });
+      if (salesqlEnabled) {
+        await waitForSalesqlServiceWorker(salesqlContext).catch(() => {
+          log("SalesQL service worker slow to start; content script may be delayed.");
+        });
+      }
+      if (apolloEnabled) {
+        await waitForApolloServiceWorker(salesqlContext).catch(() => {
+          log("Apollo service worker slow to start; content script may be delayed.");
+        });
+      }
       salesqlPage = salesqlContext.pages()[0] ?? (await salesqlContext.newPage());
       return salesqlPage;
     } catch (error) {
       log(
-        `SalesQL browser failed to start (email discovery fallback disabled): ${
+        `LinkedIn fallback browser failed to start (SalesQL/Apollo disabled): ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
@@ -350,13 +385,17 @@ async function main(): Promise<void> {
     gmailPage = undefined;
   }
 
-  const apiClient = createApiClient();
+  const workerStartedAtMs = Date.now();
+  // Stable session id for this process — stamped on every heartbeat so the API
+  // can tell this session's own slow send from a crashed predecessor's leaked
+  // in_progress job (which would otherwise block every send forever).
+  const workerStartedAt = new Date(workerStartedAtMs).toISOString();
+  const apiClient = createApiClient({ workerStartedAt });
   await apiClient.reportWorkerStatus({ phase: "starting", message: "Worker ready — Chromium sleeps until work is due." }).catch(() => {});
 
   let running = true;
   let shuttingDown = false;
   let sendPassInFlight = false;
-  const workerStartedAtMs = Date.now();
 
   /** Single source of truth for turning a pending-work snapshot into a hibernation
    *  decision — used both for the main loop and the pre-exit re-check. */
@@ -425,6 +464,9 @@ async function main(): Promise<void> {
     setTimeout(() => {
       void waitForSendPassToSettle(45_000).then(() => shutdownBrowsers("SIGTERM timeout"));
     }, 8_000).unref();
+  });
+  process.on("SIGUSR1", () => {
+    wakeIdleSleep?.();
   });
 
   while (running) {
@@ -542,12 +584,26 @@ async function main(): Promise<void> {
                   return createSalesqlPlaywrightAdapter(sqPage);
                 }
               : undefined,
+            createApolloAdapter: apolloEnabled
+              ? async () => {
+                  const finderPage = await ensureSalesqlPage();
+                  if (!finderPage) {
+                    throw new Error("Apollo browser failed to start.");
+                  }
+                  return createApolloPlaywrightAdapter(finderPage);
+                }
+              : undefined,
             jobrightDryRun: JOBRIGHT_DRY_RUN,
             salesqlDryRun: SALESQL_DRY_RUN,
+            apolloDryRun: APOLLO_DRY_RUN,
             autoSendAfterDiscovery: WORKER_AUTO_SEND,
             salesqlOptions: {
               overlayTimeoutMs: SALESQL_OVERLAY_TIMEOUT_MS,
               revealTimeoutMs: SALESQL_REVEAL_TIMEOUT_MS,
+            },
+            apolloOptions: {
+              overlayTimeoutMs: APOLLO_OVERLAY_TIMEOUT_MS,
+              revealTimeoutMs: APOLLO_REVEAL_TIMEOUT_MS,
             },
             recoverSalesqlPage: async () => {
               if (!salesqlPage) return;
@@ -609,7 +665,7 @@ async function main(): Promise<void> {
               : `Browsers asleep — ${decision.reason}. Recheck ~${minutes}m.`,
         })
         .catch(() => {});
-      await delay(sleepFor);
+      await interruptibleIdleSleep(sleepFor);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       log(`Unexpected error in worker loop: ${message}`);

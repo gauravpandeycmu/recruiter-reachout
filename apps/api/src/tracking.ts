@@ -13,6 +13,53 @@ export function createTrackingLink(store: Store, candidateId: string, campaignId
   return store.upsertTrackingLink(link);
 }
 
+/** One tracking id per person so dashboard preview polls do not mint a new pixel every refresh. */
+export function getOrCreateTrackingLink(store: Store, candidateId: string, campaignId?: string): TrackingLink {
+  return store.getTrackingLinkForCandidate(candidateId) ?? createTrackingLink(store, candidateId, campaignId);
+}
+
+/** Same rule as the public relay: only http(s) click targets, never javascript: or data:. */
+export function safeTrackingRedirectUrl(value: string | null | undefined): string {
+  if (!value) {
+    return "https://mail.google.com";
+  }
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? value : "https://mail.google.com";
+  } catch {
+    return "https://mail.google.com";
+  }
+}
+
+export function recordLocalTrackingHit(
+  store: Store,
+  input: {
+    trackingId: string;
+    type: "open" | "click";
+    targetUrl?: string;
+    userAgent?: string;
+    ip?: string;
+  },
+): TrackingEvent | undefined {
+  const link = store.getTrackingLink(input.trackingId);
+  if (!link) {
+    return undefined;
+  }
+  const event: TrackingEvent = {
+    id: randomUUID(),
+    trackingId: input.trackingId,
+    candidateId: link.candidateId,
+    campaignId: link.campaignId,
+    type: input.type,
+    targetUrl: input.targetUrl,
+    userAgent: input.userAgent,
+    ip: hashIp(input.ip),
+    createdAt: new Date().toISOString(),
+  };
+  store.addEvent(event);
+  return event;
+}
+
 export function getPublicTrackingBaseUrl(): string {
   const value = process.env.PUBLIC_TRACKING_BASE_URL ?? process.env.TRACKING_BASE_URL ?? "";
   if (!value) {

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { seedReady, startHttpApp, type HttpApp } from "./helpers/httpApp.js";
+import { globalSendGapMs } from "../src/sendJobs.js";
 
 describe("core company blocks HTTP packing", () => {
   let app: HttpApp;
@@ -54,8 +55,8 @@ describe("core company blocks HTTP packing", () => {
       "2030-06-01T15:08:00.000Z",
     ]);
     expect(jobTimes([n1.id, n2.id])).toEqual([
-      "2030-06-01T15:12:00.000Z",
-      "2030-06-01T15:16:00.000Z",
+      "2030-06-01T15:09:00.000Z",
+      "2030-06-01T15:13:00.000Z",
     ]);
   });
 
@@ -92,7 +93,7 @@ describe("core company blocks HTTP packing", () => {
       }),
       expectStatus: 200,
     });
-    expect(jobTimes([n.id])[0]).toBe("2030-08-03T08:04:00.000Z");
+    expect(jobTimes([n.id])[0]).toBe("2030-08-03T08:01:00.000Z");
 
     await app.fetchJson("/api/send-queue/resume-paused", {
       method: "POST",
@@ -105,7 +106,7 @@ describe("core company blocks HTTP packing", () => {
     });
     const sgAt = Date.parse(jobTimes([a.id])[0]!);
     const noAt = Date.parse(jobTimes([n.id])[0]!);
-    expect(Math.abs(sgAt - noAt)).toBeGreaterThanOrEqual(4 * 60_000);
+    expect(Math.abs(sgAt - noAt)).toBeGreaterThanOrEqual(globalSendGapMs());
   });
 
   it("paused company reserves discrete minutes so a new company cannot steal the start", async () => {
@@ -143,6 +144,6 @@ describe("core company blocks HTTP packing", () => {
       }),
       expectStatus: 200,
     });
-    expect(jobTimes([n.id])).toEqual(["2030-08-02T08:08:00.000Z"]);
+    expect(jobTimes([n.id])).toEqual(["2030-08-02T08:01:00.000Z"]);
   });
 });

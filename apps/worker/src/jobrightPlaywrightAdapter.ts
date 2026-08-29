@@ -1,11 +1,37 @@
-import type { Page } from "playwright";
+import type { Locator, Page } from "playwright";
 import type { ContactResult, JobrightPageAdapter } from "./jobright.js";
+import {
+  JOBRIGHT_CONTACT_RESULT_TEXT,
+  contactResultFromSignals,
+  pickJobrightRevealEmail,
+} from "./jobrightContactResult.js";
 
 const LINKEDIN_INPUT_PLACEHOLDER = /Paste any LinkedIn profile URL/i;
-const CONTACT_FOUND_TEXT = /Contact Info Found/i;
 const CONNECT_NOW_TEXT = /Connect Now/i;
 const CANCEL_TEXT = /^Cancel$/i;
 const CONNECT_VIA_EMAIL_TEXT = /Connect Via Email/i;
+
+/** Visible Connect Via Email dialog — not page.getByText().first(), which matches body/html. */
+function connectViaEmailModal(page: Page) {
+  const ant = page.locator(".ant-modal").filter({ hasText: CONNECT_VIA_EMAIL_TEXT });
+  const dialog = page.getByRole("dialog").filter({ hasText: CONNECT_VIA_EMAIL_TEXT });
+  return ant.or(dialog).last();
+}
+
+async function readEmailFromRevealModal(modal: Locator): Promise<string | undefined> {
+  const fields = modal.locator("input, textarea");
+  const count = await fields.count();
+  const values: string[] = [];
+  for (let index = 0; index < count; index += 1) {
+    values.push(await fields.nth(index).inputValue().catch(() => ""));
+  }
+  const fromInputs = pickJobrightRevealEmail(values);
+  if (fromInputs) {
+    return fromInputs;
+  }
+  const text = await modal.innerText().catch(() => "");
+  return pickJobrightRevealEmail([text]);
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -141,7 +167,7 @@ export function createJobrightPlaywrightAdapter(
       // Reusing the same page across candidates previously let a stale
       // "Contact Info Found" toast/reveal-modal from the PREVIOUS candidate get
       // misread as THIS candidate's result. Clear overlays first.
-      const toast = page.getByText(CONTACT_FOUND_TEXT).first();
+      const toast = page.getByText(JOBRIGHT_CONTACT_RESULT_TEXT).first();
       if (await toast.isVisible().catch(() => false)) {
         await page.reload({ waitUntil: "domcontentloaded" }).catch(() => undefined);
       }
@@ -186,17 +212,24 @@ export function createJobrightPlaywrightAdapter(
     },
 
     async waitForContactResult(timeoutMs: number): Promise<ContactResult> {
-      const toast = page.getByText(CONTACT_FOUND_TEXT).first();
+      const resultCopy = page.getByText(JOBRIGHT_CONTACT_RESULT_TEXT);
+      const connectNow = page.getByRole("button", { name: CONNECT_NOW_TEXT });
+      const signal = resultCopy.or(connectNow).first();
       try {
-        await toast.waitFor({ state: "visible", timeout: timeoutMs });
+        await signal.waitFor({ state: "visible", timeout: timeoutMs });
       } catch {
         // Timeout ≠ confirmed miss — Jobright can be slow; surface as timedOut so
         // orchestration returns error instead of a false not_found.
-        return { found: false, timedOut: true };
+        return contactResultFromSignals({ timedOut: true });
       }
-      const card = toast.locator("xpath=ancestor::*[self::div][1]");
-      const cardText = await card.textContent().catch(() => null);
-      return { found: true, titleAndCompany: cardText?.replace(/Contact Info Found!?/i, "").trim() || undefined };
+      const heading = resultCopy.first();
+      const card = heading.locator("xpath=ancestor::*[self::div][1]");
+      const toastText =
+        (await card.textContent().catch(() => null)) ||
+        (await heading.textContent().catch(() => null)) ||
+        "";
+      const connectNowVisible = await connectNow.first().isVisible().catch(() => false);
+      return contactResultFromSignals({ toastText, connectNowVisible: Boolean(connectNowVisible) });
     },
 
     async clickConnectNow(): Promise<void> {
@@ -210,7 +243,7 @@ export function createJobrightPlaywrightAdapter(
         await button.click({ force: true, timeout: 10_000 });
       }
       // Modal can lag; if it doesn't appear, one forced re-click usually unsticks it.
-      const modal = page.getByText(CONNECT_VIA_EMAIL_TEXT).first();
+      const modal = connectViaEmailModal(page);
       const visible = await modal.waitFor({ state: "visible", timeout: 5_000 }).then(() => true).catch(() => false);
       if (!visible) {
         await dismissJobrightBlockingOverlays(page, { dismissAntModals: false });
@@ -219,35 +252,25 @@ export function createJobrightPlaywrightAdapter(
     },
 
     async readRevealedEmail(timeoutMs: number): Promise<string | undefined> {
-      const modalHeading = page.getByText(CONNECT_VIA_EMAIL_TEXT).first();
-      await modalHeading.waitFor({ state: "visible", timeout: timeoutMs });
-      // Scope to THIS modal, not the whole page. Ant Design modals aren't
-      // always destroyed on close (closeRevealModal only waits for the
-      // heading to become hidden, not for DOM removal) — an unscoped
-      // page-wide search can return a stale input value left over from the
-      // previous candidate's modal. Confirmed live for the sibling SalesQL
-      // adapter (salesqlPlaywrightAdapter.ts), which scopes for the same
-      // reason; Jobright's own modals are Ant Design (see
-      // dismissJobrightBlockingOverlays above), so scope to the nearest
-      // ant-modal ancestor of the heading we just confirmed is visible.
-      const modalContainer = modalHeading.locator("xpath=ancestor::div[contains(@class,'ant-modal')][1]");
-      const emailInputs = modalContainer.locator('input[type="text"], input:not([type])');
-      const count = await emailInputs.count();
-      for (let index = 0; index < count; index += 1) {
-        const value = await emailInputs.nth(index).inputValue().catch(() => "");
-        if (value.includes("@")) {
-          return value;
+      const modal = connectViaEmailModal(page);
+      await modal.waitFor({ state: "visible", timeout: timeoutMs });
+      const deadline = Date.now() + timeoutMs;
+      while (true) {
+        const email = await readEmailFromRevealModal(modal);
+        if (email) {
+          return email;
         }
+        if (Date.now() + 250 > deadline) {
+          return undefined;
+        }
+        await sleep(250);
       }
-      return undefined;
     },
 
     async closeRevealModal(): Promise<void> {
-      const modalHeading = page.getByText(CONNECT_VIA_EMAIL_TEXT).first();
+      const modal = connectViaEmailModal(page);
       await page.getByRole("button", { name: CANCEL_TEXT }).click();
-      // Belt-and-suspenders: confirm the modal actually closed before moving on,
-      // in addition to the page reload that now guards the next candidate's search.
-      await modalHeading.waitFor({ state: "hidden", timeout: 5000 }).catch(() => {});
+      await modal.waitFor({ state: "hidden", timeout: 5000 }).catch(() => {});
       await dismissJobrightBlockingOverlays(page);
     },
   };

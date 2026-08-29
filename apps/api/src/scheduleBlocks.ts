@@ -28,17 +28,20 @@ export type CompanyBlock = {
 
 /** UI schedule presets top out at 12m; anything beyond this is treated as corrupt stretch (~50m bug). */
 export const MAX_HEALTHY_INTERVAL_MINUTES = 12;
+export const DEFAULT_SEND_INTERVAL_MINUTES = 1;
 
 function companyKey(company: string): string {
   return company.replace(/\s+/g, " ").trim().toLowerCase() || "unknown";
 }
 
 export function defaultGapMinutes(intervalMinutes?: number): number {
-  const fromEnv = Number(process.env.GLOBAL_SEND_GAP_MINUTES ?? process.env.DEFAULT_SCHEDULE_INTERVAL_MINUTES ?? 4);
+  const fromEnv = Number(
+    process.env.GLOBAL_SEND_GAP_MINUTES ?? process.env.DEFAULT_SCHEDULE_INTERVAL_MINUTES ?? DEFAULT_SEND_INTERVAL_MINUTES,
+  );
   if (Number.isFinite(fromEnv) && fromEnv >= 1) {
     return Math.round(fromEnv);
   }
-  return Math.max(1, Math.round(intervalMinutes ?? 4));
+  return Math.max(1, Math.round(intervalMinutes ?? DEFAULT_SEND_INTERVAL_MINUTES));
 }
 
 export function gapMsFromMinutes(minutes: number): number {

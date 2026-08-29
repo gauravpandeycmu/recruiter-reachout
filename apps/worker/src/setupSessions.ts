@@ -69,13 +69,19 @@ export async function probeJobrightSessionFast(context: BrowserContext): Promise
 }
 
 export async function probeLinkedInSessionFast(context: BrowserContext): Promise<{ ready: boolean; message: string }> {
-  const ready = await cookiesIndicateLogin(context, [
-    (cookie) => cookie.domain.includes("linkedin.com") && cookie.name === "li_at",
-    (cookie) => cookie.domain.includes("linkedin.com") && cookie.name === "JSESSIONID",
-  ]);
+  const cookies = await context.cookies();
+  const ready = cookies.some(
+    (cookie) =>
+      (cookie.domain.includes("linkedin.com") && cookie.name === "li_at") ||
+      (cookie.domain.includes("linkedin.com") && cookie.name === "JSESSIONID"),
+  );
+  const apolloSignedIn = cookies.some((cookie) => /apollo\.io/i.test(cookie.domain) && cookie.value.length > 8);
+  const extras = [
+    apolloSignedIn ? "Apollo signed in" : "Apollo not signed in — Open login and sign in on the Apollo tab",
+  ];
   return ready
-    ? { ready: true, message: "LinkedIn session ready." }
-    : { ready: false, message: "Not logged in — open login browser and sign in to LinkedIn." };
+    ? { ready: true, message: `LinkedIn session ready. ${extras.join(". ")}.` }
+    : { ready: false, message: `Not logged in — open login browser and sign in to LinkedIn. ${extras.join(". ")}.` };
 }
 
 /** Legacy navigation probes (kept for smoke scripts). */

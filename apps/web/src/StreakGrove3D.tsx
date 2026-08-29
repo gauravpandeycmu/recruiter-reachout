@@ -4192,8 +4192,9 @@ function StreakGrove3DComponent({
     let frame = 0;
     let inView = true;
     let lastFrameMs = 0;
-    // Cap draw rate — ProMotion would otherwise push 120 renders/sec for little gain.
-    const FRAME_INTERVAL_MS = 1000 / 30;
+    // Cap draw rate fairly hard — this scene is decorative, so we prefer lower GPU
+    // churn over ultra-smooth motion on high-refresh displays.
+    const FRAME_INTERVAL_MS = 1000 / 20;
     const loop = (time = performance.now()) => {
       if (!activeRef.current || document.hidden || !inView) return;
       if (time - lastFrameMs < FRAME_INTERVAL_MS) return;

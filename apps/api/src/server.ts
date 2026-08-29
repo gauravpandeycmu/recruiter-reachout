@@ -12,6 +12,7 @@ import { Store } from "./store.js";
 import { ensureWorkerRunningIfNeeded } from "./workerSupervisor.js";
 
 const port = Number(process.env.PORT ?? 4000);
+const WORKER_AMBIENT_CHECK_MS = Number(process.env.WORKER_AMBIENT_CHECK_MS ?? 60_000);
 configureAuditLog({ source: "api" });
 audit("api.starting", { port });
 
@@ -56,7 +57,7 @@ setInterval(() => {
   void ensureWorkerRunningIfNeeded(store).catch((error) => {
     auditError("api.ensure_worker_failed", error);
   });
-}, 20_000);
+}, WORKER_AMBIENT_CHECK_MS);
 
 const server = createApiServer(store);
 

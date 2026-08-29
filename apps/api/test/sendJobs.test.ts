@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createCandidate } from "../src/services.js";
 import {
   completeSendJob,
+  createImmediateSendJob,
   createSendJobFromQueueItem,
   touchSendJob,
 } from "../src/sendJobs.js";
@@ -106,6 +107,47 @@ describe("completeSendJob", () => {
     expect(store.getSendQueueItem(queueItem.id)?.status).toBe("scheduled");
     expect(store.getSendJob(job.id)?.mode).toBe("schedule");
     expect(store.getSendJob(job.id)?.status).toBe("failed");
+  });
+
+  it("leaves a bare Send-now failure (no queue row) as send_now with no phantom event or schedule flip", async () => {
+    // A bare Send-now (createImmediateSendJob, no queueItemId) that FAILS at the
+    // worker must NOT be flipped to schedule mode: there is no queue row, so a
+    // schedule-mode failed job would be invisible on the Scheduled tab AND
+    // un-retryable via retryFailedSends (which is queue-row based). Recovery is
+    // by re-clicking Send now on the still-active candidate. The mode-flip is
+    // deliberately guarded by `else if (job.queueItemId)`; loosening that guard
+    // to a bare `else` strands the send. Also: a failed send must never record a
+    // `send` event (that would double-count the streak/goal for zero real email).
+    const store = await freshStore();
+    const candidate = store.upsertCandidate(
+      createCandidate({
+        fullName: "Sam Sender",
+        company: "Bare Co",
+        email: "sam@bare.co",
+        status: "email_guessed",
+      }),
+    );
+    const now = new Date().toISOString();
+    const job = createImmediateSendJob(store, candidate.id, {
+      mode: "send_now",
+      to: "sam@bare.co",
+      subject: "Hi",
+      textBody: "Hello",
+      htmlBody: "<p>Hello</p>",
+    });
+    store.upsertSendJob({ ...job, status: "in_progress", updatedAt: now });
+
+    completeSendJob(store, job.id, { success: false, failureReason: "Gmail send button not found." });
+
+    const settled = store.getSendJob(job.id);
+    expect(settled?.status).toBe("failed");
+    expect(settled?.mode).toBe("send_now"); // NOT flipped to schedule (no queue row to reappear on)
+    expect(settled?.queueItemId).toBeUndefined();
+    expect(store.listEvents().filter((event) => event.type === "send")).toHaveLength(0);
+    // No phantom queue row was minted for the bare send-now, and the candidate
+    // stays active (not archived) so Send now can be retried.
+    expect(store.listSendQueue().filter((item) => item.candidateId === candidate.id)).toHaveLength(0);
+    expect(store.listCandidates().some((item) => item.id === candidate.id)).toBe(true);
   });
 
   it("stays a no-op when a cancelled job also fails (nothing to reconcile)", async () => {

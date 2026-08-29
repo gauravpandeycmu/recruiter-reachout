@@ -67,12 +67,29 @@ function isProcessAlive(pid: number): boolean {
 }
 
 /**
+ * Does a lock/profile entry exist? Uses lstat (does NOT follow symlinks) so a
+ * live Chromium's SingletonLock — a *dangling* symlink whose target is a
+ * "<hostname>-<pid>" label, not a real file — still counts as present. Plain
+ * existsSync follows the link, so it reports a live lock as absent, which would
+ * make isChromiumProfileLocked always return false and clearStale skip a
+ * genuine stale lock. Regular files (SingletonCookie/Socket) lstat fine too.
+ */
+function lockEntryExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * True when another live Chromium owns this profile (SingletonLock → live PID).
  * Used by Setup probes so they never launch against a worker-held Gmail profile.
  */
 export function isChromiumProfileLocked(userDataDir: string): boolean {
   const lockPath = join(userDataDir, "SingletonLock");
-  if (!existsSync(lockPath)) {
+  if (!lockEntryExists(lockPath)) {
     return false;
   }
   try {
@@ -95,11 +112,11 @@ export function isChromiumProfileLocked(userDataDir: string): boolean {
  */
 export function clearStaleChromiumSingletonLocks(userDataDir: string): void {
   const lockPath = join(userDataDir, "SingletonLock");
-  if (!existsSync(lockPath)) {
+  if (!lockEntryExists(lockPath)) {
     // Clean leftover siblings if the lock itself is already gone.
     for (const name of ["SingletonCookie", "SingletonSocket"] as const) {
       const path = join(userDataDir, name);
-      if (existsSync(path)) {
+      if (lockEntryExists(path)) {
         try {
           unlinkSync(path);
         } catch {
@@ -128,7 +145,7 @@ export function clearStaleChromiumSingletonLocks(userDataDir: string): void {
 
   for (const name of ["SingletonLock", "SingletonCookie", "SingletonSocket"] as const) {
     const path = join(userDataDir, name);
-    if (!existsSync(path)) continue;
+    if (!lockEntryExists(path)) continue;
     try {
       unlinkSync(path);
     } catch {

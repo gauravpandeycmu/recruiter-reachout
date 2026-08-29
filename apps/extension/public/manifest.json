@@ -3,9 +3,20 @@
   "name": "Recruiter Reachout",
   "version": "2.0.0",
   "description": "Collect recruiter candidates from visible pages and send them to the local outreach dashboard.",
+  "icons": {
+    "16": "icon-16.png",
+    "32": "icon-32.png",
+    "48": "icon-48.png",
+    "128": "icon-128.png"
+  },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Recruiter Reachout"
+    "default_title": "Recruiter Reachout",
+    "default_icon": {
+      "16": "icon-16.png",
+      "32": "icon-32.png",
+      "48": "icon-48.png"
+    }
   },
   "permissions": ["activeTab", "scripting", "tabs"],
   "host_permissions": ["http://localhost:4000/*", "https://www.linkedin.com/*", "https://www.google.com/*", "https://www.bing.com/*"],

@@ -3,6 +3,7 @@ import type { RecruiterCandidate } from "@recruiter/shared";
 import { runDiscoveryPass } from "../src/discoveryPass.js";
 import type { JobrightPageAdapter } from "../src/jobright.js";
 import type { SalesqlPageAdapter } from "../src/salesql.js";
+import type { ApolloPageAdapter } from "../src/apollo.js";
 import type { WorkerApiClient } from "../src/apiClient.js";
 
 function candidate(overrides: Partial<RecruiterCandidate> = {}): RecruiterCandidate {
@@ -61,6 +62,16 @@ function createSalesqlAdapter(): SalesqlPageAdapter {
   };
 }
 
+function createApolloAdapter(): ApolloPageAdapter {
+  return {
+    navigateToProfile: vi.fn().mockResolvedValue(undefined),
+    waitForOverlay: vi.fn().mockResolvedValue({ visible: true }),
+    clickAccessEmail: vi.fn().mockResolvedValue(undefined),
+    readRevealedEmail: vi.fn().mockResolvedValue("apollo@example.com"),
+    closeOverlay: vi.fn().mockResolvedValue(undefined),
+  };
+}
+
 describe("runDiscoveryPass", () => {
   it("returns idle without creating an adapter when there is no candidate to discover", async () => {
     const apiClient = createFakeApiClient({ fetchNextDiscoveryCandidate: vi.fn().mockResolvedValue(undefined) });
@@ -76,6 +87,57 @@ describe("runDiscoveryPass", () => {
 
     expect(result.result).toBe("idle");
     expect(createJobrightAdapterFn).not.toHaveBeenCalled();
+    expect(apiClient.reportWorkerStatus).toHaveBeenCalledWith({
+      phase: "idle",
+      message: "Waiting for candidates that still need an email.",
+    });
+  });
+
+  it("treats a stolen/empty claim as idle even when pending-work still has discovery", async () => {
+    // Dashboard poll claimed the only person; worker still sees hasDiscovery=true
+    // (needs lookup) but next-discovery 404s. Must not drive Jobright against nobody.
+    const apiClient = createFakeApiClient({ fetchNextDiscoveryCandidate: vi.fn().mockResolvedValue(undefined) });
+    const createJobrightAdapterFn = vi.fn();
+
+    const result = await runDiscoveryPass({
+      apiClient,
+      createJobrightAdapter: createJobrightAdapterFn,
+      jobrightDryRun: false,
+      salesqlDryRun: false,
+      autoSendAfterDiscovery: false,
+    });
+
+    expect(result.result).toBe("idle");
+    expect(createJobrightAdapterFn).not.toHaveBeenCalled();
+    expect(apiClient.fetchNextDiscoveryCandidate).toHaveBeenCalledTimes(1);
+    expect(apiClient.reportDiscoveryResult).not.toHaveBeenCalled();
+  });
+
+  it("reports a Jobright toast timeout as error, recovers the page, and does not send", async () => {
+    const timeoutJobright = (): JobrightPageAdapter => ({
+      ...createJobrightAdapter(),
+      waitForContactResult: vi.fn().mockResolvedValue({ found: false, timedOut: true }),
+    });
+    const recoverJobrightPage = vi.fn().mockResolvedValue(undefined);
+    const apiClient = createFakeApiClient();
+
+    const result = await runDiscoveryPass({
+      apiClient,
+      createJobrightAdapter: timeoutJobright,
+      jobrightDryRun: false,
+      salesqlDryRun: true,
+      autoSendAfterDiscovery: true,
+      recoverJobrightPage,
+    });
+
+    expect(result.result).toBe("idle");
+    expect(apiClient.reportDiscoveryResult).toHaveBeenCalledWith("candidate-1", {
+      status: "error",
+      message: "Timed out waiting for Jobright contact result.",
+      provider: "jobright",
+    });
+    expect(recoverJobrightPage).toHaveBeenCalledTimes(1);
+    expect(apiClient.triggerSend).not.toHaveBeenCalled();
   });
 
   it("in dry-run mode, reports the dry_run outcome and never triggers a send", async () => {
@@ -167,6 +229,113 @@ describe("runDiscoveryPass", () => {
     }
   });
 
+  it("keeps a Jobright Gmail address and does not spend SalesQL", async () => {
+    const apiClient = createFakeApiClient({
+      fetchNextDiscoveryCandidate: vi.fn().mockResolvedValue(candidate({ company: "Apple" })),
+      fetchDiscoverySettings: vi.fn().mockResolvedValue({
+        salesqlAutoFallback: true,
+        updatedAt: new Date().toISOString(),
+      }),
+    });
+    const salesqlSpy = vi.fn(createSalesqlAdapter);
+    const gmailJobright = (): JobrightPageAdapter => ({
+      ...createJobrightAdapter(),
+      readRevealedEmail: vi.fn().mockResolvedValue("a.v.talnikov@gmail.com"),
+    });
+
+    const result = await runDiscoveryPass({
+      apiClient,
+      createJobrightAdapter: gmailJobright,
+      createSalesqlAdapter: salesqlSpy,
+      jobrightDryRun: false,
+      salesqlDryRun: false,
+      autoSendAfterDiscovery: true,
+    });
+
+    expect(result.result).toBe("worked");
+    expect(salesqlSpy).not.toHaveBeenCalled();
+    expect(apiClient.reportDiscoveryResult).toHaveBeenCalledWith("candidate-1", {
+      status: "found",
+      email: "a.v.talnikov@gmail.com",
+      provider: "jobright",
+    });
+    expect(apiClient.triggerSend).toHaveBeenCalled();
+  });
+
+  it("tries SalesQL when Jobright only has a previous-employer address even if auto-fallback is off", async () => {
+    const apiClient = createFakeApiClient({
+      fetchNextDiscoveryCandidate: vi.fn().mockResolvedValue(candidate({ company: "Apple" })),
+    });
+    const previousEmployerJobright = (): JobrightPageAdapter => ({
+      ...createJobrightAdapter(),
+      readRevealedEmail: vi.fn().mockResolvedValue("old.job@google.com"),
+    });
+    const salesqlGmail = (): SalesqlPageAdapter => ({
+      ...createSalesqlAdapter(),
+      readRevealedEmail: vi.fn().mockResolvedValue("a.v.talnikov@gmail.com"),
+    });
+
+    await runDiscoveryPass({
+      apiClient,
+      createJobrightAdapter: previousEmployerJobright,
+      createSalesqlAdapter: salesqlGmail,
+      jobrightDryRun: false,
+      salesqlDryRun: false,
+      autoSendAfterDiscovery: true,
+    });
+
+    expect(apiClient.fetchCanUseProvider).toHaveBeenCalledWith("salesql");
+    expect(apiClient.reportDiscoveryResult).toHaveBeenCalledWith("candidate-1", {
+      status: "found",
+      email: "a.v.talnikov@gmail.com",
+      provider: "salesql",
+      creditSpent: false,
+    });
+    expect(apiClient.triggerSend).toHaveBeenCalled();
+  });
+
+  it("tries SalesQL before Apollo for a previous-employer Jobright hit even if auto-fallback is off", async () => {
+    const apiClient = createFakeApiClient({
+      fetchNextDiscoveryCandidate: vi.fn().mockResolvedValue(candidate({ company: "Snowflake" })),
+      fetchCanUseProvider: vi.fn().mockImplementation(async (provider: string) => ({
+        provider,
+        monthKey: "2026-07",
+        allowed: true,
+        used: 0,
+        limit: 50,
+      })),
+    });
+    const apolloSpy = vi.fn(createApolloAdapter);
+    const previousEmployerJobright = (): JobrightPageAdapter => ({
+      ...createJobrightAdapter(),
+      readRevealedEmail: vi.fn().mockResolvedValue("old.job@google.com"),
+    });
+    const salesqlSnowflake = (): SalesqlPageAdapter => ({
+      ...createSalesqlAdapter(),
+      readRevealedEmail: vi.fn().mockResolvedValue("nick.choumitsky@snowflake.com"),
+    });
+
+    await runDiscoveryPass({
+      apiClient,
+      createJobrightAdapter: previousEmployerJobright,
+      createApolloAdapter: apolloSpy,
+      createSalesqlAdapter: salesqlSnowflake,
+      jobrightDryRun: false,
+      salesqlDryRun: false,
+      apolloDryRun: false,
+      autoSendAfterDiscovery: true,
+    });
+
+    expect(apiClient.fetchCanUseProvider).toHaveBeenCalledWith("salesql");
+    expect(apolloSpy).not.toHaveBeenCalled();
+    expect(apiClient.reportDiscoveryResult).toHaveBeenCalledWith("candidate-1", {
+      status: "found",
+      email: "nick.choumitsky@snowflake.com",
+      provider: "salesql",
+      creditSpent: false,
+    });
+  });
+
   it("skips SalesQL fallback by default even when Jobright not_found and quota allows", async () => {
     const apiClient = createFakeApiClient();
     const salesqlSpy = vi.fn(createSalesqlAdapter);
@@ -229,6 +398,128 @@ describe("runDiscoveryPass", () => {
       creditSpent: false,
     });
     expect(apiClient.triggerSend).toHaveBeenCalled();
+  });
+
+  it("tries SalesQL before Apollo when auto-fallback is on and Jobright misses", async () => {
+    const apiClient = createFakeApiClient({
+      fetchDiscoverySettings: vi.fn().mockResolvedValue({
+        salesqlAutoFallback: true,
+        updatedAt: new Date().toISOString(),
+      }),
+      fetchCanUseProvider: vi.fn().mockImplementation(async (provider: string) => ({
+        provider,
+        monthKey: "2026-07",
+        allowed: true,
+        used: 0,
+        limit: 50,
+      })),
+    });
+    const apolloSpy = vi.fn(createApolloAdapter);
+    const notFoundJobright = (): JobrightPageAdapter => ({
+      ...createJobrightAdapter(),
+      waitForContactResult: vi.fn().mockResolvedValue({ found: false }),
+    });
+
+    await runDiscoveryPass({
+      apiClient,
+      createJobrightAdapter: notFoundJobright,
+      createApolloAdapter: apolloSpy,
+      createSalesqlAdapter: createSalesqlAdapter,
+      jobrightDryRun: false,
+      salesqlDryRun: false,
+      apolloDryRun: false,
+      autoSendAfterDiscovery: true,
+    });
+
+    expect(apiClient.fetchCanUseProvider).toHaveBeenCalledWith("salesql");
+    expect(apolloSpy).not.toHaveBeenCalled();
+    expect(apiClient.reportDiscoveryResult).toHaveBeenCalledWith("candidate-1", {
+      status: "found",
+      email: "salesql@example.com",
+      provider: "salesql",
+      creditSpent: false,
+    });
+    expect(apiClient.triggerSend).toHaveBeenCalled();
+  });
+
+  it("falls through to Apollo when auto-fallback is on and SalesQL has no email", async () => {
+    const apiClient = createFakeApiClient({
+      fetchDiscoverySettings: vi.fn().mockResolvedValue({
+        salesqlAutoFallback: true,
+        updatedAt: new Date().toISOString(),
+      }),
+      fetchCanUseProvider: vi.fn().mockImplementation(async (provider: string) => ({
+        provider,
+        monthKey: "2026-07",
+        allowed: true,
+        used: 0,
+        limit: 50,
+      })),
+    });
+    const missSalesql = (): SalesqlPageAdapter => ({
+      ...createSalesqlAdapter(),
+      readRevealedEmail: vi.fn().mockResolvedValue(undefined),
+      readPanelStatus: vi.fn().mockResolvedValue("no_emails"),
+    });
+    const notFoundJobright = (): JobrightPageAdapter => ({
+      ...createJobrightAdapter(),
+      waitForContactResult: vi.fn().mockResolvedValue({ found: false }),
+    });
+
+    await runDiscoveryPass({
+      apiClient,
+      createJobrightAdapter: notFoundJobright,
+      createSalesqlAdapter: missSalesql,
+      createApolloAdapter: createApolloAdapter,
+      jobrightDryRun: false,
+      salesqlDryRun: false,
+      apolloDryRun: false,
+      autoSendAfterDiscovery: true,
+    });
+
+    expect(apiClient.fetchCanUseProvider).toHaveBeenCalledWith("salesql");
+    expect(apiClient.fetchCanUseProvider).toHaveBeenCalledWith("apollo");
+    expect(apiClient.reportDiscoveryResult).toHaveBeenCalledWith("candidate-1", {
+      status: "found",
+      email: "apollo@example.com",
+      provider: "apollo",
+      creditSpent: false,
+    });
+  });
+
+  it("recovers the Finder page after an Apollo overlay error", async () => {
+    const apiClient = createFakeApiClient({
+      fetchDiscoverySettings: vi.fn().mockResolvedValue({
+        salesqlAutoFallback: true,
+        updatedAt: new Date().toISOString(),
+      }),
+    });
+    const recoverSalesqlPage = vi.fn().mockResolvedValue(undefined);
+    const closedApollo = (): ApolloPageAdapter => ({
+      ...createApolloAdapter(),
+      waitForOverlay: vi.fn().mockResolvedValue({ visible: false }),
+    });
+
+    const result = await runDiscoveryPass({
+      apiClient,
+      createJobrightAdapter: () => ({
+        ...createJobrightAdapter(),
+        waitForContactResult: vi.fn().mockResolvedValue({ found: false }),
+      }),
+      createApolloAdapter: closedApollo,
+      jobrightDryRun: false,
+      salesqlDryRun: false,
+      apolloDryRun: false,
+      autoSendAfterDiscovery: false,
+      recoverSalesqlPage,
+    });
+
+    expect(result.result).toBe("idle");
+    expect(recoverSalesqlPage).toHaveBeenCalled();
+    expect(apiClient.reportDiscoveryResult).toHaveBeenCalledWith(
+      "candidate-1",
+      expect.objectContaining({ status: "error", provider: "apollo" }),
+    );
   });
 
   it("does not try SalesQL when quota is exhausted even with auto-fallback on", async () => {

@@ -117,6 +117,25 @@ describe("extension parser", () => {
     });
   });
 
+  it("keeps a vanity-slug surname of 6+ letters (no opaque id) instead of stripping it as an id", () => {
+    document.body.innerHTML = `
+      <div role="listitem">
+        <a href="/in/jenny-anderson/">
+          <span>Connect</span>
+        </a>
+      </div>
+    `;
+
+    const candidates = parseSearchResults(document);
+    // Old id-strip regex treated "-anderson" (8 alnum, no digit) as an opaque id,
+    // leaving "jenny" (a single word) → no name → the recruiter was dropped.
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({
+      fullName: "Jenny Anderson",
+      linkedinUrl: "https://www.linkedin.com/in/jenny-anderson",
+    });
+  });
+
   it("uses profile labels and full result cards instead of noisy card text", () => {
     document.body.innerHTML = `
       <li class="reusable-search__result-container">
@@ -435,6 +454,56 @@ describe("extension parser", () => {
     expect(result.companySuggestion).toBe("Apple");
   });
 
+  it("parses an engineering profile headline without recruiter-fallback / location glue", () => {
+    document.head.innerHTML = "";
+    document.title = "SWAMINATHAN PISUPATI | LinkedIn";
+    document.body.innerHTML = `
+      <div class="pv-text-details__left-panel">
+        <h1>SWAMINATHAN PISUPATI</h1>
+        <div class="text-body-medium">Principal Software Engineering Lead at Microsoft</div>
+        <span class="text-body-small">Redmond, Washington, United States</span>
+        <button>Microsoft</button>
+      </div>
+      <aside>
+        <div class="text-body-medium">Recruiter @ Microsoft</div>
+        <div>recruiting #QualityThroughData #LeadWithData</div>
+      </aside>
+      <a href="https://www.linkedin.com/company/microsoft/">Microsoft</a>
+    `;
+
+    const result = parseCurrentPage(document, "https://www.linkedin.com/in/swaminathan-pisupati-2b941992/");
+    expect(result.candidates[0]).toMatchObject({
+      fullName: "SWAMINATHAN PISUPATI",
+      title: "Principal Software Engineering Lead at Microsoft",
+      company: "Microsoft",
+      location: "Redmond, Washington, United States",
+    });
+  });
+
+  it("uses JSON-LD jobTitle when the top-card headline node is missing", () => {
+    document.head.innerHTML = `
+      <script type="application/ld+json">
+        {"@context":"https://schema.org","@graph":[{"@type":"Person","name":"Christian Kotitschke","jobTitle":"Principal Software Engineering Lead - Windows Servicing and Delivery at Microsoft"}]}
+      </script>
+    `;
+    document.title = "Christian Kotitschke | LinkedIn";
+    document.body.innerHTML = `
+      <h1>Christian Kotitschke</h1>
+      <div>recruiting #QualityThroughData #LeadWithData #DataAndInsights</div>
+      <div>Windows Servicing and Delivery at Microsoft Redmond, Washington</div>
+      <a href="https://www.linkedin.com/company/microsoft/">Microsoft</a>
+    `;
+
+    const result = parseCurrentPage(document, "https://www.linkedin.com/in/christiankotitschke/");
+    expect(result.candidates[0]).toMatchObject({
+      fullName: "Christian Kotitschke",
+      title: "Principal Software Engineering Lead - Windows Servicing and Delivery at Microsoft",
+      company: "Microsoft",
+    });
+    expect(result.candidates[0]?.title).not.toMatch(/#/);
+    expect(result.candidates[0]?.location ?? "").not.toMatch(/Windows Servicing/);
+  });
+
   it("returns no photo on a profile page rather than another person's photo", () => {
     document.head.innerHTML = "";
     document.title = "Jane Doe | LinkedIn";
@@ -524,5 +593,341 @@ describe("extension parser", () => {
 
     const result = parseCurrentPage(document, "https://www.linkedin.com/in/jane-doe");
     expect(result.companySuggestion).toBe("OpenAI");
+  });
+
+  it("parses profile names that include a parenthesized surname and still prefills company", () => {
+    document.head.innerHTML = `
+      <meta property="og:title" content="Jenny Laton (Hsu) | LinkedIn" />
+    `;
+    document.title = "Jenny Laton (Hsu) | LinkedIn";
+    document.body.innerHTML = `
+      <section class="artdeco-card pv-top-card">
+        <h1>Jenny Laton (Hsu)</h1>
+        <div class="text-body-medium">Talent Acquisition at Netflix</div>
+        <button aria-label="Current company: Netflix">
+          <span aria-hidden="true">Netflix</span>
+        </button>
+      </section>
+    `;
+
+    const result = parseCurrentPage(document, "https://www.linkedin.com/in/jennyhsu2/");
+    expect(result.candidates[0]).toMatchObject({
+      fullName: "Jenny Laton (Hsu)",
+      firstName: "Jenny",
+      company: "Netflix",
+    });
+    expect(result.companySuggestion).toBe("Netflix");
+  });
+
+  it("ignores LinkedIn utility text like 'Skip to search' and still picks the actual current company", () => {
+    document.head.innerHTML = "";
+    document.title = "Jenny Laton (Hsu) | LinkedIn";
+    document.body.innerHTML = `
+      <section class="pv-top-card">
+        <div class="pv-text-details__left-panel">
+          <button><span aria-hidden="true">Skip to search</span></button>
+          <h1>Jenny Laton (Hsu)</h1>
+          <div class="text-body-medium">Talent Acquisition at Netflix</div>
+        </div>
+        <div class="pv-text-details__right-panel">
+          <button aria-label="Current company: Netflix">
+            <img alt="Netflix logo" />
+            <span aria-hidden="true">Netflix</span>
+          </button>
+          <button aria-label="Education: Cal Poly Pomona">
+            <span aria-hidden="true">Cal Poly Pomona</span>
+          </button>
+        </div>
+      </section>
+    `;
+
+    const result = parseCurrentPage(document, "https://www.linkedin.com/in/jennyhsu2/");
+    expect(result.candidates[0]?.company).toBe("Netflix");
+    expect(result.companySuggestion).toBe("Netflix");
+  });
+
+  it("parses the newer LinkedIn profile layout where name is an h2 and company is a button in main content", () => {
+    document.head.innerHTML = "";
+    document.title = "Amrita Jain | LinkedIn";
+    document.body.innerHTML = `
+      <main>
+        <section aria-label="Primary content">
+          <button><span>Skip to search</span></button>
+          <a href="https://www.linkedin.com/in/amritajain007/">
+            <h2>Amrita Jain</h2>
+          </a>
+          <p>· 3rd</p>
+          <p>Principal Software Engineer at NVIDIA</p>
+          <p>San Jose, California, United States</p>
+          <button aria-label="NVIDIA">
+            <figure></figure>
+            <p>NVIDIA</p>
+          </button>
+          <button aria-label="Texas Executive Education | The University of Texas at Austin">
+            <figure></figure>
+            <p>Texas Executive Education | The University of Texas at Austin</p>
+          </button>
+        </section>
+      </main>
+    `;
+
+    const result = parseCurrentPage(document, "https://www.linkedin.com/in/amritajain007/");
+    expect(result.candidates[0]).toMatchObject({
+      fullName: "Amrita Jain",
+      title: "Principal Software Engineer at NVIDIA",
+      company: "NVIDIA",
+      location: "San Jose, California, United States",
+    });
+    expect(result.companySuggestion).toBe("NVIDIA");
+  });
+
+  it("prefers the right-side company chip over follow buttons in founder profiles", () => {
+    document.head.innerHTML = "";
+    document.title = "Prasanna K Ram | LinkedIn";
+    document.body.innerHTML = `
+      <main>
+        <section aria-label="Primary content">
+          <h1>Prasanna K Ram</h1>
+          <p>Founder & CEO, ChatOps.health | Digital Transformation | Applied AI | Enterprise Systems</p>
+          <p>Chennai, Tamil Nadu, India</p>
+          <button>Follow</button>
+          <button>Message</button>
+          <button>Visit my website</button>
+          <button>More</button>
+          <button aria-label="ChatOps.health">
+            <figure></figure>
+            <p>ChatOps.health</p>
+          </button>
+          <button aria-label="Birla Institute of Technology and Science, Pilani">
+            <figure></figure>
+            <p>Birla Institute of Technology and Science, Pilani</p>
+          </button>
+        </section>
+      </main>
+    `;
+
+    const result = parseCurrentPage(document, "https://www.linkedin.com/in/prasannakram/");
+    expect(result.candidates[0]).toMatchObject({
+      fullName: "Prasanna K Ram",
+      company: "ChatOps.health",
+      title: "Founder & CEO, ChatOps.health | Digital Transformation | Applied AI | Enterprise Systems",
+    });
+    expect(result.companySuggestion).toBe("ChatOps.health");
+  });
+
+  it("prefers the right-side company chip over the headline in founder profiles", () => {
+    document.head.innerHTML = "";
+    document.title = "Senthil Kumar P | LinkedIn";
+    document.body.innerHTML = `
+      <main>
+        <section aria-label="Primary content">
+          <h1>Senthil Kumar P</h1>
+          <p>Co-Founder at VAMOSYS</p>
+          <p>Chennai, Tamil Nadu, India</p>
+          <button>Message</button>
+          <button>Follow</button>
+          <button>More</button>
+          <button aria-label="VAMOSYS">
+            <figure></figure>
+            <p>VAMOSYS</p>
+          </button>
+          <button aria-label="Madurai Kamaraj University">
+            <figure></figure>
+            <p>Madurai Kamaraj University</p>
+          </button>
+        </section>
+      </main>
+    `;
+
+    const result = parseCurrentPage(document, "https://www.linkedin.com/in/senthil-kumar-p-vamosys/");
+    expect(result.candidates[0]).toMatchObject({
+      fullName: "Senthil Kumar P",
+      company: "VAMOSYS",
+      title: "Co-Founder at VAMOSYS",
+      location: "Chennai, Tamil Nadu, India",
+    });
+    expect(result.companySuggestion).toBe("VAMOSYS");
+  });
+
+  it("ignores image credential overlays and still picks the current company", () => {
+    document.head.innerHTML = "";
+    document.title = "Deepa Pandian | LinkedIn";
+    document.body.innerHTML = `
+      <main>
+        <section aria-label="Primary content">
+          <h1>Deepa Pandian</h1>
+          <p>HR Manager</p>
+          <p>VAMOSYS</p>
+          <p>Chennai, Tamil Nadu, India</p>
+          <a href="https://bizmagnets.ai">bizmagnets.ai</a>
+          <button aria-label="This image has content credentials."><figure></figure></button>
+          <button>Message</button>
+          <button>Follow</button>
+        </section>
+      </main>
+    `;
+
+    const result = parseCurrentPage(document, "https://www.linkedin.com/in/deepa-pandian-91a6531a0/");
+    expect(result.candidates[0]).toMatchObject({
+      fullName: "Deepa Pandian",
+      title: "HR Manager",
+      company: "VAMOSYS",
+      location: "Chennai, Tamil Nadu, India",
+    });
+    expect(result.companySuggestion).toBe("VAMOSYS");
+  });
+
+  it("reads the company from the top affiliation pair even when only text lines are available", () => {
+    document.head.innerHTML = "";
+    document.title = "Nithya G | LinkedIn";
+    document.body.innerHTML = `
+      <main>
+        <section aria-label="Primary content">
+          <h1>Nithya G</h1>
+          <p>CPO @ ChatOps.health | Making hospital discharges predictable | WhatsApp-native hospital workflows.</p>
+          <p>ChatOps.health · Kandaswami Kandars College</p>
+          <p>Chennai, Tamil Nadu, India</p>
+          <button>Message</button>
+          <button>Follow</button>
+          <button>More</button>
+        </section>
+        <section>
+          <h2>About</h2>
+          <p>I’m the Chief Product Officer at BizMagnets.</p>
+        </section>
+      </main>
+    `;
+
+    const result = parseCurrentPage(document, "https://www.linkedin.com/in/nithyasenthilkumar/");
+    expect(result.candidates[0]).toMatchObject({
+      fullName: "Nithya G",
+      title: "CPO @ ChatOps.health | Making hospital discharges predictable | WhatsApp-native hospital workflows.",
+      company: "ChatOps.health",
+      location: "Chennai, Tamil Nadu, India",
+    });
+    expect(result.companySuggestion).toBe("ChatOps.health");
+  });
+
+  it("does not let highlights overwrite the current company from the live profile", () => {
+    document.head.innerHTML = "";
+    document.title = "Ruchi Bhatia | LinkedIn";
+    document.body.innerHTML = `
+      <main>
+        <section aria-label="Primary content">
+          <h1>Ruchi Bhatia</h1>
+          <p>Technical Product Marketing at AWS | Youngest 3x Kaggle Grandmaster | Speaker | Empowering Early Career Professionals to Break into Tech</p>
+          <p>Amazon Web Services (AWS) · Carnegie Mellon University</p>
+          <p>San Francisco Bay Area</p>
+        </section>
+        <section>
+          <h2>Highlights</h2>
+          <p>You both worked at Carnegie Mellon University and Google</p>
+        </section>
+      </main>
+    `;
+
+    const result = parseCurrentPage(document, "https://www.linkedin.com/in/ruchi798/");
+    expect(result.candidates[0]).toMatchObject({
+      fullName: "Ruchi Bhatia",
+      title: "Technical Product Marketing at AWS | Youngest 3x Kaggle Grandmaster | Speaker | Empowering Early Career Professionals to Break into Tech",
+      company: "Amazon Web Services (AWS)",
+      location: "San Francisco Bay Area",
+    });
+    expect(result.companySuggestion).toBe("Amazon Web Services (AWS)");
+  });
+
+  it("uses the Experience Present role instead of a previous employer in About", () => {
+    document.head.innerHTML = "";
+    document.title = "Emily McLaughlin | LinkedIn";
+    document.body.innerHTML = `
+      <section class="artdeco-card pv-top-card">
+        <h1>Emily McLaughlin</h1>
+        <div class="text-body-medium">Leading product vision and strategy for next-generation AI platforms</div>
+        <a href="https://www.linkedin.com/company/astrobotic/">You both worked at Astrobotic</a>
+      </section>
+      <section>
+        <p>Previously at Astrobotic and Actalent. Grateful for my time at Argo AI.</p>
+      </section>
+      <section class="artdeco-card">
+        <div id="experience"></div>
+        <h2>Experience</h2>
+        <ul>
+          <li>
+            <a href="https://www.linkedin.com/company/citi/">
+              <span aria-hidden="true">Citi</span>
+            </a>
+            <span>Director, Product Strategy</span>
+            <span>Jan 2024 - Present · 2 yrs</span>
+          </li>
+          <li>
+            <a href="https://www.linkedin.com/company/astrobotic/">
+              <span aria-hidden="true">Astrobotic</span>
+            </a>
+            <span>Senior People Operations Partner</span>
+            <span>Jul 2023 - Jan 2024</span>
+          </li>
+        </ul>
+      </section>
+    `;
+
+    const result = parseCurrentPage(document, "https://www.linkedin.com/in/emilyomclaughlin/");
+    expect(result.candidates[0]).toMatchObject({
+      fullName: "Emily McLaughlin",
+      company: "Citi",
+      linkedinCompanySlug: "citi",
+    });
+    expect(result.companySuggestion).toBe("Citi");
+  });
+
+  it("reads current company from a top-card button when LinkedIn has no /company/ link", () => {
+    document.head.innerHTML = "";
+    document.title = "Emily McLaughlin | LinkedIn";
+    document.body.innerHTML = `
+      <section class="pv-top-card">
+        <h1>Emily McLaughlin</h1>
+        <div class="pv-text-details__right-panel">
+          <button aria-label="Current company: Citi">
+            <img alt="Citi logo" />
+            <span aria-hidden="true">Citi</span>
+          </button>
+          <button aria-label="Education University of Pittsburgh">
+            <span aria-hidden="true">University of Pittsburgh</span>
+          </button>
+        </div>
+        <button>Message</button>
+        <button>Follow</button>
+      </section>
+    `;
+
+    const result = parseCurrentPage(document, "https://www.linkedin.com/in/emilyomclaughlin/");
+    expect(result.companySuggestion).toBe("Citi");
+  });
+
+  it("reads current company from JSON-LD worksFor", () => {
+    document.head.innerHTML = `
+      <script type="application/ld+json">
+        {"@context":"https://schema.org","@type":"Person","name":"Emily McLaughlin","jobTitle":"Director, Product Strategy","worksFor":{"@type":"Organization","name":"Citi"}}
+      </script>
+    `;
+    document.title = "Emily McLaughlin | LinkedIn";
+    document.body.innerHTML = `
+      <h1>Emily McLaughlin</h1>
+      <div class="text-body-medium">Leading product vision and strategy for next-generation AI platforms</div>
+    `;
+
+    const result = parseCurrentPage(document, "https://www.linkedin.com/in/emilyomclaughlin/");
+    expect(result.companySuggestion).toBe("Citi");
+  });
+
+  it("does not take an 'ex Company' headline as the current employer", () => {
+    document.head.innerHTML = "";
+    document.title = "Stanislav Beliaev | LinkedIn";
+    document.body.innerHTML = `
+      <h1>Stanislav Beliaev</h1>
+      <div class="text-body-medium">Co-Founder &amp; CTO at Fluently, ex Nvidia</div>
+    `;
+
+    const result = parseCurrentPage(document, "https://www.linkedin.com/in/stanislav-beliaev/");
+    expect(result.companySuggestion).toBe("Fluently");
   });
 });

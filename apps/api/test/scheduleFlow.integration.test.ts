@@ -446,6 +446,89 @@ describe("schedule flow integration", () => {
     expect(bobJob?.body).not.toContain("{firstName}");
   });
 
+  it("does not template a source first name that is a substring of another word (batch edit)", async () => {
+    // Source recruiter's first name "Ana" also appears INSIDE "Analytics". The
+    // batch edit converts the source's name back to {firstName}; a naive
+    // substring replace would also template the "Ana" inside "Analytics", which
+    // then renders as every OTHER recipient's name mid-word (Bob → "Boblytics").
+    const ana = await seedReadyCandidate("Ana Recruiter", "DataCo", "ana@dataco.com");
+    const bob = await seedReadyCandidate("Bob Recruiter", "DataCo", "bob@dataco.com");
+    const startAt = new Date(Date.now() + 60 * 60_000).toISOString();
+    await scheduleSends(store, {
+      candidateIds: [ana.id, bob.id],
+      startAt,
+      intervalMinutes: 12,
+      mode: "schedule",
+    });
+
+    // The user edits the preview they see for Ana (name already substituted in).
+    const result = await updateScheduledCompanyBatch(store, {
+      company: "DataCo",
+      subject: "Hi Ana",
+      body: "Hi Ana, excited about the Analytics team at DataCo.",
+      sourceCandidateId: ana.id,
+      candidateIds: [ana.id, bob.id],
+    });
+    expect(result.jobsUpdated).toBe(2);
+
+    // The stored template keeps "Analytics" literal and only the standalone
+    // greeting becomes {firstName}.
+    const template = store.getCompanyContent("dataco");
+    expect(template?.body).toContain("Analytics team");
+    expect(template?.body).toContain("Hi {firstName},");
+    expect(template?.body).not.toContain("{firstName}lytics");
+
+    // Ana still renders correctly, and Bob is NOT mangled into "Boblytics".
+    const upcoming = listUpcomingSends(store);
+    const bobJob = upcoming.find((item) => item.candidateId === bob.id);
+    const anaJob = upcoming.find((item) => item.candidateId === ana.id);
+    expect(anaJob?.body).toContain("Hi Ana,");
+    expect(anaJob?.body).toContain("Analytics team");
+    expect(bobJob?.body).toContain("Hi Bob,");
+    expect(bobJob?.body).toContain("Analytics team");
+    expect(bobJob?.body).not.toContain("Boblytics");
+  });
+
+  it("templates a source first name that ends in an accented letter (batch edit)", async () => {
+    // "José" ends in a non-ASCII letter. ASCII-only `\b` never matches the
+    // trailing boundary after "é", so the old word-boundary replace left "José"
+    // literal in the template — which then hardcodes the SOURCE recruiter's name
+    // and greets every OTHER recipient of the batch as "José" instead of {firstName}.
+    const jose = await seedReadyCandidate("José Recruiter", "DataCo", "jose@dataco.com");
+    const bob = await seedReadyCandidate("Bob Recruiter", "DataCo", "bob@dataco.com");
+    const startAt = new Date(Date.now() + 60 * 60_000).toISOString();
+    await scheduleSends(store, {
+      candidateIds: [jose.id, bob.id],
+      startAt,
+      intervalMinutes: 12,
+      mode: "schedule",
+    });
+
+    const result = await updateScheduledCompanyBatch(store, {
+      company: "DataCo",
+      subject: "Hi José",
+      body: "Hi José, great to connect about DataCo.",
+      sourceCandidateId: jose.id,
+      candidateIds: [jose.id, bob.id],
+    });
+    expect(result.jobsUpdated).toBe(2);
+
+    // The stored template must NOT hardcode the source name (subject AND body
+    // both flow through personalizeToTemplate).
+    const template = store.getCompanyContent("dataco");
+    expect(template?.subject).toBe("Hi {firstName}");
+    expect(template?.body).toContain("Hi {firstName},");
+    expect(template?.body).not.toContain("José");
+
+    // Bob is greeted by HIS name, not the source recruiter's "José".
+    const upcoming = listUpcomingSends(store);
+    const bobJob = upcoming.find((item) => item.candidateId === bob.id);
+    const joseJob = upcoming.find((item) => item.candidateId === jose.id);
+    expect(joseJob?.body).toContain("Hi José,");
+    expect(bobJob?.body).toContain("Hi Bob,");
+    expect(bobJob?.body).not.toContain("José");
+  });
+
   it("updates all pending jobs for a company when candidateIds is omitted", async () => {
     const jane = await seedReadyCandidate("Jane Recruiter", "Acme", "jane@acme.com");
     const bob = await seedReadyCandidate("Bob Recruiter", "Acme", "bob@acme.com");

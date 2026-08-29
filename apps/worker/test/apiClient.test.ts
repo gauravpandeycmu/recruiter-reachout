@@ -14,6 +14,18 @@ beforeAll(async () => {
     req.on("end", () => {
       const body = chunks.length > 0 ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : undefined;
 
+      if (req.method === "GET" && req.url === "/api/automation/pending-work") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            hasInProgressSend: false,
+            hasDiscovery: true,
+            hasCapture: false,
+            hasEnrich: false,
+          }),
+        );
+        return;
+      }
       if (req.method === "GET" && req.url === "/api/automation/next-discovery") {
         nextDiscoveryCallCount += 1;
         if (nextDiscoveryCallCount > 1) {
@@ -28,6 +40,11 @@ beforeAll(async () => {
       if (req.method === "GET" && req.url === "/api/automation/can-use-provider/salesql") {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ provider: "salesql", monthKey: "2026-07", allowed: true, used: 0, limit: 50 }));
+        return;
+      }
+      if (req.method === "GET" && req.url === "/api/automation/can-use-provider/apollo") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ provider: "apollo", monthKey: "2026-07", allowed: true, used: 0, limit: 50 }));
         return;
       }
       if (req.method === "POST" && req.url === "/api/candidates/candidate-1/email-discovered") {
@@ -79,6 +96,19 @@ afterAll(() => {
 });
 
 describe("worker apiClient", () => {
+  it("fetches pending-work without claiming a discovery candidate", async () => {
+    const client = createApiClient({ baseUrl });
+    const before = nextDiscoveryCallCount;
+    const pending = await client.fetchPendingWork();
+    expect(pending).toMatchObject({
+      hasDiscovery: true,
+      hasInProgressSend: false,
+      hasCapture: false,
+      hasEnrich: false,
+    });
+    expect(nextDiscoveryCallCount).toBe(before);
+  });
+
   it("fetches the next discovery candidate", async () => {
     const client = createApiClient({ baseUrl });
     const candidate = await client.fetchNextDiscoveryCandidate();
@@ -107,6 +137,8 @@ describe("worker apiClient", () => {
     const client = createApiClient({ baseUrl });
     const quota = await client.fetchCanUseProvider("salesql");
     expect(quota).toMatchObject({ provider: "salesql", allowed: true, limit: 50 });
+    const apollo = await client.fetchCanUseProvider("apollo");
+    expect(apollo).toMatchObject({ provider: "apollo", allowed: true, limit: 50 });
   });
 
   it("reports worker status heartbeats", async () => {

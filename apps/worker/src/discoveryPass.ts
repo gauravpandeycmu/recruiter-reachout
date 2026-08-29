@@ -3,19 +3,24 @@ import { runDiscoveryChain } from "./discoveryChain.js";
 import type { DiscoveryOutcome } from "./discoveryOutcome.js";
 import type { JobrightDiscoveryOptions, JobrightPageAdapter } from "./jobright.js";
 import type { SalesqlDiscoveryOptions, SalesqlPageAdapter } from "./salesql.js";
+import type { ApolloDiscoveryOptions, ApolloPageAdapter } from "./apollo.js";
+import { isFinderForce, isFinderProvider, discoveryProviderLabel } from "@recruiter/shared";
 
 export interface DiscoveryPassDeps {
   apiClient: WorkerApiClient;
   createJobrightAdapter: () => JobrightPageAdapter;
   createSalesqlAdapter?: () => SalesqlPageAdapter | Promise<SalesqlPageAdapter>;
+  createApolloAdapter?: () => ApolloPageAdapter | Promise<ApolloPageAdapter>;
   jobrightDryRun: boolean;
   salesqlDryRun: boolean;
+  apolloDryRun?: boolean;
   /** When true, immediately calls the existing /send endpoint right after a successful, non-dry-run discovery. */
   autoSendAfterDiscovery: boolean;
   jobrightOptions?: Partial<JobrightDiscoveryOptions>;
   salesqlOptions?: Partial<SalesqlDiscoveryOptions>;
+  apolloOptions?: Partial<ApolloDiscoveryOptions>;
   /**
-   * Called after a SalesQL timeout/error so the shared Playwright page can be
+   * Called after a SalesQL/Apollo timeout/error so the shared Playwright page can be
    * yanked off LinkedIn (aborting orphaned navigations) before the next pass.
    */
   recoverSalesqlPage?: () => Promise<void>;
@@ -140,53 +145,74 @@ export async function runDiscoveryPass(deps: DiscoveryPassDeps): Promise<Discove
     return { result: "idle", usedSalesql: false };
   }
 
-  const providerLabel = candidate.forceProvider === "salesql" ? "SalesQL" : "Jobright";
+  const forcedFinder = isFinderForce(candidate.forceProvider);
+  const providerLabel = forcedFinder ? "Finder" : "Jobright";
   let currentStatus: Parameters<WorkerApiClient["reportWorkerStatus"]>[0] = {
     phase: "looking_up",
     message: `Looking up ${candidate.fullName} via ${providerLabel}…`,
     candidateId: candidate.id,
     candidateName: candidate.fullName,
-    provider: candidate.forceProvider === "salesql" ? "salesql" : "jobright",
+    provider: forcedFinder ? "apollo" : "jobright",
   };
   await reportStatus(deps.apiClient, currentStatus, log);
   const stopHeartbeat = startHeartbeat(deps.apiClient, () => currentStatus, log);
 
+  const canUseFinderSource = async (
+    provider: "apollo" | "salesql",
+    reason?: "auto" | "previous_employer",
+  ): Promise<boolean> => {
+    if (provider === "apollo" && !deps.createApolloAdapter) {
+      return false;
+    }
+    if (provider === "salesql" && !deps.createSalesqlAdapter) {
+      return false;
+    }
+    if (!forcedFinder && reason !== "previous_employer") {
+      const settings = await deps.apiClient.fetchDiscoverySettings();
+      if (!settings.salesqlAutoFallback) {
+        return false;
+      }
+    }
+    const quota = await deps.apiClient.fetchCanUseProvider(provider);
+    return quota.allowed;
+  };
+
   let usedSalesql = false;
+  let usedFinder: "apollo" | "salesql" | undefined;
   let outcome: DiscoveryOutcome;
   try {
     outcome = await withTimeout(
       runDiscoveryChain(candidate.linkedinUrl ?? "", {
         jobrightAdapter: deps.createJobrightAdapter(),
         createSalesqlAdapter: deps.createSalesqlAdapter,
+        createApolloAdapter: deps.createApolloAdapter,
         jobrightDryRun: deps.jobrightDryRun,
         salesqlDryRun: deps.salesqlDryRun,
+        apolloDryRun: deps.apolloDryRun,
         forceProvider: candidate.forceProvider,
-        canUseSalesql: async () => {
-          if (!deps.createSalesqlAdapter) {
-            return false;
-          }
-          // Forced SalesQL (Look up via SalesQL / sweep) always allowed if quota remains.
-          // Automatic Jobright→SalesQL fallback only when the dashboard toggle is on.
-          if (candidate.forceProvider !== "salesql") {
-            const settings = await deps.apiClient.fetchDiscoverySettings();
-            if (!settings.salesqlAutoFallback) {
-              return false;
-            }
-          }
-          const quota = await deps.apiClient.fetchCanUseProvider("salesql");
-          return quota.allowed;
-        },
+        canUseSalesql: (reason) => canUseFinderSource("salesql", reason),
+        canUseApollo: (reason) => canUseFinderSource("apollo", reason),
         jobrightOptions: deps.jobrightOptions,
         salesqlOptions: deps.salesqlOptions,
+        apolloOptions: deps.apolloOptions,
+        company: candidate.company,
         log: (message) => {
-          if (message.includes("trying SalesQL") || message.includes("Forced SalesQL")) {
-            usedSalesql = true;
+          const overlay: "apollo" | "salesql" | undefined = /trying Apollo/i.test(message)
+            ? "apollo"
+            : /trying SalesQL/i.test(message)
+              ? "salesql"
+              : undefined;
+          if (overlay) {
+            usedFinder = overlay;
+            usedSalesql = overlay === "salesql" || usedSalesql;
             currentStatus = {
               phase: "looking_up",
-              message: `Jobright missed ${candidate.fullName} — trying SalesQL…`,
+              message: forcedFinder
+                ? `Looking up ${candidate.fullName} via ${discoveryProviderLabel(overlay)}…`
+                : `Jobright missed ${candidate.fullName} — trying ${discoveryProviderLabel(overlay)}…`,
               candidateId: candidate.id,
               candidateName: candidate.fullName,
-              provider: "salesql",
+              provider: overlay,
             };
             void reportStatus(deps.apiClient, currentStatus, log);
           }
@@ -200,19 +226,19 @@ export async function runDiscoveryPass(deps: DiscoveryPassDeps): Promise<Discove
     outcome = {
       status: "error",
       message: error instanceof Error ? error.message : String(error),
-      provider: usedSalesql ? "salesql" : "jobright",
+      provider: usedFinder ?? (usedSalesql ? "salesql" : "jobright"),
     };
   } finally {
     stopHeartbeat();
   }
 
-  if (outcome.status === "error" && outcome.provider === "salesql" && deps.recoverSalesqlPage) {
+  if (outcome.status === "error" && isFinderProvider(outcome.provider) && deps.recoverSalesqlPage) {
     try {
       await deps.recoverSalesqlPage();
-      log("Recovered SalesQL page after error/timeout.");
+      log(`Recovered LinkedIn Finder page after ${outcome.provider} error/timeout.`);
     } catch (recoverError) {
       log(
-        `SalesQL page recovery failed: ${
+        `Finder page recovery failed: ${
           recoverError instanceof Error ? recoverError.message : String(recoverError)
         }`,
       );
@@ -258,7 +284,9 @@ export async function runDiscoveryPass(deps: DiscoveryPassDeps): Promise<Discove
     }`,
   );
 
-  const anyDryRun = deps.jobrightDryRun || (deps.salesqlDryRun && outcome.status === "dry_run");
+  const anyDryRun =
+    deps.jobrightDryRun ||
+    ((deps.salesqlDryRun || Boolean(deps.apolloDryRun)) && outcome.status === "dry_run");
   if (isSendable(outcome) && deps.autoSendAfterDiscovery && !anyDryRun) {
     try {
       await deps.apiClient.triggerSend(candidate.id);
@@ -268,7 +296,7 @@ export async function runDiscoveryPass(deps: DiscoveryPassDeps): Promise<Discove
     }
   }
 
-  if (outcome.provider === "salesql") {
+  if (outcome.provider === "salesql" || outcome.provider === "apollo") {
     usedSalesql = true;
   }
 

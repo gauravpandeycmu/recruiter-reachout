@@ -10,6 +10,7 @@
     "probe:salesql": "tsx scripts/probe-salesql.ts",
     "diagnose:salesql": "tsx scripts/diagnose-salesql.ts",
     "inspect:salesql": "tsx scripts/inspect-salesql-dom.ts",
+    "dump:apollo": "tsx scripts/dump-apollo-panel.ts",
     "watch:salesql": "tsx scripts/watch-salesql.ts",
     "migrate:salesql-profile": "tsx scripts/migrate-salesql-profile.ts",
     "open:login": "tsx scripts/open-login.ts",

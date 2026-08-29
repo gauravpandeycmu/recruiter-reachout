@@ -46,9 +46,9 @@ TOKEN_ENCRYPTION_KEY=generate-a-long-random-string
 PUBLIC_TRACKING_BASE_URL=https://your-free-relay.example.com
 RELAY_SYNC_TOKEN=generate-another-random-string
 DAILY_INTAKE_LIMIT=300
-DAILY_SEND_LIMIT=50
-HOURLY_SEND_LIMIT=5
-DOMAIN_DAILY_SEND_LIMIT=5
+DAILY_SEND_LIMIT=200
+HOURLY_SEND_LIMIT=100
+DOMAIN_DAILY_SEND_LIMIT=100
 ```
 
 ## Free Public Tracking Relay
@@ -114,9 +114,9 @@ Then set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`. In the dashboard, click 
 The app is designed for local intake of about 20 jobs/day and 15 recruiters/job:
 
 - Intake cap: 300 candidates/day.
-- Default send cap: 50 emails/day.
-- Per-hour cap: 5 emails/hour.
-- Per-company/domain cap: 5/day.
+- Default send cap: 200 emails/day.
+- Per-hour cap: 100 emails/hour.
+- Per-company/domain cap: 100/day.
 - High confidence emails can be scheduled.
 - Medium confidence emails require draft/review.
 - Low/blocked emails are not sent.

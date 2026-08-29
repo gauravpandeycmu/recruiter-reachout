@@ -61,6 +61,7 @@ function mockPage(overrides?: { url?: string; visibleSelectors?: string[] }) {
       goto: vi.fn(async () => {}),
       waitForTimeout: vi.fn(async () => {}),
       locator: vi.fn((selector: string) => locator(selector)),
+      frameLocator: vi.fn((selector: string) => locator(selector)),
       getByRole: vi.fn((role: string, opts?: { name?: RegExp }) =>
         locator(`role=${role}${opts?.name ? `:${String(opts.name)}` : ""}`),
       ),
@@ -287,6 +288,26 @@ describe("gmailPlaywrightAdapter", () => {
     // Make modal visible via locator path used by dismissGmailBlockers
     await dismissGmailBlockers(page as never);
     expect(clicks.length).toBeGreaterThan(0);
+  });
+
+  it("removes Google HATS survey iframes that intercept compose clicks", async () => {
+    const { page } = mockPage({
+      visibleSelectors: ["google-hats-survey"],
+    });
+    const removed: string[] = [];
+    page.evaluate = vi.fn(async (fn: () => void) => {
+      const survey = { remove: () => removed.push("google-hats-survey") };
+      vi.stubGlobal("document", {
+        querySelectorAll: (sel: string) => {
+          if (sel.includes("google-hats") || sel.includes("Google Survey")) return [survey];
+          return [];
+        },
+      });
+      fn();
+    });
+    await dismissGmailBlockers(page as never);
+    expect(removed).toContain("google-hats-survey");
+    vi.unstubAllGlobals();
   });
 
   it("uses the uploaded resume filename for Gmail attach, not the uuid disk name", () => {

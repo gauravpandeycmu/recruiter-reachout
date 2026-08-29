@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { LinkedInProfileEnrichJob } from "@recruiter/shared";
 import { normalizeLinkedInUrl } from "@recruiter/shared";
 import type { Store } from "./store.js";
-import { isWorkerHeartbeatFresh } from "./sendJobs.js";
+import { shouldReclaimStaleInProgress } from "./sendJobs.js";
 
 export function createLinkedInProfileEnrichJob(
   store: Store,
@@ -45,18 +45,18 @@ export function claimNextLinkedInProfileEnrichJob(
   store: Store,
   now: Date = new Date(),
 ): LinkedInProfileEnrichJob | undefined {
-  const nowMs = now.getTime();
   const STALE_MS = 5 * 60 * 1000;
   // A slow-but-alive enrich pass can run past this window without the worker
   // having crashed — reclaiming it in that case claims the same profile a
-  // second time while the first attempt is still genuinely working it.
-  const workerLooksAlive = isWorkerHeartbeatFresh(store, now);
+  // second time while the first attempt is still genuinely working it. The
+  // shared guard also reclaims a job orphaned by a crash+respawn (touched before
+  // the current worker session booted) so it can't leak past a fresh heartbeat.
   for (const job of store.listLinkedInProfileEnrichJobs()) {
     if (job.status !== "in_progress") {
       continue;
     }
-    const age = nowMs - new Date(job.updatedAt).getTime();
-    if (Number.isFinite(age) && age > STALE_MS && !workerLooksAlive) {
+    const touched = new Date(job.updatedAt).getTime();
+    if (shouldReclaimStaleInProgress(store, touched, now, STALE_MS)) {
       store.upsertLinkedInProfileEnrichJob({
         ...job,
         status: "pending",

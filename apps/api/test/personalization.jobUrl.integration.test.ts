@@ -51,6 +51,9 @@ describe("personalization from Publicis/Epsilon job URL", () => {
                       text: JSON.stringify({
                         subject: "Software Engineer role at Epsilon — {firstName}",
                         body: "Hi {firstName},\n\nSaw the Software Engineer opening (154242) focused on Python/Spark and wanted to introduce myself.\n\nBest,\nGaurav",
+                        linkedinSubject: "Software Engineer at Epsilon",
+                        linkedinMessage:
+                          "Hi {firstName},\n\nI saw the Software Engineer opening at Epsilon focused on Python and Spark. I've attached my resume and would appreciate it if you could take a quick look at my application.",
                       }),
                     },
                   ],
@@ -79,6 +82,8 @@ describe("personalization from Publicis/Epsilon job URL", () => {
     expect(content.generationContext?.jobDescription).toMatch(/Python|Spark/i);
     expect(content.subject).toMatch(/Software Engineer|Epsilon/i);
     expect(content.body).toContain("{firstName}");
+    expect(content.linkedinSubject).toContain("Epsilon");
+    expect(content.linkedinMessage).toContain("{firstName}");
     expect(content.model).toBeTruthy();
 
     // Page fetch + one Gemini draft (no extract Gemini, and no repair if validation passes).

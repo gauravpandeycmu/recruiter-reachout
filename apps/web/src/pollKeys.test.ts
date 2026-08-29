@@ -177,6 +177,65 @@ describe("appDataPollKey", () => {
     expect(appDataPollKey(a)).not.toBe(appDataPollKey(c));
   });
 
+  it("changes when a candidate's enriched name or photo lands (no status/email change)", () => {
+    // Background enrich fills the placeholder name and avatar without touching
+    // status or email presence — the poll must not discard that update.
+    const a = baseData({
+      candidates: [candidate({ id: "c1", status: "email_guessed", email: "a@x.com", fullName: "Recruiter" })],
+    });
+    const named = baseData({
+      candidates: [candidate({ id: "c1", status: "email_guessed", email: "a@x.com", fullName: "Ada Lovelace" })],
+    });
+    const photographed = baseData({
+      candidates: [
+        candidate({
+          id: "c1",
+          status: "email_guessed",
+          email: "a@x.com",
+          fullName: "Recruiter",
+          profilePhotoUrl: "https://cdn/photo.jpg",
+        }),
+      ],
+    });
+    expect(appDataPollKey(a)).not.toBe(appDataPollKey(named));
+    expect(appDataPollKey(a)).not.toBe(appDataPollKey(photographed));
+  });
+
+  it("changes when a lookup timeout/error lands (status and email stay the same)", () => {
+    const a = baseData({
+      candidates: [candidate({ id: "c1", status: "new", fullName: "Joe Chen" })],
+    });
+    const errored = baseData({
+      candidates: [
+        candidate({
+          id: "c1",
+          status: "new",
+          fullName: "Joe Chen",
+          lastError: "Timed out waiting for Jobright contact result.",
+        }),
+      ],
+    });
+    expect(appDataPollKey(a)).not.toBe(appDataPollKey(errored));
+  });
+
+  it("changes when a scheduled (archived) person's enriched name or photo lands", () => {
+    const base: UpcomingSendView = {
+      queueItemId: "q1",
+      candidateId: "c1",
+      fullName: "Recruiter",
+      email: "a@x.com",
+      scheduledFor: "2026-07-12T10:00:00.000Z",
+      queueStatus: "scheduled",
+      subject: "Hi",
+      body: "Hello",
+    };
+    const a = baseData({ upcomingSends: [base] });
+    const named = baseData({ upcomingSends: [{ ...base, fullName: "Ada Lovelace" }] });
+    const photographed = baseData({ upcomingSends: [{ ...base, profilePhotoUrl: "https://cdn/photo.jpg" }] });
+    expect(appDataPollKey(a)).not.toBe(appDataPollKey(named));
+    expect(appDataPollKey(a)).not.toBe(appDataPollKey(photographed));
+  });
+
   it("includes upcoming send fingerprint", () => {
     const upcoming: UpcomingSendView = {
       queueItemId: "q1",

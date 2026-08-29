@@ -159,6 +159,95 @@ describe("claimNextSendJob due-slot gating", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("reclaims an in_progress job orphaned by a crash+respawn even while the new worker heartbeats (regression)", async () => {
+    // Deadlock: a worker crashes mid-send, leaving a job in_progress. The
+    // supervisor respawns a fresh worker, which starts heartbeating. The global
+    // "worker looks alive" guard then protects the leaked job forever — but that
+    // heartbeat is a DIFFERENT process that never claimed this job. Because
+    // claimNextSendJob refuses to claim while any job is in_progress, one leaked
+    // job blocks EVERY send permanently. The fix: a fresh heartbeat only shields
+    // a job the current worker SESSION could own (touched at/after it booted).
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-claim-orphan-respawn-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const now = new Date("2026-07-10T15:00:00.000Z");
+    // A queued send is waiting to go out.
+    store.upsertSendJob(
+      baseJob({
+        id: "waiting",
+        to: "waiting@acme.com",
+        status: "pending",
+        scheduledFor: "2026-07-10T14:50:00.000Z",
+        updatedAt: "2026-07-10T14:50:00.000Z",
+      }),
+    );
+    // ...but a job left in_progress by the OLD (now-dead) worker at 14:40 blocks
+    // it — claimNextSendJob refuses to claim while any send is in flight.
+    store.upsertSendJob(
+      baseJob({
+        id: "orphaned-by-respawn",
+        status: "in_progress",
+        scheduledFor: "2026-07-10T14:55:00.000Z",
+        updatedAt: "2026-07-10T14:40:00.000Z",
+      }),
+    );
+    // The NEW worker booted at 14:55 (after the leaked job was last touched) and
+    // is heartbeating now — it cannot own a job it never claimed.
+    store.setWorkerStatus({
+      phase: "sending",
+      message: "Sending email…",
+      lastHeartbeatAt: "2026-07-10T14:59:50.000Z",
+      updatedAt: "2026-07-10T14:59:50.000Z",
+      workerStartedAt: "2026-07-10T14:55:00.000Z",
+    });
+
+    // Before the fix this returned undefined forever (deadlock). Now the orphan
+    // is reclaimed to pending, unblocking the in-flight gate, and a send is
+    // claimed again (the earliest-due of the two now-pending jobs, "waiting").
+    const claimed = claimNextSendJob(store, now);
+    expect(claimed).toBeDefined();
+    expect(store.getSendJob("orphaned-by-respawn")?.status).not.toBe("in_progress");
+    expect(claimed?.id).toBe("waiting");
+
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("still protects the current session's own slow send that outran the stale window (no double-send)", async () => {
+    // Guardrail for the fix above: a genuinely slow-but-alive send (cold
+    // Chromium, laptop sleep/wake) claimed by the CURRENT session must stay
+    // protected past the 15-minute window — reclaiming it would double-send.
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-claim-slow-own-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const now = new Date("2026-07-10T15:00:00.000Z");
+    store.upsertSendJob(
+      baseJob({
+        id: "slow-own",
+        status: "in_progress",
+        scheduledFor: "2026-07-10T14:00:00.000Z",
+        // Past the 15-minute stale window...
+        updatedAt: "2026-07-10T14:40:00.000Z",
+      }),
+    );
+    // ...but the SAME session that claimed it (booted 14:30, before the claim)
+    // is still checking in — slow, not crashed.
+    store.setWorkerStatus({
+      phase: "sending",
+      message: "Sending email…",
+      lastHeartbeatAt: "2026-07-10T14:59:50.000Z",
+      updatedAt: "2026-07-10T14:59:50.000Z",
+      workerStartedAt: "2026-07-10T14:30:00.000Z",
+    });
+
+    const claimed = claimNextSendJob(store, now);
+    expect(claimed).toBeUndefined();
+    expect(store.getSendJob("slow-own")?.status).toBe("in_progress");
+
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("reclaims a stale in_progress job once the worker heartbeat also goes stale", async () => {
     const directory = await mkdtemp(join(tmpdir(), "recruiter-claim-stale-dead-"));
     const store = new Store(join(directory, "store.sqlite"));

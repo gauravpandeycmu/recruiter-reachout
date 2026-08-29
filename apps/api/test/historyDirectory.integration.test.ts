@@ -190,7 +190,7 @@ describe("contact directory + discovery integration", () => {
     expect(store.listCandidates().find((item) => item.id === saved.id)?.company).toBe("Netflix");
   });
 
-  it("rewrites company when discovery finds an email at a different employer", async () => {
+  it("does not save a previous-employer work email or rewrite the tagged company", async () => {
     const store = await freshStore();
     const candidate = store.upsertCandidate(
       createCandidate({
@@ -207,6 +207,33 @@ describe("contact directory + discovery integration", () => {
       status: "found",
     });
 
-    expect(store.listCandidates().find((item) => item.id === candidate.id)?.company).toBe("Netflix");
+    const updated = store.listCandidates().find((item) => item.id === candidate.id);
+    expect(updated?.company).toBe("Google");
+    expect(updated?.email).toBeUndefined();
+    expect(updated?.lastError).toMatch(/previous employer/);
+  });
+
+  it("fills a company-less candidate's company from the verified work email on discovery", async () => {
+    // A LinkedIn search-card capture whose employer wasn't parsed comes in with no
+    // company. When discovery finds a verified work email, the company must be
+    // filled in — otherwise the outreach template's {company} renders blank and the
+    // Scheduled / History / backlog grouping dumps the person into "Unknown".
+    const store = await freshStore();
+    const candidate = store.upsertCandidate(
+      createCandidate({
+        fullName: "Dana Reyes",
+        linkedinUrl: "https://www.linkedin.com/in/dana-reyes",
+        status: "new",
+      }),
+    );
+    expect(candidate.company ?? "").toBe("");
+
+    await recordDiscoveryResult(store, candidate.id, {
+      email: "dreyes@stripe.com",
+      provider: "jobright",
+      status: "found",
+    });
+
+    expect(store.listCandidates().find((item) => item.id === candidate.id)?.company).toBe("Stripe");
   });
 });

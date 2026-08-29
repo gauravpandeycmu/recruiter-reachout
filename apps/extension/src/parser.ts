@@ -5,6 +5,8 @@ export interface PageCandidate {
   firstName: string;
   title?: string;
   company?: string;
+  /** LinkedIn /company/{slug} for the current role, when the profile exposes one. */
+  linkedinCompanySlug?: string;
   location?: string;
   linkedinUrl?: string;
   profilePhotoUrl?: string;
@@ -44,49 +46,284 @@ export function parseLinkedInProfile(documentRef: Document, href: string): PageC
   const rawText = documentRef.body?.innerText || documentRef.body?.textContent || "";
   const text = normalizeWhitespace(rawText);
   const headline =
-    sanitizeHeadline(
-      documentRef.querySelector(".text-body-medium, .pv-text-details__left-panel .text-body-medium, [data-generated-suggestion-target] .text-body-medium")
-        ?.textContent ?? "",
-    ) || undefined;
+    sanitizeHeadline(readTopCardHeadline(documentRef)) ||
+    sanitizeHeadline(firstHeadlineLineFromRawText(rawText) ?? "") ||
+    sanitizeHeadline(jobTitleFromJsonLd(documentRef) ?? "") ||
+    undefined;
+  // Recruiter-word fallback is last resort only, and must look like a real title
+  // (not hashtags / About fluff like "recruiting #QualityThroughData…").
+  const recruiterFallback = sanitizeHeadline(
+    rawText.match(
+      /(?:Sr\.?\s+|Senior\s+|Lead\s+|Principal\s+|Staff\s+)?(?:Technical\s+)?(?:Recruiter|Talent Acquisition|Sourcer|Recruiting)(?:\s+(?:Partner|Specialist|Manager|Lead))?(?:\s+[@@]\s+[^\n.#]{2,40}|\s+at\s+[^\n.#]{2,40})?/i,
+    )?.[0] ?? "",
+  );
   const title =
     headline ||
-    sanitizeHeadline(
-      rawText.match(
-        /(?:Sr\.?\s+|Senior\s+|Lead\s+|Principal\s+|Staff\s+)?(?:Technical\s+)?(?:Recruiter|Talent Acquisition|Sourcer|Recruiting)[^\n.]{0,80}/i,
-      )?.[0] ?? "",
-    ) || undefined;
-  const location = text.match(/[A-Z][A-Za-z .]+,\s*(?:United States|USA|US|[A-Z][A-Za-z ]+)/)?.[0];
-  const company = inferCompanyFromProfile(documentRef, text, title);
+    (recruiterFallback && !looksLikeHashtagNoise(recruiterFallback) ? recruiterFallback : undefined) ||
+    undefined;
+  const location = extractProfileLocation(documentRef, rawText);
+  const inferred = inferCompanyFromProfile(documentRef, text, title);
   const profilePhotoUrl = extractProfilePhotoForPerson(documentRef, fullName, href);
   return {
     fullName,
     firstName: extractFirstName(fullName),
     title,
-    company,
+    company: inferred.company,
+    linkedinCompanySlug: inferred.linkedinCompanySlug,
     location,
     linkedinUrl: href.split("?")[0],
     profilePhotoUrl,
   };
 }
 
+/** Prefer the top-card headline only — page-wide `.text-body-medium` often hits
+ *  sidebar / "People also viewed" recruiter cards first on eng profiles. */
+function readTopCardHeadline(documentRef: Document): string {
+  const scoped = documentRef.querySelector(
+    [
+      ".pv-text-details__left-panel .text-body-medium",
+      "main [role='main'] .text-body-medium",
+      "main [aria-label='Primary content'] .text-body-medium",
+      "section.artdeco-card .text-body-medium",
+      ".ph5 .text-body-medium",
+      "[data-generated-suggestion-target] .text-body-medium",
+    ].join(", "),
+  )?.textContent;
+  if (scoped?.trim()) {
+    return scoped;
+  }
+  const nearby = primaryContentLines(documentRef).find((line) => looksLikeHeadlineLine(line));
+  if (nearby) {
+    return nearby;
+  }
+  // Fall back to first medium body text only if it doesn't look like sidebar noise.
+  const first = documentRef.querySelector(".text-body-medium")?.textContent ?? "";
+  return first;
+}
+
+function jobTitleFromJsonLd(documentRef: Document): string | undefined {
+  for (const script of documentRef.querySelectorAll('script[type="application/ld+json"]')) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(script.textContent ?? "");
+    } catch {
+      continue;
+    }
+    const nodes: unknown[] = Array.isArray(parsed) ? [...parsed] : [parsed];
+    if (parsed && typeof parsed === "object" && Array.isArray((parsed as { "@graph"?: unknown[] })["@graph"])) {
+      nodes.push(...((parsed as { "@graph": unknown[] })["@graph"]));
+    }
+    for (const node of nodes) {
+      if (!node || typeof node !== "object") continue;
+      const record = node as Record<string, unknown>;
+      if (record["@type"] === "Person" && typeof record.jobTitle === "string" && record.jobTitle.trim()) {
+        return record.jobTitle.trim();
+      }
+    }
+  }
+  return undefined;
+}
+
+function looksLikeHashtagNoise(value: string): boolean {
+  return /#\w/.test(value) || /^recruiting\b/i.test(value.trim());
+}
+
+/**
+ * Location must be a short City, Region line — never a job title glued onto
+ * "Redmond, Washington" (greedy `[A-Z][A-Za-z .]+` previously swallowed headlines).
+ */
+function extractProfileLocation(documentRef: Document, rawText: string): string | undefined {
+  const fromDom =
+    normalizeWhitespace(
+      documentRef.querySelector(
+        [
+          ".pv-text-details__left-panel .text-body-small",
+          ".ph5 .text-body-small",
+          "span.text-body-small.inline",
+        ].join(", "),
+      )?.textContent ?? "",
+    ) || undefined;
+  if (fromDom && isPlausibleLocation(fromDom)) {
+    return fromDom.slice(0, 80);
+  }
+  const nearby = primaryContentLines(documentRef).find((line) => isPlausibleLocation(line));
+  if (nearby) {
+    return nearby.slice(0, 80);
+  }
+  for (const line of rawText.split(/\n+/)) {
+    const cleaned = normalizeWhitespace(line);
+    const match = cleaned.match(
+      /\b([A-Z][a-zA-Z .'-]{1,40}),\s*(United States|USA|US|[A-Z][a-zA-Z ]{2,20})\b/,
+    );
+    if (!match) continue;
+    const candidate = `${match[1]}, ${match[2]}`;
+    if (isPlausibleLocation(candidate) && !/\bat\b/i.test(candidate)) {
+      return candidate.slice(0, 80);
+    }
+  }
+  return undefined;
+}
+
+function isPlausibleLocation(value: string): boolean {
+  const v = value.trim();
+  if (v.length < 3 || v.length > 80) return false;
+  if (looksLikeUtilityText(v)) return false;
+  if (/^[·•]\s*\d/.test(v) || /^·\s*(1st|2nd|3rd|\d+(?:st|nd|rd|th))$/i.test(v)) return false;
+  if (!/,/.test(v) && !/\barea\b/i.test(v)) return false;
+  // Job-title leakage: "Principal … at Microsoft Redmond, Washington"
+  if (
+    /\b(Engineer|Engineering|Manager|Director|Lead|Recruiter|Software|Principal|Staff|Founder|Co-Founder|CEO|CTO|COO|President|VP|Vice President)\b/i.test(
+      v,
+    ) &&
+    /\bat\b/i.test(v)
+  ) {
+    return false;
+  }
+  if (/#\w/.test(v)) return false;
+  return true;
+}
+
 /** Trim action-bar text, doubled visible+sr-only twins, and emoji off a headline. */
 function sanitizeHeadline(value: string): string {
   const deduped = dedupeRepeatedName(normalizeWhitespace(value));
   const cut = deduped.split(/\s+(?:More|Message|Follow|Connect|Pending|Visit my website|Contact info)\b/i)[0] ?? "";
-  return normalizeWhitespace(cut.replace(/[\u{E000}-\u{F8FF}\u{1F000}-\u{1FFFF}\u{2600}-\u{27BF}️]/gu, " ")).slice(0, 120);
+  return normalizeWhitespace(cut.replace(/[\u{E000}-\u{F8FF}\u{1F000}-\u{1FFFF}\u{2600}-\u{27BF}️]/gu, " ")).slice(0, 180);
+}
+
+function firstHeadlineLineFromRawText(rawText: string): string | undefined {
+  for (const line of rawText.split(/\n+/).map((entry) => normalizeWhitespace(entry))) {
+    if (!line) {
+      continue;
+    }
+    if (/^(about|activity|featured|highlights|experience|top skills)$/i.test(line)) {
+      break;
+    }
+    if (looksLikeHeadlineLine(line) && !looksLikeHashtagNoise(line)) {
+      return line;
+    }
+  }
+  return undefined;
+}
+
+function primaryContentLines(documentRef: Document): string[] {
+  const root =
+    documentRef.querySelector("main [aria-label='Primary content']") ??
+    documentRef.querySelector("main [role='main']") ??
+    documentRef.querySelector("main");
+  if (!(root instanceof HTMLElement)) {
+    return [];
+  }
+  const selectors = "h1, h2, h3, p, span, a";
+  const lines: string[] = [];
+  for (const node of root.querySelectorAll<HTMLElement>(selectors)) {
+    const text = normalizeWhitespace(node.textContent ?? "");
+    if (!text) {
+      continue;
+    }
+    if ((node.tagName === "H2" || node.tagName === "H3") && /^(about|activity|featured|highlights|experience|top skills)$/i.test(text)) {
+      break;
+    }
+    if (node.querySelector(selectors)) {
+      continue;
+    }
+    if (text.length <= 140) {
+      lines.push(text);
+    }
+    if (lines.length >= 80) {
+      break;
+    }
+  }
+  return lines;
+}
+
+function looksLikeHeadlineLine(value: string): boolean {
+  const v = value.trim();
+  if (v.length < 6 || v.length > 180) return false;
+  if (/^[·•]\s*\d/.test(v) || /^(\d+\+?\s+)?connections?$/i.test(v)) return false;
+  if (/^(contact info|message|follow|more|pending)$/i.test(v)) return false;
+  if (isPlausibleLocation(v)) return false;
+  return /(?:\bat\b|\||engineer|engineering|recruiter|manager|director|architect|developer|product|software|founder|lead|scientist|marketing|officer|chief|ceo|cto|coo|cpo|vp|president|head\b|@)/i.test(
+    v,
+  );
+}
+
+function inferCompanyFromHeroLines(documentRef: Document): { company?: string } {
+  const lines = primaryContentLines(documentRef);
+  const pairCompany = affiliationPairCompany(lines);
+  if (pairCompany) {
+    return { company: pairCompany };
+  }
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line || looksLikeUtilityText(line) || looksLikeSchool(line) || isPlausiblePersonName(line)) {
+      continue;
+    }
+    if (looksLikeHeadlineLine(line)) {
+      continue;
+    }
+    const pairMatch = line.match(/^(.{2,60}?)\s*·\s*(.{2,80})$/);
+    if (pairMatch?.[1]) {
+      const first = cleanCompanyName(pairMatch[1]);
+      if (looksLikeCompanyName(first) && !looksLikeSchool(first) && !looksLikeProfileAction(first)) {
+        return { company: first };
+      }
+    }
+    if (
+      looksLikeCompanyName(line) &&
+      !looksLikeSchool(line) &&
+      !looksLikeProfileAction(line) &&
+      !isPlausibleLocation(line) &&
+      !looksLikeWebsiteLine(line) &&
+      !looksLikeOpenToWorkLine(line) &&
+      !/^[·•]\s*\d/.test(line)
+    ) {
+      return { company: cleanCompanyName(line) };
+    }
+  }
+  return {};
+}
+
+function affiliationPairCompany(lines: string[]): string | undefined {
+  for (const raw of lines) {
+    const line = raw.trim();
+    const pairMatch = line.match(/^(.{2,80}?)\s*·\s*(.{2,100})$/);
+    if (!pairMatch?.[1] || !pairMatch[2]) {
+      continue;
+    }
+    const first = cleanCompanyName(pairMatch[1]);
+    const second = normalizeWhitespace(pairMatch[2]);
+    if (!first || !looksLikeCompanyName(first) || looksLikeSchool(first) || isPlausibleLocation(first)) {
+      continue;
+    }
+    if (looksLikeSchool(second)) {
+      return first;
+    }
+  }
+  return undefined;
 }
 
 /** Resolve profile name from h1, meta tags, title, or URL slug — LinkedIn often delays/hides h1. */
 export function inferProfileFullName(documentRef: Document, href: string): string | undefined {
-  const h1Candidates = [...documentRef.querySelectorAll("h1")]
+  const headingCandidates = [...documentRef.querySelectorAll("h1, h2")]
     .map((el) => normalizeWhitespace(el.textContent ?? ""))
     .filter((name) => isPlausiblePersonName(name));
-  if (h1Candidates[0]) {
-    return h1Candidates[0];
+  if (headingCandidates[0]) {
+    return headingCandidates[0];
   }
 
   const topCard = documentRef.querySelector(
-    ".pv-text-details__left-panel h1, .ph5 h1, section.artdeco-card h1, [data-member-id] h1",
+    [
+      ".pv-text-details__left-panel h1",
+      ".pv-text-details__left-panel h2",
+      ".ph5 h1",
+      ".ph5 h2",
+      "section.artdeco-card h1",
+      "section.artdeco-card h2",
+      "[data-member-id] h1",
+      "[data-member-id] h2",
+      "main [aria-label='Primary content'] h1",
+      "main [aria-label='Primary content'] h2",
+    ].join(", "),
   );
   const topCardName = normalizeWhitespace(topCard?.textContent ?? "");
   if (isPlausiblePersonName(topCardName)) {
@@ -196,7 +433,12 @@ function nameFromLinkedInSlug(href: string): string | undefined {
     }
     // Drop trailing opaque ids: sara-manchester-14b3a451 → sara-manchester
     // Keep short initials: ivan-r-20971a190 → ivan-r
-    const withoutTrailingId = decodeURIComponent(slug).replace(/-[a-z0-9]{6,}$/i, "");
+    // Only strip a trailing segment that actually looks like a LinkedIn id — a
+    // 6+ char alnum run that CONTAINS A DIGIT. A pure-alphabetic surname of 6+
+    // letters (a vanity slug like jenny-anderson / mary-jane-watson) is a real
+    // name part, not an id, and must be kept — otherwise the slug fallback drops
+    // the last name (or returns no name at all, dropping the candidate).
+    const withoutTrailingId = decodeURIComponent(slug).replace(/-(?=[a-z0-9]*\d)[a-z0-9]{6,}$/i, "");
     const words = withoutTrailingId
       .replace(/[-_]+/g, " ")
       .replace(/\d+/g, " ")
@@ -238,14 +480,19 @@ function isPlausiblePersonName(value: string): boolean {
   const tokens = value.trim().split(/\s+/);
   if (tokens.length < 2) {
     // Single token only when it looks like a real capitalized name
-    return /^[A-Z][a-zA-Z.'-]{1,40}$/.test(value);
+    return /^[A-Z][a-zA-Z.'-]{1,40}$/.test(value) && value !== value.toUpperCase() && !/[.@]/.test(value);
   }
   // Allow "Jane Doe", "Ivan R", "Mary J. Smith"
   const first = tokens[0] ?? "";
   if (!/^[A-Za-z]{2,}[a-zA-Z.'-]*$/.test(first)) {
     return false;
   }
-  return tokens.slice(1).every((token) => /^[A-Za-z](\.|$)/.test(token) || /^[A-Za-z]{2,}[a-zA-Z.'-]*$/.test(token));
+  return tokens.slice(1).every(
+    (token) =>
+      /^[A-Za-z](\.|$)/.test(token) ||
+      /^[A-Za-z]{2,}[a-zA-Z.'-]*$/.test(token) ||
+      /^\([A-Za-z]{2,}[a-zA-Z.'-]*\)$/.test(token),
+  );
 }
 
 export function parseSearchResults(documentRef: Document): PageCandidate[] {
@@ -623,18 +870,6 @@ function isExplicitlyHidden(element: HTMLElement): boolean {
   return false;
 }
 
-function isVisible(element: HTMLElement): boolean {
-  if (isExplicitlyHidden(element)) {
-    return false;
-  }
-  try {
-    const rect = element.getBoundingClientRect();
-    return rect.width >= 0 && rect.height >= 0;
-  } catch {
-    return true;
-  }
-}
-
 function extractTitle(text: string): string | undefined {
   return text.match(/\b(?:(?:Senior|Lead|Principal|Technical)\s+)?(?:Technical Recruiter|Recruiter|Talent Acquisition(?: Partner| Specialist| Manager)?|Sourcer)\b/i)?.[0];
 }
@@ -650,175 +885,364 @@ function inferCompanyFromPage(candidates: PageCandidate[]): string | undefined {
 }
 
 /**
- * Prefer the top-card company button (first /company/ link in the profile header).
- * LinkedIn shows current employer there as a short label ("Fluently"); headline text
- * often uses a product/domain form ("GetFluently.App") or "ex Nvidia" noise.
- * Fall back to headline / other company links / body text.
+ * Prefer the current Experience role (date range includes Present), then JSON-LD
+ * worksFor, then the top-card employer chip, then the headline.
+ * Do not scan the rest of the page — About / activity / "You both worked at"
+ * routinely mention previous employers.
  */
 export function inferCompanyFromProfile(
   documentRef: Document,
-  bodyText: string,
+  _bodyText: string,
   title?: string,
-): string | undefined {
+): { company?: string; linkedinCompanySlug?: string } {
+  const fromExperience = inferCompanyFromCurrentExperience(documentRef);
+  if (fromExperience.company) {
+    return fromExperience;
+  }
+  const fromJsonLd = inferCompanyFromJsonLd(documentRef);
+  if (fromJsonLd.company) {
+    return fromJsonLd;
+  }
+  const fromHero = inferCompanyFromHeroLines(documentRef);
+  if (fromHero.company) {
+    return fromHero;
+  }
   const fromTopCard = inferCompanyFromTopCard(documentRef);
-  if (fromTopCard) {
+  if (fromTopCard.company) {
     return fromTopCard;
   }
   const fromHeadline = inferCompanyFromHeadline(title);
   if (fromHeadline) {
-    return fromHeadline;
+    return { company: fromHeadline };
   }
-  const fromLink = inferCompanyFromCompanyLink(documentRef);
-  if (fromLink) {
-    return fromLink;
-  }
-  const headlineSlice = bodyText.slice(0, 500);
-  return inferCompanyFromProfileText(headlineSlice) ?? inferCompanyFromProfileText(bodyText);
+  return {};
 }
 
-/**
- * First company pill in the top card is almost always current employer.
- * Later pills are often school / accelerator (Y Combinator, university).
- */
-function inferCompanyFromTopCard(documentRef: Document): string | undefined {
-  const roots = [
-    ...documentRef.querySelectorAll<HTMLElement>(
-      [
-        ".pv-text-details__left-panel",
-        ".ph5 .pb2",
-        ".ph5",
-        "section.artdeco-card.pv-top-card",
-        ".pv-top-card",
-        '[class*="pv-top-card"]',
-        "main section.artdeco-card",
-      ].join(", "),
-    ),
-  ];
-  const scopes = roots.length > 0 ? roots : documentRef.body ? [documentRef.body] : [];
-  for (const root of scopes) {
-    const links = [...root.querySelectorAll<HTMLAnchorElement>('a[href*="/company/"]')].filter(
-      (link) => !/\/school\//i.test(link.getAttribute("href") ?? "") && !isExplicitlyHidden(link),
+function inferCompanyFromCurrentExperience(documentRef: Document): {
+  company?: string;
+  linkedinCompanySlug?: string;
+} {
+  const section = findExperienceSection(documentRef);
+  if (!section) {
+    return {};
+  }
+  const presentMarks = [...section.querySelectorAll("span, time, div, p")].filter((node) => {
+    const text = normalizeWhitespace(node.textContent ?? "");
+    return text.length > 0 && text.length <= 80 && /\bPresent\b/i.test(text);
+  });
+  const scopes =
+    presentMarks.length > 0
+      ? presentMarks.map(
+          (node) =>
+            node.closest("li") ??
+            node.closest("[class*='pvs-entity']") ??
+            node.closest("[class*='artdeco-list']") ??
+            section,
+        )
+      : [];
+  for (const scope of scopes) {
+    if (!scope) {
+      continue;
+    }
+    const found = companyFromScope(scope);
+    if (found.company) {
+      return found;
+    }
+    const parent = scope.parentElement?.closest("li") ?? scope.parentElement;
+    if (parent && parent !== section) {
+      const fromParent = companyFromScope(parent);
+      if (fromParent.company) {
+        return fromParent;
+      }
+    }
+  }
+  for (const item of section.querySelectorAll("li")) {
+    const text = normalizeWhitespace(item.textContent ?? "");
+    if (!/\bPresent\b/i.test(text)) {
+      continue;
+    }
+    const found = companyFromScope(item);
+    if (found.company) {
+      return found;
+    }
+  }
+  return {};
+}
+
+function findExperienceSection(documentRef: Document): HTMLElement | undefined {
+  const anchor = documentRef.querySelector<HTMLElement>(
+    "#experience, #experience-section, [id='experience']",
+  );
+  if (anchor) {
+    return (
+      anchor.closest("section") ??
+      anchor.parentElement ??
+      (anchor.nextElementSibling instanceof HTMLElement ? anchor.nextElementSibling : undefined) ??
+      anchor
     );
-    for (const link of links) {
-      const name = companyLabelFromTopCardLink(link);
-      if (!name || !looksLikeCompanyName(name)) {
-        continue;
-      }
-      if (/\b(you both|worked at|before you|started|mutual|also viewed)\b/i.test(name)) {
-        continue;
-      }
-      return cleanCompanyName(name);
+  }
+  for (const heading of documentRef.querySelectorAll("h2, h3")) {
+    const label = normalizeWhitespace(heading.textContent ?? "");
+    if (/^experience$/i.test(label)) {
+      return heading.closest("section") ?? heading.parentElement ?? undefined;
     }
   }
   return undefined;
 }
 
+function companyFromScope(scope: Element): { company?: string; linkedinCompanySlug?: string } {
+  const links = [...scope.querySelectorAll<HTMLAnchorElement>('a[href*="/company/"]')].filter(
+    (link) => !/\/school\//i.test(link.getAttribute("href") ?? ""),
+  );
+  for (const link of links) {
+    const name = companyLabelFromTopCardLink(link);
+    if (!name || !looksLikeCompanyName(name) || looksLikeSchool(name)) {
+      continue;
+    }
+    return {
+      company: cleanCompanyName(name),
+      linkedinCompanySlug: linkedInCompanySlug(link.getAttribute("href") ?? link.href),
+    };
+  }
+  return {};
+}
+
+function inferCompanyFromJsonLd(documentRef: Document): { company?: string; linkedinCompanySlug?: string } {
+  for (const script of documentRef.querySelectorAll('script[type="application/ld+json"]')) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(script.textContent ?? "");
+    } catch {
+      continue;
+    }
+    const nodes: unknown[] = Array.isArray(parsed) ? [...parsed] : [parsed];
+    if (parsed && typeof parsed === "object" && Array.isArray((parsed as { "@graph"?: unknown[] })["@graph"])) {
+      nodes.push(...((parsed as { "@graph": unknown[] })["@graph"]));
+    }
+    for (const node of nodes) {
+      if (!node || typeof node !== "object") {
+        continue;
+      }
+      const record = node as Record<string, unknown>;
+      if (record["@type"] !== "Person") {
+        continue;
+      }
+      const worksFor = record.worksFor;
+      const orgs = Array.isArray(worksFor) ? worksFor : worksFor ? [worksFor] : [];
+      for (const org of orgs) {
+        if (!org || typeof org !== "object") {
+          continue;
+        }
+        const name = typeof (org as { name?: unknown }).name === "string" ? (org as { name: string }).name.trim() : "";
+        if (name && looksLikeCompanyName(name) && !looksLikeSchool(name)) {
+          const url = typeof (org as { url?: unknown }).url === "string" ? (org as { url: string }).url : "";
+          return { company: cleanCompanyName(name), linkedinCompanySlug: linkedInCompanySlug(url) };
+        }
+      }
+    }
+  }
+  return {};
+}
+
+/**
+ * First company chip in the top card is almost always current employer.
+ * Later chips are often school / accelerator (Y Combinator, university).
+ * LinkedIn 2025 often uses a <button> here, not a /company/ link.
+ */
+function inferCompanyFromTopCard(documentRef: Document): { company?: string; linkedinCompanySlug?: string } {
+  const roots = [
+    ...documentRef.querySelectorAll<HTMLElement>(
+      [
+        ".pv-text-details__left-panel",
+        ".pv-text-details__right-panel",
+        "main [aria-label='Primary content']",
+        "main [role='main']",
+        ".ph5 .pb2",
+        ".ph5",
+        "section.artdeco-card.pv-top-card",
+        ".pv-top-card",
+        '[class*="pv-top-card"]',
+      ].join(", "),
+    ),
+  ];
+  const scopes = roots.length > 0 ? roots : documentRef.body ? [documentRef.body] : [];
+  for (const root of scopes) {
+    const nodes = [
+      ...root.querySelectorAll<HTMLElement>(
+        [
+          "a[href*='/company/']",
+          "button[aria-label*='Current company']",
+          "button[aria-label*='current company']",
+          "button[aria-label*='Company']",
+          "button[aria-label*='company']",
+          "button:has(img[alt*='logo'])",
+          "button:has(figure)",
+          "button:has(p)",
+          "button:has(span[aria-hidden='true'])",
+          "a[href*='/school/']",
+        ].join(", "),
+      ),
+    ].filter((node) => {
+      if (node.closest(".pvs-profile-actions, .pv-top-card-v2-ctas, [class*='profile-actions']")) {
+        return false;
+      }
+      if (node instanceof HTMLAnchorElement && /\/school\//i.test(node.getAttribute("href") ?? "")) {
+        return false;
+      }
+      return !isExplicitlyHidden(node);
+    });
+    for (const node of nodes) {
+      if (node instanceof HTMLAnchorElement && /\/school\//i.test(node.getAttribute("href") ?? node.href)) {
+        continue;
+      }
+      const name =
+        node instanceof HTMLAnchorElement ? companyLabelFromTopCardLink(node) : companyLabelFromChip(node);
+      if (!name || !looksLikeCompanyName(name) || looksLikeSchool(name) || looksLikeProfileAction(name)) {
+        continue;
+      }
+      if (/\b(you both|worked at|before you|started|mutual|also viewed)\b/i.test(name)) {
+        continue;
+      }
+      const href = node instanceof HTMLAnchorElement ? node.getAttribute("href") ?? node.href : "";
+      return { company: cleanCompanyName(name), linkedinCompanySlug: linkedInCompanySlug(href) };
+    }
+  }
+  return {};
+}
+
+function companyLabelFromChip(node: HTMLElement): string {
+  const directParagraphs = [...node.querySelectorAll<HTMLElement>("p")]
+    .map((el) => dedupeRepeatedName(normalizeWhitespace(el.textContent ?? "")))
+    .filter(
+      (text) =>
+        text.length >= 2 &&
+        text.length <= 60 &&
+        !looksLikeUtilityText(text) &&
+        !looksLikeSchool(text) &&
+        !looksLikeWebsiteLine(text),
+    );
+  if (directParagraphs[0]) {
+    return directParagraphs[0];
+  }
+  const ariaHidden = [...node.querySelectorAll<HTMLElement>('span[aria-hidden="true"]')]
+    .map((el) => dedupeRepeatedName(normalizeWhitespace(el.textContent ?? "")))
+    .find((text) => text.length >= 2 && text.length <= 60 && !looksLikeUtilityText(text));
+  if (ariaHidden) {
+    return ariaHidden;
+  }
+  const ariaLabel = normalizeWhitespace(node.getAttribute("aria-label") ?? "")
+    .replace(/^(current company|company|education)\s*[:\-]?\s*/i, "")
+    .replace(/\s+logo$/i, "")
+    .replace(/^logo\s+for\s+/i, "");
+  if (ariaLabel && looksLikeCompanyName(ariaLabel) && !looksLikeUtilityText(ariaLabel)) {
+    return ariaLabel;
+  }
+  const imgAlt = normalizeWhitespace(node.querySelector("img")?.alt ?? "")
+    .replace(/\s+logo$/i, "")
+    .replace(/^logo\s+for\s+/i, "");
+  if (imgAlt && looksLikeCompanyName(imgAlt) && !looksLikeSchool(imgAlt) && !looksLikeUtilityText(imgAlt)) {
+    return imgAlt;
+  }
+  const text = dedupeRepeatedName(normalizeWhitespace(node.textContent ?? ""));
+  return looksLikeUtilityText(text) ? "" : text;
+}
+
 function companyLabelFromTopCardLink(link: HTMLAnchorElement): string {
+  const directParagraphs = [...link.querySelectorAll<HTMLElement>("p")]
+    .map((el) => dedupeRepeatedName(normalizeWhitespace(el.textContent ?? "")))
+    .filter((text) => text.length >= 2 && text.length <= 60 && !looksLikeUtilityText(text) && !looksLikeSchool(text));
+  if (directParagraphs[0]) {
+    return directParagraphs[0];
+  }
   const ariaHidden = [...link.querySelectorAll<HTMLElement>('span[aria-hidden="true"]')]
     .map((el) => dedupeRepeatedName(normalizeWhitespace(el.textContent ?? "")))
-    .find((text) => text.length >= 2 && text.length <= 60);
+    .find((text) => text.length >= 2 && text.length <= 60 && !looksLikeUtilityText(text));
   if (ariaHidden) {
     return ariaHidden;
   }
   const ariaLabel = normalizeWhitespace(link.getAttribute("aria-label") ?? "")
     .replace(/\s+logo$/i, "")
     .replace(/^logo\s+for\s+/i, "");
-  if (ariaLabel && looksLikeCompanyName(ariaLabel)) {
+  if (ariaLabel && looksLikeCompanyName(ariaLabel) && !looksLikeUtilityText(ariaLabel)) {
     return ariaLabel;
   }
   const imgAlt = normalizeWhitespace(link.querySelector("img")?.alt ?? "")
     .replace(/\s+logo$/i, "")
     .replace(/^logo\s+for\s+/i, "");
-  if (imgAlt && looksLikeCompanyName(imgAlt)) {
+  if (imgAlt && looksLikeCompanyName(imgAlt) && !looksLikeUtilityText(imgAlt)) {
     return imgAlt;
   }
-  return dedupeRepeatedName(normalizeWhitespace(link.textContent ?? ""));
-}
-
-function inferCompanyFromCompanyLink(documentRef: Document): string | undefined {
-  const links = [...documentRef.querySelectorAll<HTMLAnchorElement>('a[href*="/company/"]')];
-  // Prefer experience / top-card company links over sidebar "People also viewed" noise.
-  const ranked = links
-    .map((link) => {
-      const name = companyLabelFromTopCardLink(link);
-      const href = link.getAttribute("href") ?? "";
-      let score = 0;
-      if (!looksLikeCompanyName(name)) {
-        return null;
-      }
-      if (/\b(you both|worked at|before you|started|mutual|also viewed)\b/i.test(name)) {
-        return null;
-      }
-      try {
-        if (!isVisible(link)) {
-          score -= 2;
-        }
-      } catch {
-        // jsdom may lack layout
-      }
-      if (/\/company\/[^/]+\/?$/i.test(href) || /\/company\/[^/?]+/i.test(href)) {
-        score += 2;
-      }
-      const nearTop = link.closest(".pv-text-details__left-panel, .ph5, .artdeco-card, section, .pv-top-card");
-      if (nearTop) {
-        score += 3;
-      }
-      // Experience section company names are strong signals
-      if (link.closest("#experience, #experience-section, section.experience-section")) {
-        score += 4;
-      }
-      return { name, score };
-    })
-    .filter((entry): entry is { name: string; score: number } => Boolean(entry))
-    .sort((a, b) => b.score - a.score);
-  return ranked[0]?.name;
+  const text = dedupeRepeatedName(normalizeWhitespace(link.textContent ?? ""));
+  return looksLikeUtilityText(text) ? "" : text;
 }
 
 function inferCompanyFromHeadline(title: string | undefined): string | undefined {
   if (!title) {
     return undefined;
   }
-  // Stop before "(YC…)", "ex Nvidia", bullets, etc.
-  const atMatch = title.match(
-    /(?:\bat\b|@)\s+([A-Z][A-Za-z0-9&.,' -]{1,60}?)(?=\s*[\u00B7|·•,(]|\s+(?:United States|USA|US|ex)\b|$)/i,
+  const stripped = stripFormerEmployerPhrases(title);
+  // Stop before "(YC…)", bullets, etc.
+  const atMatch = stripped.match(
+    /(?:\bat\b|@)\s+([A-Z][A-Za-z0-9&.,' -]{1,60}?)(?=\s*[\u00B7|·•,(]|\s+(?:United States|USA|US)\b|$)/i,
   );
   if (atMatch?.[1]) {
     return cleanCompanyName(atMatch[1]);
   }
-  const pipeMatch = title.match(/\|\s*([A-Z][A-Za-z0-9&.,' -]{1,60}?)\s*$/);
-  if (pipeMatch?.[1]) {
+  const pipeMatch = stripped.match(/\|\s*([A-Z][A-Za-z0-9&.,' -]{1,60}?)\s*$/);
+  if (pipeMatch?.[1] && !looksLikeSchool(pipeMatch[1])) {
     return cleanCompanyName(pipeMatch[1]);
   }
   return undefined;
 }
 
-function inferCompanyFromProfileText(text: string): string | undefined {
-  // "Sr. Recruiter (Hardware Technology) at Apple" / "Recruiter at Apple · Bay Area"
-  const match = text.match(
-    /(?:\bat\b|@)\s+([A-Z][A-Za-z0-9][A-Za-z0-9&.,' -]{0,58}?)(?=\s*[\u00B7|·•,]|\s+(?:United States|USA|US)\b|\s+[A-Z][a-z]|$)/,
-  );
-  if (match?.[1]) {
-    return cleanCompanyName(match[1]);
+function stripFormerEmployerPhrases(value: string): string {
+  return value
+    .replace(/\(\s*ex\b[^)]*\)/gi, " ")
+    .replace(/,\s*ex\b.+$/i, " ")
+    .replace(/\b(?:formerly|previously)\s+(?:at\s+)?[A-Z][A-Za-z0-9&.,' -]{1,40}/gi, " ");
+}
+
+function linkedInCompanySlug(href: string | undefined): string | undefined {
+  if (!href) {
+    return undefined;
   }
-  const parenAt = text.match(
-    /\)\s+at\s+([A-Z][A-Za-z0-9][A-Za-z0-9&.,' -]{0,58}?)(?=\s*[\u00B7|·•,]|\s|$)/i,
-  );
-  if (parenAt?.[1]) {
-    return cleanCompanyName(parenAt[1]);
+  try {
+    const path = href.includes("://") || href.startsWith("/")
+      ? new URL(href, "https://www.linkedin.com").pathname
+      : href;
+    const slug = path.match(/\/company\/([^/]+)/i)?.[1];
+    if (!slug || /^\d+$/.test(slug)) {
+      return undefined;
+    }
+    return decodeURIComponent(slug).replace(/\/$/, "").toLowerCase();
+  } catch {
+    return undefined;
   }
-  const loose = text.match(/(?:\bat\b|@)\s+([A-Z][A-Za-z0-9&.,' -]{1,60})\b/);
-  if (loose?.[1]) {
-    return cleanCompanyName(loose[1]);
-  }
-  return undefined;
+}
+
+function looksLikeSchool(name: string): boolean {
+  return /\b(university|college|school|polytechnic|high school|institute of technology)\b/i.test(name);
 }
 
 function cleanCompanyName(value: string): string {
-  return normalizeWhitespace(
-    value
-      .replace(/\([^)]*\)/g, " ")
-      .replace(/\s+ex\b.*$/i, "")
-      .replace(/[|·•,]+$/g, ""),
+  const trimmed = value.trim();
+  const keepAcronymParens = trimmed.match(/\(([A-Z0-9&.-]{2,12})\)\s*$/)?.[1];
+  const withoutParens = keepAcronymParens
+    ? trimmed.replace(/\(([A-Z0-9&.-]{2,12})\)\s*$/i, " ")
+    : trimmed.replace(/\([^)]*\)/g, " ");
+  const cleaned = normalizeWhitespace(withoutParens.replace(/\s+ex\b.*$/i, "").replace(/[|·•,]+$/g, ""));
+  return keepAcronymParens ? `${cleaned} (${keepAcronymParens})`.trim() : cleaned;
+}
+
+function looksLikeProfileAction(name: string): boolean {
+  return /^(message|connect|follow|more|pending|ignore|withdraw|contact info|visit my website|open to work|add section|resources|notify|share)$/i.test(
+    name.trim(),
+  );
+}
+
+function looksLikeUtilityText(name: string): boolean {
+  return /^(skip to search|skip to main content|skip to primary content|skip to aside|skip to footer|close jump menu|search|home|my network|jobs|messaging|notifications|me|for business|try premium for|advertise|this image has content credentials\.?|view image|profile photo)$/i.test(
+    name.trim(),
   );
 }
 
@@ -827,13 +1251,36 @@ function looksLikeCompanyName(name: string): boolean {
   if (!name || name.length < 2 || name.length > 60) {
     return false;
   }
+  if (looksLikeProfileAction(name)) {
+    return false;
+  }
+  if (looksLikeUtilityText(name)) {
+    return false;
+  }
   if (/^(follow|see all|company|linkedin|show all|more)$/i.test(name)) {
+    return false;
+  }
+  if (/^[·•]\s*\d/.test(name) || /^(\d+\+?\s+)?connections?$/i.test(name)) {
     return false;
   }
   if (/\b(you both|worked at|before you|started|mutual|connections?|followers?|also viewed|in common)\b/i.test(name)) {
     return false;
   }
+  if (/\b(founder|co-founder|engineer|engineering|recruiter|manager|director|architect|developer|product|software|marketing|officer|chief|ceo|cto|coo|cpo|vp|president)\b/i.test(name) && /(?:\bat\b|@|,)/i.test(name)) {
+    return false;
+  }
+  if (looksLikeWebsiteLine(name) || looksLikeOpenToWorkLine(name)) {
+    return false;
+  }
   return name.split(/\s+/).length <= 6;
+}
+
+function looksLikeWebsiteLine(name: string): boolean {
+  return /\b(?:https?:\/\/|www\.|\.com\b|\.ai\b|\.io\b|\.org\b|\.net\b)\b/i.test(name);
+}
+
+function looksLikeOpenToWorkLine(name: string): boolean {
+  return /\bopen to work\b|on-site|hybrid|remote/i.test(name);
 }
 
 /**

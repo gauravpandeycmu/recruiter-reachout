@@ -81,7 +81,7 @@ describe("discoverEmailOnJobright", () => {
     const wait = vi.fn().mockResolvedValue({ found: false });
     const adapter = createFakeAdapter({ waitForContactResult: wait });
     await discoverEmailOnJobright(adapter, "https://www.linkedin.com/in/jane-doe", { dryRun: false });
-    expect(wait).toHaveBeenCalledWith(45_000);
+    expect(wait).toHaveBeenCalledWith(90_000);
   });
 
   it("catches adapter exceptions (e.g. selector not found after a Jobright layout change) as an error outcome", async () => {
@@ -89,5 +89,34 @@ describe("discoverEmailOnJobright", () => {
     const outcome = await discoverEmailOnJobright(adapter, "https://www.linkedin.com/in/jane-doe", { dryRun: false });
 
     expect(outcome).toEqual({ status: "error", message: "Timed out waiting for selector" });
+  });
+
+  it("treats a failed fill (Find Any Email box missing / logged out) as error, not not_found", async () => {
+    const adapter = createFakeAdapter({
+      fillLinkedInUrl: vi.fn().mockRejectedValue(new Error("Timeout 25000ms exceeded waiting for attached")),
+    });
+    const outcome = await discoverEmailOnJobright(adapter, "https://www.linkedin.com/in/joe-chen-seattle", {
+      dryRun: false,
+    });
+    expect(outcome.status).toBe("error");
+    expect(adapter.clickSearch).not.toHaveBeenCalled();
+    expect(adapter.waitForContactResult).not.toHaveBeenCalled();
+  });
+
+  it("still ran the lookup (fill + search) when the toast wait times out — Joe Chen case", async () => {
+    const adapter = createFakeAdapter({
+      waitForContactResult: vi.fn().mockResolvedValue({ found: false, timedOut: true }),
+    });
+    const linkedinUrl = "https://www.linkedin.com/in/joe-chen-seattle/";
+    const outcome = await discoverEmailOnJobright(adapter, linkedinUrl, { dryRun: false });
+
+    expect(adapter.fillLinkedInUrl).toHaveBeenCalledWith(linkedinUrl);
+    expect(adapter.clickSearch).toHaveBeenCalledTimes(1);
+    expect(adapter.waitForContactResult).toHaveBeenCalled();
+    expect(outcome).toEqual({
+      status: "error",
+      message: "Timed out waiting for Jobright contact result.",
+    });
+    expect(adapter.clickConnectNow).not.toHaveBeenCalled();
   });
 });

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildAnalyticsSummary, toOffsetYmd, updateAnalyticsGoal } from "../src/analytics.js";
 import { createCandidate, createEvent } from "../src/services.js";
+import { createImmediateSendJob } from "../src/sendJobs.js";
 import { Store } from "../src/store.js";
 
 describe("analytics", () => {
@@ -56,6 +57,25 @@ describe("analytics", () => {
     expect(summary.daily).toHaveLength(180);
     expect(summary.daily.at(-1)?.date).toBe("2026-07-12");
     expect(summary.cumulativeSends).toHaveLength(180);
+  });
+
+  it("counts companies emailed >180 days ago in the all-time companies-touched stat", async () => {
+    const store = await freshStore();
+    const oldCandidate = store.upsertCandidate(
+      createCandidate({ fullName: "Old Contact", company: "Ancient Corp", email: "old@ancient.com" }),
+    );
+    const recentCandidate = store.upsertCandidate(
+      createCandidate({ fullName: "New Contact", company: "Fresh Inc", email: "new@fresh.com" }),
+    );
+    // Send event ~200 days before localDate — outside the 180-day daily window.
+    store.addEvent({ ...createEvent(oldCandidate.id, "send"), createdAt: "2025-12-20T12:00:00.000Z" });
+    store.addEvent({ ...createEvent(recentCandidate.id, "send"), createdAt: "2026-07-10T12:00:00.000Z" });
+
+    const summary = buildAnalyticsSummary(store, "2026-07-12", { tzOffsetMinutes: 0 });
+    // Both sends are counted all-time; both companies must be too — the old one
+    // must not silently drop out just because it's older than the 180-day chart.
+    expect(summary.allTime.sent).toBe(2);
+    expect(summary.allTime.companiesTouched).toBe(2);
   });
 
   it("celebrates when daily company schedule goal is met and not yet celebrated", async () => {
@@ -273,6 +293,105 @@ describe("analytics", () => {
     expect(summary.cumulativeSends.at(-1)?.total).toBe(0);
   });
 
+  it("credits a bare Send-now (no queue row) toward the daily company goal", async () => {
+    // A Send-now via POST /candidates/:id/send is a createImmediateSendJob with
+    // NO backing send_queue row — it must still count that company toward the
+    // daily goal (and the streak) on its click day, or Send-now silently fails to
+    // move the goal. collectScheduledCompaniesByDay covers this with a dedicated
+    // send_now/no-queueItemId loop; without it a Send-now day looks empty.
+    const store = await freshStore();
+    store.setAnalyticsGoalSettings({
+      dailySendGoal: 1,
+      goalMetDates: [],
+      updatedAt: new Date().toISOString(),
+    });
+    const zeta = store.upsertCandidate(
+      createCandidate({ fullName: "Zoe Zeta", email: "z@zeta.com", company: "Zeta" }),
+    );
+    const job = createImmediateSendJob(store, zeta.id, {
+      to: "z@zeta.com",
+      subject: "Hi",
+      textBody: "Hi",
+      htmlBody: "<p>Hi</p>",
+      scheduledFor: undefined,
+    });
+    // Pin the click day deterministically (createImmediateSendJob stamps now).
+    store.upsertSendJob({ ...job, createdAt: "2026-07-11T12:00:00.000Z", updatedAt: "2026-07-11T12:00:00.000Z" });
+    // Precondition: it is genuinely a bare send-now (no queue row) so only the
+    // send_now/no-queueItemId loop can credit it.
+    expect(store.listSendQueue()).toHaveLength(0);
+
+    const summary = buildAnalyticsSummary(store, "2026-07-11", { tzOffsetMinutes: 0 });
+    expect(summary.goalProgress.sentToday).toBe(1);
+    expect(summary.goalProgress.met).toBe(true);
+    expect(summary.goalProgress.activityToday).toBe(true);
+    expect(summary.daily.find((day) => day.date === "2026-07-11")?.scheduledCompanies).toBe(1);
+  });
+
+  it("does not credit suppressed / rolled-over queue rows to the goal or streak", async () => {
+    const store = await freshStore();
+    store.setAnalyticsGoalSettings({
+      dailySendGoal: 1,
+      goalMetDates: [],
+      updatedAt: new Date().toISOString(),
+    });
+    const real = store.upsertCandidate(
+      createCandidate({ fullName: "Ada Acme", email: "a@acme.com", company: "Acme" }),
+    );
+    const suppressed = store.upsertCandidate(
+      createCandidate({ fullName: "No Email", company: "Ghostco" }),
+    );
+    const rolled = store.upsertCandidate(
+      createCandidate({ fullName: "Later Person", email: "l@overflow.com", company: "Overflow" }),
+    );
+    // One genuinely scheduled row + two rows the legacy backlog scheduler persists
+    // for candidates it could not actually schedule (never eligible / capped to a
+    // later day). Only the real scheduled company must count.
+    store.upsertSendQueueItem({
+      id: "q-real",
+      candidateId: real.id,
+      email: "a@acme.com",
+      confidence: "high",
+      status: "scheduled",
+      scheduledFor: "2026-07-11T20:00:00.000Z",
+      createdAt: "2026-07-11T12:00:00.000Z",
+      updatedAt: "2026-07-11T12:00:00.000Z",
+      attempts: 0,
+    });
+    store.upsertSendQueueItem({
+      id: "q-suppressed",
+      candidateId: suppressed.id,
+      email: "",
+      confidence: "unknown",
+      status: "suppressed",
+      scheduledFor: "2026-07-11T20:00:00.000Z",
+      createdAt: "2026-07-11T12:00:00.000Z",
+      updatedAt: "2026-07-11T12:00:00.000Z",
+      attempts: 0,
+      failureReason: "Not eligible for sending.",
+    });
+    store.upsertSendQueueItem({
+      id: "q-rolled",
+      candidateId: rolled.id,
+      email: "l@overflow.com",
+      confidence: "high",
+      status: "rolled_over",
+      scheduledFor: "2026-07-12T20:00:00.000Z",
+      createdAt: "2026-07-11T12:00:00.000Z",
+      updatedAt: "2026-07-11T12:00:00.000Z",
+      attempts: 0,
+    });
+
+    const summary = buildAnalyticsSummary(store, "2026-07-11", { tzOffsetMinutes: 0 });
+    // Only the one truly-scheduled company (Acme) counts — not Ghostco/Overflow.
+    expect(summary.goalProgress.sentToday).toBe(1);
+    expect(summary.daily.find((day) => day.date === "2026-07-11")?.scheduledCompanies).toBe(1);
+    // Streak day is still credited (there was a real schedule), but only from the real row.
+    expect(summary.goalProgress.sendStreak).toBe(1);
+    // Schedule-click chart counts only the real scheduling action.
+    expect(summary.hourly.reduce((sum, bucket) => sum + bucket.sent, 0)).toBe(1);
+  });
+
   it("cumulative companies tracks unique companies reached from send events", async () => {
     const store = await freshStore();
     const acme = store.upsertCandidate(
@@ -389,9 +508,55 @@ describe("analytics", () => {
     expect(summary.hourly[15]?.sent).toBe(1);
     expect(summary.usage.jobrightLookups).toBe(4);
     expect(summary.usage.jobrightEmailsFound).toBe(1);
+    expect(summary.usage.salesqlEmailsFound).toBe(0);
+    expect(summary.usage.apolloEmailsFound).toBe(0);
+    expect(summary.usage.finderEmailsFound).toBe(0);
     expect(summary.motivation.level).toBeGreaterThanOrEqual(1);
     expect(summary.today.companiesReached).toBe(1);
     expect(summary.cumulativeSends.at(-1)?.total).toBeGreaterThanOrEqual(1);
+  });
+
+  it("counts Apollo and SalesQL finds together as Finder emails", async () => {
+    const store = await freshStore();
+    store.upsertCandidate(
+      createCandidate({
+        fullName: "Nick Recruiter",
+        email: "nick@snowflake.com",
+        company: "Snowflake",
+        status: "email_guessed",
+        emailCandidates: [
+          {
+            email: "nick@snowflake.com",
+            pattern: "api_verified",
+            confidence: "high",
+            reason: "Verified via Apollo's email lookup.",
+            evidence: "apollo",
+          },
+        ],
+      }),
+    );
+    store.upsertCandidate(
+      createCandidate({
+        fullName: "Jane Recruiter",
+        email: "jane@acme.com",
+        company: "Acme",
+        status: "email_guessed",
+        emailCandidates: [
+          {
+            email: "jane@acme.com",
+            pattern: "api_verified",
+            confidence: "high",
+            reason: "Verified via SalesQL's email lookup.",
+            evidence: "salesql",
+          },
+        ],
+      }),
+    );
+
+    const summary = buildAnalyticsSummary(store, "2026-07-09", { tzOffsetMinutes: 0 });
+    expect(summary.usage.apolloEmailsFound).toBe(1);
+    expect(summary.usage.salesqlEmailsFound).toBe(1);
+    expect(summary.usage.finderEmailsFound).toBe(2);
   });
 
   it("estimates gemini usage from generated company content when no llm events exist", async () => {
@@ -597,6 +762,75 @@ describe("analytics", () => {
     // Outreach streak also counts the schedule click, but the fields stay distinct.
     expect(summary.goalProgress.sendStreak).toBe(1);
     expect(summary.goalProgress.activityToday).toBe(true);
+  });
+
+  it("keeps the goal streak on a grace day — met through yesterday, not yet met today", async () => {
+    // computeStreak gives today a grace day: when today's goal is NOT yet met the
+    // count starts from yesterday, so a user who scheduled every day for a week
+    // still sees their streak at 9am before today's batch (rather than a
+    // demotivating 0 that flips back up once they schedule). Every other goal-streak
+    // test meets today's goal, so the grace-day branch (cursor = yesterday) is
+    // otherwise unexercised. Mutation (drop the yesterday fallback) → streak 0.
+    const store = await freshStore();
+    store.setAnalyticsGoalSettings({
+      dailySendGoal: 1,
+      // Met on three consecutive days ending YESTERDAY; nothing scheduled today.
+      goalMetDates: ["2026-07-17", "2026-07-18", "2026-07-19"],
+      updatedAt: new Date().toISOString(),
+    });
+
+    const summary = buildAnalyticsSummary(store, "2026-07-20", { tzOffsetMinutes: 0 });
+    // Today's goal is not met yet...
+    expect(summary.goalProgress.met).toBe(false);
+    expect(summary.goalProgress.sentToday).toBe(0);
+    // ...but the streak is preserved through yesterday (grace day), not reset to 0.
+    expect(summary.goalProgress.streak).toBe(3);
+  });
+
+  it("counts consecutive goal-met days from schedule data even when goalMetDates was never persisted", async () => {
+    // goalMetDates is only persisted as a side-effect of the frontend auto-celebrate
+    // call, and only for "today" — never back-filled. A user who meets the goal by
+    // scheduling on a day the app is never opened-and-refreshed loses that day forever,
+    // so the goal streak silently resets even though the schedule data proves the goal
+    // was met. sendStreak is fully data-derived and self-heals; the goal streak must too.
+    const store = await freshStore();
+    store.setAnalyticsGoalSettings({
+      dailySendGoal: 1,
+      goalMetDates: [], // nothing persisted — app never celebrated on those days
+      updatedAt: new Date().toISOString(),
+    });
+    const candidate = store.upsertCandidate(
+      createCandidate({ fullName: "Goal Person", email: "goal@acme.com", company: "Acme" }),
+    );
+    // A distinct schedule-click on three consecutive local days (each ≥ goal of 1 company).
+    for (const day of ["2026-07-07", "2026-07-08", "2026-07-09"]) {
+      store.upsertSendQueueItem({
+        id: `q-datastreak-${day}`,
+        candidateId: candidate.id,
+        email: "goal@acme.com",
+        confidence: "high",
+        status: "scheduled",
+        scheduledFor: "2026-07-20T18:00:00.000Z",
+        createdAt: `${day}T15:00:00.000Z`,
+        updatedAt: `${day}T15:00:00.000Z`,
+        attempts: 0,
+      });
+    }
+
+    const summary = buildAnalyticsSummary(store, "2026-07-09", { tzOffsetMinutes: 0 });
+    expect(summary.goalProgress.met).toBe(true);
+    // Streak reflects all three data-proven goal-met days, not just today.
+    expect(summary.goalProgress.streak).toBe(3);
+    expect(summary.usage.longestStreak).toBeGreaterThanOrEqual(3);
+    // The effective met-dates exposed to the UI (calendar dots) match the streak
+    // source — not the empty persisted set — so the highlight can't disagree with
+    // the streak number.
+    expect(summary.goalProgress.goalMetDates.sort()).toEqual([
+      "2026-07-07",
+      "2026-07-08",
+      "2026-07-09",
+    ]);
+    expect(summary.goal.goalMetDates).toEqual([]); // raw persisted set stays untouched
   });
 
   it("advances motivation titles along the send-event milestone ladder", async () => {

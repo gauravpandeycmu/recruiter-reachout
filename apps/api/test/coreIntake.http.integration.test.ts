@@ -26,12 +26,17 @@ describe("core intake HTTP integration", () => {
       },
     ];
 
-    const check = await app.fetchJson<{ results: Array<{ status: string }> }>("/api/candidates/check", {
-      method: "POST",
-      body: JSON.stringify({ candidates, company: "Stripe" }),
-      expectStatus: 200,
-    });
+    const check = await app.fetchJson<{ results: Array<{ status: string; suggestedCompany?: string }> }>(
+      "/api/candidates/check",
+      {
+        method: "POST",
+        body: JSON.stringify({ candidates, company: "Stripe" }),
+        expectStatus: 200,
+      },
+    );
     expect(check.body.results.every((row) => row.status === "new")).toBe(true);
+    expect(check.body.results.every((row) => row.suggestedCompany === "Stripe")).toBe(true);
+    expect(check.body.results.every((row) => row.suggestedCompany === "Stripe")).toBe(true);
 
     const bulk = await app.fetchJson<{ results: Array<{ status: string }>; activeCount: number }>(
       "/api/candidates/bulk",
@@ -72,6 +77,9 @@ describe("core intake HTTP integration", () => {
     await flushWake();
 
     expect(app.spawnAttempts).toBeGreaterThan(before);
+
+    const lily = app.store.listActiveCandidates().find((row) => row.fullName === "Lily Huang");
+    expect(lily?.discoveryClaimedAt).toBeUndefined();
 
     const discovery = await app.fetchJson<{ fullName: string; linkedinUrl?: string }>(
       "/api/automation/next-discovery",
@@ -214,6 +222,52 @@ describe("core intake HTTP integration", () => {
       expectStatus: 200,
     });
     expect(discovery.body.fullName).toBe("Capture Recruiter");
+  });
+
+  it("does not count an already-active recruiter (known email) as a capture save", async () => {
+    app = await startHttpApp();
+    // Person is already in the active batch WITH a known email — re-capturing the
+    // company must NOT re-count them as a "save" (that inflated
+    // usage.linkedInCaptureSaves every re-run).
+    app.store.upsertCandidate(
+      createCandidate({
+        fullName: "Existing Recruiter",
+        firstName: "Existing",
+        company: "Figma",
+        email: "existing@figma.com",
+        emailCandidates: [{ email: "existing@figma.com", pattern: "first", confidence: "high", reason: "test" }],
+        linkedinUrl: "https://www.linkedin.com/in/existing-recruiter-http",
+        status: "email_guessed",
+      }),
+    );
+
+    const created = await app.fetchJson<{ id: string }>("/api/automation/linkedin-capture", {
+      method: "POST",
+      body: JSON.stringify({ companyName: "Figma", pages: 1 }),
+      expectStatus: 201,
+    });
+    await app.fetchJson("/api/automation/next-linkedin-capture", { expectStatus: 200 });
+
+    const result = await app.fetchJson<{ savedCount: number; skippedCount: number; results: Array<{ status: string }> }>(
+      `/api/automation/linkedin-capture-result/${created.body.id}`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          success: true,
+          candidates: [
+            {
+              fullName: "Existing Recruiter",
+              linkedinUrl: "https://www.linkedin.com/in/existing-recruiter-http",
+            },
+          ],
+        }),
+        expectStatus: 200,
+      },
+    );
+    // Duplicate reports `known_email`, but nothing was saved — savedCount must be 0.
+    expect(result.body.results[0]?.status).toBe("known_email");
+    expect(result.body.savedCount).toBe(0);
+    expect(result.body.skippedCount).toBe(1);
   });
 
   it("add-person appends to a scheduled company batch", async () => {

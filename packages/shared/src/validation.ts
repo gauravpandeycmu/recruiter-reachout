@@ -36,7 +36,14 @@ export function extractFirstName(fullName: string): string {
   const cleaned = dedupeRepeatedPersonName(fullName)
     .replace(/\([^)]*\)/g, "")
     .replace(/[,|].*$/, "");
-  return cleaned.split(" ").filter(Boolean)[0] ?? "";
+  const firstName = cleaned.split(" ").filter(Boolean)[0] ?? "";
+  // LinkedIn occasionally yields SHOUTING or all-lowercase names. Normalize
+  // obvious cases while preserving short initialisms such as AJ and mixed-case
+  // names such as DeShawn or McKayla.
+  if (firstName.length >= 3 && (firstName === firstName.toUpperCase() || firstName === firstName.toLowerCase())) {
+    return `${firstName.charAt(0).toUpperCase()}${firstName.slice(1).toLowerCase()}`;
+  }
+  return firstName;
 }
 
 export function isValidEmail(value: string): boolean {

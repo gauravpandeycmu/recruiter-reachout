@@ -218,14 +218,11 @@ Analytics `date` must use **local YMD**, not `toISOString().slice(0,10)` (UTC sh
 
 ### Legacy backlog scheduler
 
-History tab `scheduleToday` / `scheduleCandidates()` — auto rolls by caps (50/day, 5/hour, 5/domain). Secondary / older path.
+History tab `scheduleToday` / `scheduleCandidates()` — auto rolls by caps (200/day, 100/hour, 100/domain). Secondary / older path.
 
-### Pacing default mismatch (known gotcha)
+### Pacing defaults
 
-| Context | Typical `DAILY_SEND_LIMIT` |
-|---------|----------------------------|
-| README / backlog schedule | **50** |
-| `validateSendCandidate` send-now path | **30** if unset (`services.ts`) |
+All scheduling and send-now paths use the same defaults: 200/day, 100/hour, and 100/domain.
 
 ---
 
@@ -337,9 +334,9 @@ PUBLIC_TRACKING_BASE_URL   # HTTPS required for real sends
 RELAY_SYNC_TOKEN
 GEMINI_API_KEY
 DAILY_INTAKE_LIMIT=300
-DAILY_SEND_LIMIT=50        # note send-now validator may default 30 if unset
-HOURLY_SEND_LIMIT=5
-DOMAIN_DAILY_SEND_LIMIT=5
+DAILY_SEND_LIMIT=200
+HOURLY_SEND_LIMIT=100
+DOMAIN_DAILY_SEND_LIMIT=100
 TEST_MODE / TEST_MODE_RECIPIENT_EMAIL
 JOBRIGHT_JOB_URL           # worker required
 SALESQL_EXTENSION_PATH / STREAK_EXTENSION_PATH
@@ -371,4 +368,4 @@ Locked in for day-to-day use:
 - History directory + backlog tools  
 - Setup sessions, resumes, footer, test mode, weather  
 
-Likely future polish (not blocking handoff): unify `DAILY_SEND_LIMIT` defaults, trim `main.tsx` size, more Grove asset polish, production relay hardening, extension versioning beyond local load.
+Likely future polish (not blocking handoff): trim `main.tsx` size, more Grove asset polish, production relay hardening, extension versioning beyond local load.

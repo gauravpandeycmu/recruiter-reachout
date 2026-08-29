@@ -126,4 +126,27 @@ describe("scheduleCandidatesExplicit", () => {
       "2026-05-13T10:02:00.000Z",
     ]);
   });
+
+  it("explains why an explicitly requested person was not queued", () => {
+    const ready = candidate(1);
+    const noEmail: RecruiterCandidate = {
+      ...candidate(2),
+      email: undefined,
+      emailCandidates: [],
+    };
+    const result = scheduleCandidatesExplicit(
+      [ready, noEmail],
+      {
+        candidateIds: [ready.id, noEmail.id],
+        startAt: "2026-05-13T10:00:00.000Z",
+        intervalMinutes: 4,
+        jitterSeconds: 0,
+      },
+    );
+    expect(result.queued).toHaveLength(1);
+    expect(result.queued[0]?.candidateId).toBe(ready.id);
+    expect(result.rejected).toEqual([
+      { candidateId: noEmail.id, reason: "Candidate needs an email before sending." },
+    ]);
+  });
 });

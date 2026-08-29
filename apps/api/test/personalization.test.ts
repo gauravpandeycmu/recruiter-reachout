@@ -58,7 +58,7 @@ describe("generateCompanyEmailContent", () => {
           candidates: [
             {
               content: {
-                parts: [{ text: '{"subject": "Quick note, {firstName}", "body": "Hi {firstName}, Acme looks great."}' }],
+                parts: [{ text: '{"subject": "Quick note, {firstName}", "body": "Hi {firstName}, Acme looks great.", "linkedinSubject": "Acme role", "linkedinMessage": "Hi {firstName},\\n\\nI am reaching out about Acme. I have attached my resume and would appreciate it if you could take a quick look at my application."}' }],
               },
             },
           ],
@@ -73,6 +73,9 @@ describe("generateCompanyEmailContent", () => {
     expect(result).toEqual({
       subject: "Quick note, {firstName}",
       body: "Hi {firstName}, Acme looks great.",
+      linkedinSubject: "Acme role",
+      linkedinMessage:
+        "Hi {firstName},\n\nI am reaching out about Acme. I have attached my resume and would appreciate it if you could take a quick look at my application.",
       model: "gemini-test-model",
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -90,8 +93,8 @@ describe("generateCompanyEmailContent", () => {
   });
 
   it("runs a repair call when the draft breaks a rule, and returns the fixed version", async () => {
-    const badDraft = '{"subject": "Quick note", "body": "I hope this email finds you well. Acme looks great."}';
-    const goodDraft = '{"subject": "Quick note, {firstName}", "body": "Hi {firstName}, Acme looks great."}';
+    const badDraft = '{"subject": "Quick note", "body": "I hope this email finds you well. Acme looks great.", "linkedinSubject": "Connect", "linkedinMessage": "Hi {firstName}, interested in Acme?"}';
+    const goodDraft = '{"subject": "Quick note, {firstName}", "body": "Hi {firstName}, Acme looks great.", "linkedinSubject": "Acme role", "linkedinMessage": "Hi {firstName},\\n\\nI am reaching out about Acme and have attached my resume. I would appreciate it if you could take a quick look at my application."}';
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(geminiResponse(badDraft))
@@ -111,7 +114,7 @@ describe("generateCompanyEmailContent", () => {
   });
 
   it("returns remaining issues as warnings when the repair pass cannot fix them", async () => {
-    const badDraft = '{"subject": "Quick note", "body": "Acme looks great."}';
+    const badDraft = '{"subject": "Quick note", "body": "Acme looks great.", "linkedinSubject": "Acme role", "linkedinMessage": "Interested in Acme?"}';
     const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(geminiResponse(badDraft)));
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
@@ -140,6 +143,14 @@ describe("classifyRecipientAudience", () => {
 
   it("detects mixed batches", () => {
     expect(classifyRecipientAudience(["Technical Recruiter", "Engineering Manager"])).toBe("mixed");
+  });
+
+  it("ignores sentence fragments accidentally captured as recipient titles", () => {
+    expect(
+      classifyRecipientAudience([
+        "recruiter reach out from overseas doesn’t change the market value of the engineer they’re",
+      ]),
+    ).toBe("unknown");
   });
 });
 
@@ -171,6 +182,9 @@ describe("buildPersonalizationPrompt", () => {
     expect(prompt).toContain("PyTorch");
     expect(prompt).toContain("Role applying for: ML Intern");
     expect(prompt).toContain("HOW TO TAILOR");
+    expect(prompt).toContain("one distinctive requirement");
+    expect(prompt).toContain("deterministic checks");
+    expect(prompt).toContain("without claiming database-internals experience");
   });
 
   it("requires mentioning a detected job ID early in the hook", () => {
@@ -267,15 +281,32 @@ describe("buildPersonalizationPrompt", () => {
     expect(prompt).toContain("1. HOOK");
     expect(prompt).toContain("2. WHO + PROOF");
     expect(prompt).toContain("3. ASK");
-    expect(prompt).toContain("aim for 70-100 words (hard cap 120)");
+    expect(prompt).toContain("aim for 60-100 words (hard cap 110)");
   });
 
-  it("keeps the samples' polite closing style and bans open-ended self-serving asks", () => {
+  it("ends with one low-effort action and bans ceremonial or self-serving asks", () => {
     const prompt = buildPersonalizationPrompt({ company: "Acme", samples: [sample] });
-    expect(prompt).toContain("samples' own closing style");
-    expect(prompt).toContain("Never a pushy yes/no question");
+    expect(prompt).toContain("one specific, low-effort action");
+    expect(prompt).toContain("omit 'I look forward to hearing from you'");
     expect(prompt).toContain('"what roles are available"');
-    expect(prompt).toContain("strongest one-phrase credential");
+    expect(prompt).toContain("at most one relevant credential");
+  });
+
+  it("writes differently for recruiters and hiring managers", () => {
+    const recruiterPrompt = buildPersonalizationPrompt({
+      company: "Acme",
+      samples: [sample],
+      recipientTitles: ["Technical Recruiter"],
+    });
+    const managerPrompt = buildPersonalizationPrompt({
+      company: "Acme",
+      samples: [sample],
+      recipientTitles: ["Engineering Manager"],
+    });
+    expect(recruiterPrompt).toContain("consider or route this specific application");
+    expect(recruiterPrompt).toContain("one recognizable result");
+    expect(managerPrompt).toContain("one technically credible result");
+    expect(managerPrompt).toContain("one distinctive responsibility");
   });
 
   it("allows one concrete-enthusiasm clause but bans generic mission-gushing", () => {
@@ -291,7 +322,18 @@ describe("buildPersonalizationPrompt", () => {
       samples: [sample],
       jobDescription: "x".repeat(10000),
     });
-    expect(prompt.length).toBeLessThan(10000 + 4000);
+    expect(prompt.length).toBeLessThan(18000);
+  });
+
+  it("preserves late qualification details when compacting a long job description", () => {
+    const prompt = buildPersonalizationPrompt({
+      company: "Acme",
+      samples: [sample],
+      roleTitle: "Platform Engineer",
+      jobDescription: `Overview: build reliable systems.\n${"middle filler ".repeat(600)}\nPreferred: deep fault-tolerance and query-optimization experience.`,
+    });
+    expect(prompt).toContain("middle of posting omitted");
+    expect(prompt).toContain("fault-tolerance and query-optimization");
   });
 
   it("includes LinkedIn post guidance when a post is provided", () => {
@@ -304,6 +346,33 @@ describe("buildPersonalizationPrompt", () => {
     expect(prompt).toContain("hiring ML interns who love PyTorch");
     expect(prompt).toContain("HOW TO USE THE LINKEDIN POST");
     expect(prompt).toContain("saw their post");
+    expect(prompt).toContain("carry that idea into the email's proof paragraph");
+    expect(prompt).toContain('MUST begin its hook with "I saw your post about ..."');
+  });
+
+  it("warns the model when a LinkedIn post does not corroborate the target job", () => {
+    const prompt = buildPersonalizationPrompt({
+      company: "Apple",
+      samples: [sample],
+      roleTitle: "Software Engineer - Darwin Server, Core OS",
+      jobDescription: "Build Darwin and Core OS services.",
+      linkedinPost: "Hiring a backend engineer for the Camera and Photos AI team with RAG experience.",
+    });
+    expect(prompt).toContain("does not clearly name or corroborate this target role/req");
+    expect(prompt).toContain("Do not imply that the post advertised this job or team");
+  });
+
+  it("includes verified T-Mobile AI evidence and channel-specific output rules", () => {
+    const prompt = buildPersonalizationPrompt({ company: "Acme", samples: [sample] });
+    expect(prompt).toContain("RECENT AI EXPERIENCE");
+    expect(prompt).toContain("OpenAI Realtime APIs");
+    expect(prompt).toContain("LLM-as-a-judge");
+    expect(prompt).toContain("PRODUCTION / BACKEND EXPERIENCE (Epsilon)");
+    expect(prompt).toContain("Reduced data-ingestion latency from 30 seconds to 5 seconds");
+    expect(prompt).toContain("scaled it beyond 7,000 RPS");
+    expect(prompt).toContain("LinkedIn message rules");
+    expect(prompt).toContain('"linkedinSubject": string');
+    expect(prompt).toContain('"linkedinMessage": string');
   });
 
   it("omits the LinkedIn post section when none is provided", () => {
@@ -334,7 +403,40 @@ describe("validateGeneratedEmail", () => {
   it("flags bodies over the word limit", () => {
     const longBody = `Hi {firstName}, ${"word ".repeat(160)}`;
     const issues = validateGeneratedEmail({ subject: "Hi", body: longBody }, samples);
-    expect(issues.join(" ")).toContain("words");
+    expect(issues.join(" ")).toContain("110 words or fewer");
+  });
+
+  it("enforces the actual 60-character email subject limit", () => {
+    const issues = validateGeneratedEmail(
+      { subject: `${"Software Engineer ".repeat(4)}{firstName}`, body: "Hi {firstName}, short and specific." },
+      samples,
+    );
+    expect(issues.join(" ")).toContain("under 60 characters");
+  });
+
+  it("flags the stock look-forward closing in default cold outreach", () => {
+    const issues = validateGeneratedEmail(
+      {
+        subject: "Backend Engineer, {firstName}",
+        body: "Hi {firstName}, I built a production API at Epsilon. I look forward to hearing from you.",
+      },
+      samples,
+    );
+    expect(issues.join(" ")).toMatch(/look forward to hearing from you|templated/i);
+  });
+
+  it("caps LinkedIn messages at 400 characters even when under 60 words", () => {
+    const linkedinMessage = `Hi {firstName},\n\n${"personalized ".repeat(40)}please consider my application.`;
+    const issues = validateGeneratedEmail(
+      {
+        subject: "Backend Engineer, {firstName}",
+        body: "Hi {firstName}, I built a production API at Epsilon. Please consider my application.",
+        linkedinSubject: "Backend Engineer",
+        linkedinMessage,
+      },
+      samples,
+    );
+    expect(issues.join(" ")).toContain("400 characters or fewer");
   });
 
   it("flags banned templated phrases", () => {
@@ -343,6 +445,150 @@ describe("validateGeneratedEmail", () => {
       samples,
     );
     expect(issues.join(" ")).toContain("templated");
+  });
+
+  it("flags generic aligns-well language", () => {
+    const issues = validateGeneratedEmail(
+      {
+        subject: "Software Engineer, {firstName}",
+        body: "Hi {firstName},\n\nMy Java and distributed systems background aligns well with this role.",
+      },
+      samples,
+    );
+    expect(issues.join(" ")).toMatch(/aligns well|templated/i);
+  });
+
+  it("flags other generic fit claims and bare skill lists when context is rich", () => {
+    const issues = validateGeneratedEmail(
+      {
+        subject: "Backend Engineer, {firstName}",
+        body: [
+          "Hi {firstName},",
+          "",
+          "I saw the backend opening and wanted to reach out. I am a CMU graduate student with three years at Epsilon. My background in Java, distributed systems, cloud, and Kubernetes would be a strong match for the scalable platform work described in the posting. I've attached my resume and would appreciate your consideration. Thank you for your time.",
+        ].join("\n"),
+      },
+      samples,
+      {
+        company: "Acme",
+        roleTitle: "Backend Engineer",
+        jobDescription: "Build low-latency APIs and operate distributed production systems.",
+      },
+    );
+    expect(issues.join(" ")).toMatch(/generic fit\/alignment/i);
+    expect(issues.join(" ")).toMatch(/concrete verified accomplishment/i);
+  });
+
+  it("accepts a concrete non-AI accomplishment matched to a backend requirement", () => {
+    const issues = validateGeneratedEmail(
+      {
+        subject: "Backend Engineer, {firstName}",
+        body: [
+          "Hi {firstName},",
+          "",
+          "I'm reaching out about the Backend Engineer opening at Acme. I'm a CMU graduate student with three years at Epsilon, where I reduced data-ingestion latency from 30 seconds to 5 seconds by introducing asynchronous fetching and refactoring bottleneck APIs. That production optimization experience is directly relevant to the role's low-latency API work. I've attached my resume and would appreciate your consideration. Thank you for your time.",
+        ].join("\n"),
+      },
+      samples,
+      {
+        company: "Acme",
+        roleTitle: "Backend Engineer",
+        jobDescription: "Build low-latency APIs and operate distributed production systems.",
+      },
+    );
+    expect(issues).toEqual([]);
+  });
+
+  it("flags an unrelated hiring post presented as if it advertised the target job", () => {
+    const issues = validateGeneratedEmail(
+      {
+        subject: "Darwin Server Engineer, {firstName}",
+        body: [
+          "Hi {firstName},",
+          "",
+          "I saw your post about hiring for the Camera and Photos AI team and wanted to reach out about the Darwin Server, Core OS role. At Epsilon, I resolved more than 80 Kubernetes production incidents while serving as a primary on-call engineer for two years. That reliability work is relevant to operating system services. I've attached my resume and would appreciate your consideration. Thank you for your time.",
+        ].join("\n"),
+      },
+      samples,
+      {
+        company: "Apple",
+        roleTitle: "Software Engineer - Darwin Server, Core OS",
+        jobDescription: "Build Darwin and Core OS services.",
+        linkedinPost: "Hiring a backend engineer for the Camera and Photos AI team with RAG experience.",
+        recipientTitles: ["Software Engineering Manager"],
+      },
+    );
+    expect(issues.join(" ")).toMatch(/does not clearly corroborate/i);
+  });
+
+  it("flags opaque hexadecimal ATS IDs in subject or body", () => {
+    const id = "6a7348d4e55c73319eb16346";
+    const issues = validateGeneratedEmail(
+      {
+        subject: `Software Engineer ${id}, {firstName}`,
+        body: `Hi {firstName},\n\nI'm reaching out about the Software Engineer opening (${id}) at Lyft. At Epsilon, I reduced ingestion latency from 30 seconds to 5 seconds by refactoring bottleneck APIs. I've attached my resume and would appreciate your consideration. Thank you for your time and I look forward to hearing from you.`,
+      },
+      samples,
+      {
+        company: "Lyft",
+        roleTitle: "Software Engineer",
+        jobDescription: `Job ID: ${id}\nBuild reliable backend services.`,
+        jobUrl: `https://jobright.ai/jobs/info/${id}`,
+      },
+    );
+    expect(issues.join(" ")).toMatch(/opaque ATS identifier|role title instead/i);
+  });
+
+  it("flags an AI-native draft that misses the evidence-to-requirement bridge", () => {
+    const issues = validateGeneratedEmail(
+      {
+        subject: "Software Engineer (AI-Native), {firstName}",
+        body: [
+          "Hi {firstName},",
+          "",
+          "I saw your post about the core Database Engineering team and wanted to reach out about the Software Engineer (AI-Native), Database Engineering role.",
+          "",
+          "I am a CMU graduate student with three years at Epsilon. At T-Mobile, I built an autonomous agent validation framework using OpenAI Realtime APIs and Kubernetes. My Java and distributed systems background is relevant to the database engine.",
+        ].join("\n"),
+      },
+      samples,
+      {
+        company: "Snowflake",
+        roleTitle: "Software Engineer (AI-Native), Database Engineering",
+        jobDescription:
+          "Use coding agents, automated verification, and continuous benchmarking to build reliable database systems.",
+        linkedinPost:
+          "Hiring systems engineers for core Database Engineering who have fully embraced AI-assisted development and changed their workflow.",
+        recipientTitles: ["Software Engineering Manager at Snowflake"],
+      },
+    );
+    expect(issues.join(" ")).toMatch(/AI-workflow bridge/i);
+  });
+
+  it("accepts a concrete AI-native evidence-to-requirement bridge", () => {
+    const issues = validateGeneratedEmail(
+      {
+        subject: "AI-Native Database Engineer, {firstName}",
+        body: [
+          "Hi {firstName},",
+          "",
+          "I saw your post about engineers who have changed how they build with AI and wanted to reach out about the Software Engineer (AI-Native), Database Engineering role.",
+          "",
+          "At T-Mobile, I built an autonomous validation framework with deterministic checks and LLM-as-a-judge evaluation, then integrated it into GitLab CI/CD on Kubernetes. That work directly matches the role's focus on AI-assisted development, automated verification, and production reliability.",
+        ].join("\n"),
+      },
+      samples,
+      {
+        company: "Snowflake",
+        roleTitle: "Software Engineer (AI-Native), Database Engineering",
+        jobDescription:
+          "Use coding agents, automated verification, and continuous benchmarking to build reliable database systems.",
+        linkedinPost:
+          "Hiring systems engineers for core Database Engineering who have fully embraced AI-assisted development and changed their workflow.",
+        recipientTitles: ["Software Engineering Manager at Snowflake"],
+      },
+    );
+    expect(issues).toEqual([]);
   });
 
   it("allows warm interest phrasing when passionate mode is on", () => {
@@ -428,6 +674,23 @@ describe("validateGeneratedEmail", () => {
       { company: "Acme", jobDescription: "Job ID: 778812\nBuild distributed systems." },
     );
     expect(issues.join(" ")).toContain("778812");
+  });
+
+  it("flags current-tense T-Mobile internship wording in the email and LinkedIn message", () => {
+    const issues = validateGeneratedEmail(
+      {
+        subject: "Software Engineer - CMU grad",
+        body: "Hi {firstName}, I am a CMU graduate student and I'm currently interning at T-Mobile building AI infrastructure and backend systems.",
+        linkedinSubject: "Apple role",
+        linkedinMessage:
+          "Hi {firstName},\n\nI'm currently interning at T-Mobile building AI infrastructure and backend systems and wanted to reach out.",
+      },
+      [{ id: "1", subject: "Hello {firstName}", body: "Hi {firstName}," , createdAt: "now" }],
+      { company: "Apple" },
+    );
+
+    expect(issues).toContain("The T-Mobile internship is completed, so the email cannot describe it as current.");
+    expect(issues).toContain("The T-Mobile internship is completed, so the LinkedIn message cannot describe it as current.");
   });
 
   it("accepts emails that mention the detected job ID", () => {
@@ -537,24 +800,28 @@ describe("validateGeneratedEmail", () => {
 
 describe("parseGeneratedContent", () => {
   it("parses plain JSON", () => {
-    expect(parseGeneratedContent('{"subject": "Hi", "body": "There"}')).toEqual({ subject: "Hi", body: "There" });
+    expect(parseGeneratedContent('{"subject": "Hi", "body": "There", "linkedinSubject": "Role", "linkedinMessage": "Hi {firstName},\\n\\nthere"}')).toEqual({ subject: "Hi", body: "There", linkedinSubject: "Role", linkedinMessage: "Hi {firstName},\n\nthere" });
   });
 
   it("strips markdown code fences before parsing", () => {
-    expect(parseGeneratedContent('```json\n{"subject": "Hi", "body": "There"}\n```')).toEqual({
+    expect(parseGeneratedContent('```json\n{"subject": "Hi", "body": "There", "linkedinSubject": "Role", "linkedinMessage": "Hi {firstName},\\n\\nthere"}\n```')).toEqual({
       subject: "Hi",
       body: "There",
+      linkedinSubject: "Role",
+      linkedinMessage: "Hi {firstName},\n\nthere",
     });
   });
 
   it("parses JSON buried after Gemma-style thought notes", () => {
     expect(
       parseGeneratedContent(
-        'Thoughts about the email...\n{"subject": "Hi {firstName}", "body": "Hello {firstName}."}',
+        'Thoughts about the email...\n{"subject": "Hi {firstName}", "body": "Hello {firstName}.", "linkedinSubject": "Role", "linkedinMessage": "Hi {firstName},\\n\\nhello"}',
       ),
     ).toEqual({
       subject: "Hi {firstName}",
       body: "Hello {firstName}.",
+      linkedinSubject: "Role",
+      linkedinMessage: "Hi {firstName},\n\nhello",
     });
   });
 

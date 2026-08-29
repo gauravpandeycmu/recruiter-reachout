@@ -32,12 +32,49 @@ function readExtensionVersion(extensionDir: string): string | undefined {
   }
 }
 
+/**
+ * Compare two Chrome extension version-dir names (e.g. "6.16.0_0" vs "6.9.0_0")
+ * numerically per dotted/underscored segment. A plain lexical sort is WRONG here:
+ * it ranks "6.16" below "6.9" ("1" < "9"), so picking `.sort().at(-1)` would load
+ * a STALE Streak extension whenever the minor version reaches double digits.
+ */
+export function compareExtensionVersions(a: string, b: string): number {
+  const segsA = a.split(/[._]/);
+  const segsB = b.split(/[._]/);
+  const len = Math.max(segsA.length, segsB.length);
+  for (let i = 0; i < len; i += 1) {
+    const rawA = segsA[i] ?? "";
+    const rawB = segsB[i] ?? "";
+    const numA = Number(rawA);
+    const numB = Number(rawB);
+    const bothNumeric = rawA !== "" && rawB !== "" && Number.isFinite(numA) && Number.isFinite(numB);
+    if (bothNumeric) {
+      if (numA !== numB) return numA - numB;
+    } else if (rawA !== rawB) {
+      return rawA < rawB ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
+/** Highest Chrome extension version dir name, comparing segments numerically. */
+export function pickLatestExtensionVersion(names: string[]): string | undefined {
+  let best: string | undefined;
+  for (const name of names) {
+    if (name.startsWith(".")) continue;
+    if (best === undefined || compareExtensionVersions(name, best) > 0) {
+      best = name;
+    }
+  }
+  return best;
+}
+
 function latestVersionDir(extensionRoot: string): string | undefined {
   if (!existsSync(extensionRoot)) {
     return undefined;
   }
   const versions = readdirSync(extensionRoot).filter((name) => !name.startsWith("."));
-  const latest = versions.sort().at(-1);
+  const latest = pickLatestExtensionVersion(versions);
   if (!latest) {
     return undefined;
   }
@@ -134,19 +171,61 @@ export async function downloadAndCacheStreakExtension(): Promise<string> {
   return prepared;
 }
 
+export type StreakSourcePlan =
+  | { kind: "env"; path: string }
+  | { kind: "installed"; path: string }
+  | { kind: "cache" }
+  | { kind: "none" };
+
+/**
+ * Decide which Streak source `tryPrepareStreakExtension` should use, as a pure
+ * function so the ordering is test-backable.
+ *
+ * The installed copy is preferred over a bare cache hit: `copyExtensionToCache`
+ * only refreshes the cache when it is fed a source (`prepareStreakExtension`),
+ * so returning the cache directly — as this used to do the moment a cache
+ * existed — meant a Chrome-updated Streak (e.g. 6.9 → 6.16) was NEVER picked up
+ * and the stale cached build kept loading into the Gmail send browser. Checking
+ * the installed extension first (as sibling `prepareSalesqlExtension` always
+ * does) version-checks source-vs-cache every boot. The bare cache is used only
+ * when Streak is not installed in Chrome (the download-only path).
+ */
+export function planStreakExtensionSource(opts: {
+  envPath?: string;
+  envPathExists: (path: string) => boolean;
+  installedPath: string | undefined;
+  cacheManifestExists: boolean;
+}): StreakSourcePlan {
+  const env = opts.envPath?.trim();
+  if (env && opts.envPathExists(env)) {
+    return { kind: "env", path: env };
+  }
+  if (opts.installedPath) {
+    return { kind: "installed", path: opts.installedPath };
+  }
+  if (opts.cacheManifestExists) {
+    return { kind: "cache" };
+  }
+  return { kind: "none" };
+}
+
 /** Returns the cached extension path when Streak is available; undefined otherwise. */
 export function tryPrepareStreakExtension(envPath?: string): string | undefined {
-  if (envPath?.trim() && existsSync(envPath.trim())) {
-    return prepareStreakExtension(envPath);
+  const plan = planStreakExtensionSource({
+    envPath,
+    envPathExists: (path) => existsSync(path),
+    installedPath: findInstalledStreakExtension(),
+    cacheManifestExists: existsSync(resolve(streakExtensionCacheDir(), "manifest.json")),
+  });
+  switch (plan.kind) {
+    case "env":
+    case "installed":
+      return prepareStreakExtension(plan.path);
+    case "cache":
+      return streakExtensionCacheDir();
+    case "none":
+      return undefined;
   }
-  if (existsSync(resolve(streakExtensionCacheDir(), "manifest.json"))) {
-    return streakExtensionCacheDir();
-  }
-  const installed = findInstalledStreakExtension();
-  if (installed) {
-    return prepareStreakExtension(installed);
-  }
-  return undefined;
 }
 
 /**

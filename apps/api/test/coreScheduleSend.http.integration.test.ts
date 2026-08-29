@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createCandidate, startHttpApp, type HttpApp } from "./helpers/httpApp.js";
+import { globalSendGapMs } from "../src/sendJobs.js";
 
 describe("core schedule + send HTTP integration", () => {
   let app: HttpApp;
@@ -62,7 +63,7 @@ describe("core schedule + send HTTP integration", () => {
 
     const acmeTimes = acme.body.queued.map((q) => Date.parse(q.scheduledFor)).sort((x, y) => x - y);
     const betaTimes = beta.body.queued.map((q) => Date.parse(q.scheduledFor)).sort((x, y) => x - y);
-    const gapMs = 4 * 60_000;
+    const gapMs = globalSendGapMs();
     for (const bt of betaTimes) {
       for (const at of acmeTimes) {
         expect(Math.abs(bt - at)).toBeGreaterThanOrEqual(gapMs - 1_000);

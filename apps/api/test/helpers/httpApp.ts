@@ -39,6 +39,9 @@ export async function startHttpApp(options: { autoEnsureWorker?: boolean } = {})
   process.env.HOURLY_SEND_LIMIT = "20";
   process.env.DOMAIN_DAILY_SEND_LIMIT = "20";
   process.env.SALESQL_MONTHLY_LIMIT = process.env.SALESQL_MONTHLY_LIMIT ?? "50";
+  process.env.APOLLO_MONTHLY_LIMIT = process.env.APOLLO_MONTHLY_LIMIT ?? "50";
+  process.env.RECRUITER_SKIP_SESSION_PROBE = "1";
+  process.env.SETUP_PROBE_TIMEOUT_MS = "200";
 
   store.setGmailAccount({
     id: "me@example.com",

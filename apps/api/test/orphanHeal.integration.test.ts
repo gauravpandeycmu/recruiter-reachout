@@ -182,6 +182,102 @@ describe("startup orphan heal + superseded paused duplicates", () => {
     expect(store.getSendQueueItem(active.id)?.status).toBe("scheduled");
   });
 
+  it("merge does not leave a same-person double-schedule via a job-less orphan row", () => {
+    // The pass-9 merge closes the LIVE-job collision (fail the redundant job).
+    // But a duplicate can also carry a still-active `scheduled` queue row with NO
+    // backing job (an un-buildable heal earlier, or a pre-heal window). That row
+    // re-points onto the keeper unchanged; if the keeper already has a live send,
+    // the very next startup heal creates a SECOND job for it — the same person is
+    // scheduled twice. One person must end up with exactly one live send.
+    const keeper = seedReady("Owen Ray", "Hooli", "owen@hooli.com");
+    // Keeper's own live scheduled send (row + healed pending job).
+    const keeperRow = orphanQueue(keeper);
+    expect(healOrphanedScheduledSendJobs(store).healed).toBe(1);
+
+    // A second, distinct candidate row for the SAME person (name + company), no
+    // email → lower keeper score, so repair merges it away. It carries a
+    // job-less `scheduled` row (heal skips it while it belongs to the dup because
+    // it has no email; after the merge it inherits the keeper's email).
+    const dup = createCandidate({ fullName: "Owen Ray", company: "Hooli" });
+    store.upsertCandidate(dup);
+    store.updateCandidate(dup.id, { updatedAt: new Date(Date.now() - 60_000).toISOString() });
+    const now = new Date().toISOString();
+    const dupRow = store.upsertSendQueueItem({
+      id: randomUUID(),
+      candidateId: dup.id,
+      email: keeper.email!,
+      confidence: "high",
+      status: "scheduled",
+      scheduledFor: now,
+      attempts: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    expect(store.repairLinkedInDuplicates()).toBe(1);
+    const survivor = store.listCandidates()[0]!;
+    expect(survivor.id).toBe(keeper.id);
+
+    // Startup heal runs right after repair (server.ts). It must NOT mint a second
+    // live job for the surviving person off the merged-in orphan row.
+    healOrphanedScheduledSendJobs(store);
+
+    const liveJobs = store
+      .listSendJobs()
+      .filter((job) => job.status === "pending" || job.status === "in_progress");
+    expect(liveJobs).toHaveLength(1);
+    expect(liveJobs.every((job) => job.candidateId === keeper.id)).toBe(true);
+    // The keeper's own scheduled row still stands; the redundant merged-in row was
+    // neutralized so heal couldn't resurrect it.
+    expect(store.getSendQueueItem(keeperRow.id)?.status).toBe("scheduled");
+    expect(store.getSendQueueItem(dupRow.id)?.status).toBe("failed");
+  });
+
+  it("merge neutralizes a job-less orphan row even when the keeper's own send is still job-less (repair-before-heal)", () => {
+    // Distinct from the test above: there the keeper's job was healed BEFORE repair,
+    // so the redundant merged-in row was caught by `keeperHasLiveJob`. But repair
+    // runs inside Store construction, BEFORE startup heal (server.ts) — so at merge
+    // time the keeper's OWN send can still be a job-less `scheduled` row with no job
+    // yet. Neutralizing the duplicate's job-less row then relies on the queue-row
+    // arm of `keeperHasSend` (the keeper already owns a scheduled/queued row), not
+    // on a live job. Without it, the merged-in row survives and the single startup
+    // heal that follows mints TWO pending jobs for the same person → double-send.
+    const keeper = seedReady("Uma Patel", "Initech", "uma@initech.com");
+    // Keeper's own scheduled row — deliberately NOT healed, so it has no job yet.
+    const keeperRow = orphanQueue(keeper);
+    expect(store.listSendJobs()).toHaveLength(0);
+
+    const dup = createCandidate({ fullName: "Uma Patel", company: "Initech" });
+    store.upsertCandidate(dup);
+    store.updateCandidate(dup.id, { updatedAt: new Date(Date.now() - 60_000).toISOString() });
+    const now = new Date().toISOString();
+    const dupRow = store.upsertSendQueueItem({
+      id: randomUUID(),
+      candidateId: dup.id,
+      email: keeper.email!,
+      confidence: "high",
+      status: "scheduled",
+      scheduledFor: now,
+      attempts: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    expect(store.repairLinkedInDuplicates()).toBe(1);
+    expect(store.listCandidates()[0]!.id).toBe(keeper.id);
+
+    // The single startup heal that follows repair must produce exactly one live job.
+    healOrphanedScheduledSendJobs(store);
+    const liveJobs = store
+      .listSendJobs()
+      .filter((job) => job.status === "pending" || job.status === "in_progress");
+    expect(liveJobs).toHaveLength(1);
+    expect(liveJobs[0]?.candidateId).toBe(keeper.id);
+    expect(liveJobs[0]?.queueItemId).toBe(keeperRow.id);
+    expect(store.getSendQueueItem(keeperRow.id)?.status).toBe("scheduled");
+    expect(store.getSendQueueItem(dupRow.id)?.status).toBe("failed");
+  });
+
   it("cleanupDeadPausedReserves clears History/cancel ghosts but keeps intentional pauses", async () => {
     const directory = await mkdtemp(join(tmpdir(), "recruiter-dead-pause-"));
     const store = new Store(join(directory, "store.sqlite"));
@@ -217,5 +313,83 @@ describe("startup orphan heal + superseded paused duplicates", () => {
     expect(store.getSendQueueItem(ghost.id)?.status).toBe("failed");
     expect(store.getSendQueueItem(intentional.id)?.status).toBe("paused");
     await rm(directory, { recursive: true, force: true });
+  });
+});
+
+describe("startup orphan heal resilience (un-buildable rows)", () => {
+  const ORIGINAL = { ...process.env };
+  let directory: string;
+  let store: Store;
+
+  beforeEach(async () => {
+    directory = await mkdtemp(join(tmpdir(), "recruiter-orphan-resilient-"));
+    store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+    process.env.PUBLIC_TRACKING_BASE_URL = "https://tracking.example.com";
+    process.env.TEST_MODE = "true";
+    process.env.TEST_MODE_RECIPIENT_EMAIL = "tester@example.com";
+    // Content is configured, but there is deliberately NO resume — so
+    // buildSendJobPayload throws "No resume PDF selected." for every orphan.
+    setOutreachContent(store, {
+      subject: "Quick note, {firstName}",
+      body: "Hi {firstName},\n\nInterested in {company}.",
+    });
+  });
+
+  afterEach(async () => {
+    process.env = { ...ORIGINAL };
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("does not throw out of the whole heal when a scheduled row's payload can't be built", () => {
+    // Startup heal is unguarded at the call site (server.ts). Before the pass-1
+    // per-item try/catch, a single un-buildable orphan (content/resume not yet
+    // configured, or an email that regressed) threw straight through
+    // healOrphanedScheduledSendJobs and crashed API boot — dropping every OTHER
+    // orphan's heal with it.
+    const person = store.upsertCandidate(
+      createCandidate({
+        fullName: "No Resume",
+        firstName: "No",
+        company: "NoResumeCo",
+        email: "noresume@co.com",
+        emailCandidates: [{ email: "noresume@co.com", pattern: "first.last", confidence: "high", reason: "test" }],
+        status: "email_guessed",
+      }),
+    );
+    const now = new Date().toISOString();
+    const queue = store.upsertSendQueueItem({
+      id: randomUUID(),
+      candidateId: person.id,
+      email: person.email!,
+      confidence: "high",
+      status: "scheduled",
+      scheduledFor: now,
+      attempts: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    // Precondition: this row genuinely can't build a payload, so the heal must
+    // rely on its per-item catch (not luck) to survive.
+    expect(() =>
+      buildSendJobPayload(store, {
+        candidateId: person.id,
+        mode: "schedule",
+        scheduledFor: queue.scheduledFor,
+        queueItemId: queue.id,
+      }),
+    ).toThrow(/resume/i);
+
+    let result: { healed: number } | undefined;
+    expect(() => {
+      result = healOrphanedScheduledSendJobs(store);
+    }).not.toThrow();
+    expect(result?.healed).toBe(0);
+    // Row is left scheduled for a later heal once content/resume is ready; no
+    // ghost job was created.
+    expect(store.getSendQueueItem(queue.id)?.status).toBe("scheduled");
+    expect(store.listSendJobs()).toHaveLength(0);
   });
 });

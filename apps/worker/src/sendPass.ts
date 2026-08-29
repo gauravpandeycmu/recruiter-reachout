@@ -183,7 +183,16 @@ export async function runSendPass(input: {
     });
     retried = true;
     outcome = await attempt(job, 2);
-  } else if (outcome.status === "error" && isClosedBrowserReason(outcome.reason)) {
+  }
+
+  // Classify a closed-browser error on the FINAL outcome — the attempt-1 outcome
+  // when we didn't retry, OR the attempt-2 outcome when we did. This used to be an
+  // `else if` on the attempt-1 outcome only, so a *retried* attempt that clicked
+  // Send and then tore down (waitForTimeout / sendClicked) skipped the assume-sent
+  // guard entirely and fell through to the failure report below — stranding a
+  // likely-sent email as `failed`, which a user retry then double-sends. `attempt`
+  // resets `sendClicked`/`lastStage` each call, so these reflect the final attempt.
+  if (outcome.status === "error" && isClosedBrowserReason(outcome.reason)) {
     if (/waitForTimeout/i.test(outcome.reason) || sendClicked) {
       // Send already clicked; page teardown during settle used to trigger a re-send.
       input.log(

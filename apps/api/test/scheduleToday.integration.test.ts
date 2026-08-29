@@ -2,7 +2,15 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createCandidate, scheduleToday } from "../src/services.js";
+import {
+  createCandidate,
+  pausePendingSendBatch,
+  peekNextSendDue,
+  saveResume,
+  scheduleToday,
+  setOutreachContent,
+} from "../src/services.js";
+import { completeSendJob } from "../src/sendJobs.js";
 import { Store } from "../src/store.js";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -55,6 +63,176 @@ describe("scheduleToday legacy autopilot integration", () => {
     expect(result.scheduledToday).toHaveLength(3);
     expect(result.rolledOver.length).toBeGreaterThanOrEqual(5);
     expect(store.listSendQueue().filter((item) => item.status === "scheduled")).toHaveLength(3);
+  });
+
+  it("creates a claimable send job for every scheduled row (not just a queue ghost)", async () => {
+    process.env.DAILY_SEND_LIMIT = "10";
+    process.env.HOURLY_SEND_LIMIT = "10";
+    process.env.DOMAIN_DAILY_SEND_LIMIT = "10";
+    const store = await freshStore();
+    setOutreachContent(store, {
+      subject: "Quick note, {firstName}",
+      body: "Hi {firstName},\n\nInterested in {company}.",
+    });
+    await saveResume(store, {
+      fileName: "resume.pdf",
+      mimeType: "application/pdf",
+      dataBase64: Buffer.from("%PDF-1.4\nfake test pdf").toString("base64"),
+    });
+    seedActive(store, "Person A", "a@acme.com", "high");
+    seedActive(store, "Person B", "b@acme.com", "high");
+
+    const result = await scheduleToday(store);
+    expect(result.scheduledToday).toHaveLength(2);
+
+    // Each scheduled queue row must have a backing pending send job — otherwise
+    // the worker (which claims *jobs*, not queue rows) will never send it and the
+    // "scheduled" row is a ghost until the next API restart heals it.
+    const scheduledRows = store.listSendQueue().filter((item) => item.status === "scheduled");
+    const jobQueueIds = new Set(
+      store.listSendJobs().filter((job) => job.status === "pending").map((job) => job.queueItemId),
+    );
+    for (const row of scheduledRows) {
+      expect(jobQueueIds.has(row.id)).toBe(true);
+    }
+
+    // And the worker peek/claim must actually surface work.
+    expect(peekNextSendDue(store)).toBeDefined();
+  });
+
+  it("does not double-schedule a candidate who already has an active send job", async () => {
+    // Calling "Schedule today's queue" twice (or scheduling explicitly then running
+    // the backlog autopilot) must never create a second pending job for the same
+    // person — that would send them the same email twice.
+    process.env.DAILY_SEND_LIMIT = "10";
+    process.env.HOURLY_SEND_LIMIT = "10";
+    process.env.DOMAIN_DAILY_SEND_LIMIT = "10";
+    const store = await freshStore();
+    setOutreachContent(store, {
+      subject: "Quick note, {firstName}",
+      body: "Hi {firstName},\n\nInterested in {company}.",
+    });
+    await saveResume(store, {
+      fileName: "resume.pdf",
+      mimeType: "application/pdf",
+      dataBase64: Buffer.from("%PDF-1.4\nfake test pdf").toString("base64"),
+    });
+    const person = seedActive(store, "Person A", "a@acme.com", "high");
+
+    await scheduleToday(store);
+    await scheduleToday(store);
+
+    const pendingJobs = store
+      .listSendJobs()
+      .filter((job) => job.candidateId === person.id && job.status === "pending");
+    expect(pendingJobs).toHaveLength(1);
+    const activeRows = store
+      .listSendQueue()
+      .filter((item) => item.candidateId === person.id && (item.status === "scheduled" || item.status === "queued"));
+    expect(activeRows).toHaveLength(1);
+  });
+
+  it("does not re-schedule a candidate who was already sent (backlog never archives)", async () => {
+    // The explicit Schedule flow archives people once queued, so they leave the
+    // active batch and can't be picked up again. The backlog autopilot does NOT
+    // archive — it relies on busyCandidateIds to avoid re-scheduling. That set
+    // only covers *active* rows/jobs, so once a send COMPLETES (queue row → sent,
+    // job → completed, candidate stays active), a second "Schedule today's queue"
+    // run would re-schedule the same person and email them a second time.
+    process.env.DAILY_SEND_LIMIT = "10";
+    process.env.HOURLY_SEND_LIMIT = "10";
+    process.env.DOMAIN_DAILY_SEND_LIMIT = "10";
+    const store = await freshStore();
+    setOutreachContent(store, {
+      subject: "Quick note, {firstName}",
+      body: "Hi {firstName},\n\nInterested in {company}.",
+    });
+    await saveResume(store, {
+      fileName: "resume.pdf",
+      mimeType: "application/pdf",
+      dataBase64: Buffer.from("%PDF-1.4\nfake test pdf").toString("base64"),
+    });
+    const person = seedActive(store, "Person A", "a@acme.com", "high");
+
+    await scheduleToday(store);
+    const firstJob = store
+      .listSendJobs()
+      .find((job) => job.candidateId === person.id && job.status === "pending");
+    expect(firstJob).toBeDefined();
+
+    // Simulate the worker sending it: queue row → sent, job → completed, and
+    // (crucially) the candidate is left active because the backlog never archives.
+    completeSendJob(store, firstJob!.id, { success: true });
+    expect(store.listActiveCandidates().some((c) => c.id === person.id)).toBe(true);
+
+    // Second run of the backlog scheduler must NOT resurrect this person.
+    await scheduleToday(store);
+
+    const pendingJobs = store
+      .listSendJobs()
+      .filter((job) => job.candidateId === person.id && job.status === "pending");
+    expect(pendingJobs).toHaveLength(0);
+    const freshScheduledRows = store
+      .listSendQueue()
+      .filter(
+        (item) =>
+          item.candidateId === person.id &&
+          (item.status === "scheduled" || item.status === "queued"),
+      );
+    expect(freshScheduledRows).toHaveLength(0);
+  });
+
+  it("does not re-schedule a candidate whose send is intentionally paused", async () => {
+    // Pause (unlike archive) leaves the candidate active with a resume-able
+    // `paused` reserve row. If busyCandidateIds stopped covering `paused`, the
+    // backlog autopilot would queue a SECOND send for the paused person while
+    // their original reserve still exists — a duplicate schedule / double-send.
+    process.env.DAILY_SEND_LIMIT = "10";
+    process.env.HOURLY_SEND_LIMIT = "10";
+    process.env.DOMAIN_DAILY_SEND_LIMIT = "10";
+    const store = await freshStore();
+    setOutreachContent(store, {
+      subject: "Quick note, {firstName}",
+      body: "Hi {firstName},\n\nInterested in {company}.",
+    });
+    await saveResume(store, {
+      fileName: "resume.pdf",
+      mimeType: "application/pdf",
+      dataBase64: Buffer.from("%PDF-1.4\nfake test pdf").toString("base64"),
+    });
+    const person = seedActive(store, "Person A", "a@acme.com", "high");
+
+    await scheduleToday(store);
+    const scheduledRow = store
+      .listSendQueue()
+      .find((item) => item.candidateId === person.id && item.status === "scheduled");
+    expect(scheduledRow).toBeDefined();
+
+    // Pause the send mid-batch — row → paused, backing job → failed, candidate
+    // stays active (pause does not archive).
+    await pausePendingSendBatch(store, { queueItemIds: [scheduledRow!.id] });
+    expect(store.getSendQueueItem(scheduledRow!.id)?.status).toBe("paused");
+    expect(store.listActiveCandidates().some((c) => c.id === person.id)).toBe(true);
+
+    // Second backlog run must not resurrect the paused person.
+    await scheduleToday(store);
+
+    const activeRows = store
+      .listSendQueue()
+      .filter(
+        (item) =>
+          item.candidateId === person.id &&
+          (item.status === "scheduled" || item.status === "queued"),
+      );
+    expect(activeRows).toHaveLength(0);
+    const pendingJobs = store
+      .listSendJobs()
+      .filter((job) => job.candidateId === person.id && job.status === "pending");
+    expect(pendingJobs).toHaveLength(0);
+    // The original paused reserve is untouched (still resume-able).
+    expect(
+      store.listSendQueue().filter((item) => item.candidateId === person.id && item.status === "paused"),
+    ).toHaveLength(1);
   });
 
   it("suppresses medium/low confidence instead of scheduling them", async () => {

@@ -47,7 +47,6 @@ import {
   retryFailedSends,
   reactivateCandidates,
   replaceActiveFromHistory,
-  nextDiscoveryCandidate,
   previewEmail,
   removeCandidate,
   auditUi,
@@ -80,6 +79,7 @@ import {
   deriveBatchScheduleTiming,
   formatCompanyBlockShiftMessage,
   discoveryStatusLabel,
+  peekNextDiscoveryCandidate,
   trackedSendQueueIdsAreOrphaned,
   type SendSession,
 } from "./sendHelpers";
@@ -109,6 +109,14 @@ import {
   type ThemePreference,
   toggleThemePreference,
 } from "./theme";
+import {
+  applyPowerMode,
+  POWER_MODE_CHANGED_EVENT,
+  POWER_MODE_KEY,
+  readPowerMode,
+  type PowerMode,
+  togglePowerMode,
+} from "./powerMode";
 import { GroveLoadingPlay } from "./GroveLoadingPlay";
 import { GroveTreeFieldGuide } from "./GroveTreeFieldGuide";
 import { resolveGroveUnlockDays } from "./groveTreeGuide";
@@ -117,21 +125,24 @@ import { ThemeModeSwitch } from "./ThemeModeSwitch";
 import "./styles.css";
 
 applyTheme();
+applyPowerMode();
 
 const StreakGrove3D = lazy(() =>
   import("./StreakGrove3D").then((mod) => ({ default: mod.StreakGrove3D })),
 );
 
-function prefetchGrowChunk() {
-  void import("./StreakGrove3D");
-}
-
 type Tab = "send" | "scheduled" | "setup" | "history" | "analytics";
+
+function fillRecipientTokens(value: string, candidate: RecruiterCandidate): string {
+  const firstName = candidate.firstName?.trim() || candidate.fullName?.split(/\s+/)[0] || "";
+  return value
+    .replace(/\{firstName\}/g, firstName)
+    .replace(/\{fullName\}/g, candidate.fullName ?? "");
+}
 
 const SETTLED_STATUSES = new Set(["sent", "opened", "clicked", "bounced", "do_not_contact"]);
 const DISCOVERY_POLL_MS = 2500;
-const IDLE_POLL_MS = 3000;
-const BACKGROUND_POLL_MS = 8000;
+const WATCH_POLL_MS = 15000;
 const FOCUS_REFRESH_DEBOUNCE_MS = 400;
 const RECIPIENT_PAGE_SIZE = 5;
 const HISTORY_PEOPLE_PAGE_SIZE = 12;
@@ -148,10 +159,11 @@ const DANCING_CAT_GIF = "https://media.giphy.com/media/JIX9t2j0ZTN9S/giphy.gif";
 
 type UiPrefs = {
   capturePages?: number;
-  scheduleIntervalMinutes?: number;
   activeSchedulePreset?: string | null;
   companyName?: string;
 };
+
+const DEFAULT_SEND_INTERVAL_MINUTES = 1;
 
 function readStoredTab(): Tab {
   try {
@@ -208,6 +220,16 @@ function avatarInitial(candidate: { firstName?: string; fullName?: string }): st
   const source = candidate.firstName || candidate.fullName || "?";
   const letter = source.trim().charAt(0);
   return letter ? letter.toUpperCase() : "?";
+}
+
+function BrandTree({
+  className,
+  alt = "Recruiter Reachout tree",
+}: {
+  className?: string;
+  alt?: string;
+}) {
+  return <img className={className} src="/brand-mascot.svg" alt={alt} />;
 }
 
 function listResumes(content?: OutreachContent): ResumeAsset[] {
@@ -304,8 +326,7 @@ const SCHEDULE_PRESETS: Array<{ id: string; label: string; resolve: () => Date }
 
 const SCHEDULE_PRESET_IDS = new Set(SCHEDULE_PRESETS.map((preset) => preset.id));
 
-/** Spacing chips. Skip 2m — too aggressive for cold outreach + hourly caps. */
-const INTERVAL_PRESETS = [4, 8, 12] as const;
+const INTERVAL_PRESETS = [1, 2, 5, 10] as const;
 
 function truncatePreview(text: string, max = 220): string {
   const cleaned = text.replace(/\s+/g, " ").trim();
@@ -1014,6 +1035,8 @@ function App() {
   const [preview, setPreview] = useState<RenderedEmail>();
   const [previewSubject, setPreviewSubject] = useState("");
   const [previewBody, setPreviewBody] = useState("");
+  const [linkedinSubject, setLinkedinSubject] = useState("");
+  const [linkedinMessage, setLinkedinMessage] = useState("");
   const [previewDirty, setPreviewDirty] = useState(false);
   const [previewSaving, setPreviewSaving] = useState(false);
   const [previewLoadedId, setPreviewLoadedId] = useState<string>();
@@ -1022,6 +1045,8 @@ function App() {
   /** idle → collapse (old mail out) → loading → reveal (new mail in) */
   const [previewMotion, setPreviewMotion] = useState<"idle" | "collapse" | "loading" | "reveal">("idle");
   const previewRevealTimerRef = useRef<number | undefined>(undefined);
+  const previewBodyRef = useRef<HTMLTextAreaElement | null>(null);
+  const linkedinMessageRef = useRef<HTMLTextAreaElement | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [salesqlSweepBusy, setSalesqlSweepBusy] = useState(false);
@@ -1045,6 +1070,7 @@ function App() {
   const [groveWeatherCity, setGroveWeatherCity] = useState(() => readWeatherCity());
   const [groveTempUnit, setGroveTempUnit] = useState<TempUnit>(() => readTempUnit());
   const [themePref, setThemePref] = useState<ThemePreference>(() => readThemePreference());
+  const [powerMode, setPowerMode] = useState<PowerMode>(() => readPowerMode());
   const [goalDraft, setGoalDraft] = useState("20");
   const [showCatToast, setShowCatToast] = useState(false);
   const celebratedDateRef = useRef<string | null>(null);
@@ -1070,17 +1096,14 @@ function App() {
   const [jobUrl, setJobUrl] = useState("");
   const [linkedinPost, setLinkedinPost] = useState("");
   const [passionate, setPassionate] = useState(false);
-  const [nextDiscovery, setNextDiscovery] = useState<RecruiterCandidate>();
   const [workerStatus, setWorkerStatus] = useState<WorkerStatusView>();
   const [salesqlAutoFallback, setSalesqlAutoFallback] = useState(false);
   const [setupSessions, setSetupSessions] = useState<SetupSessionStatus | undefined>(() => readStoredSessionStatus());
   const [setupSessionsLoading, setSetupSessionsLoading] = useState(false);
   const [testModeEnabled, setTestModeEnabled] = useState(false);
   const [testModeRecipient, setTestModeRecipient] = useState("");
-  const [scheduleIntervalMinutes, setScheduleIntervalMinutes] = useState(() => {
-    const minutes = Number(initialPrefs.scheduleIntervalMinutes);
-    return minutes > 0 ? minutes : 12;
-  });
+  const [scheduleIntervalMinutes, setScheduleIntervalMinutesState] = useState(DEFAULT_SEND_INTERVAL_MINUTES);
+  const scheduleIntervalPinnedRef = useRef(false);
   const [activeSchedulePreset, setActiveSchedulePreset] = useState<string | null>(() => {
     const stored = initialPrefs.activeSchedulePreset;
     return stored && SCHEDULE_PRESET_IDS.has(stored) ? stored : "now";
@@ -1098,6 +1121,21 @@ function App() {
     done?: boolean;
     leaving?: boolean;
   } | null>(null);
+
+  function applyScheduleIntervalMinutes(minutes: number, pin = true): void {
+    const next = Math.max(1, Math.round(minutes) || DEFAULT_SEND_INTERVAL_MINUTES);
+    if (pin) {
+      scheduleIntervalPinnedRef.current = true;
+    }
+    setScheduleIntervalMinutesState(next);
+  }
+
+  useEffect(() => {
+    const configuredInterval = envStatus?.sendIntervalMinutes ?? 0;
+    if (configuredInterval > 0 && !scheduleIntervalPinnedRef.current) {
+      setScheduleIntervalMinutesState(configuredInterval);
+    }
+  }, [envStatus?.sendIntervalMinutes]);
   const [findProgress, setFindProgress] = useState<{
     steps: Array<{ id: string; label: string }>;
     stepIndex: number;
@@ -1412,6 +1450,8 @@ function App() {
       setPreview(undefined);
       setPreviewSubject("");
       setPreviewBody("");
+      setLinkedinSubject("");
+      setLinkedinMessage("");
       setPreviewLoadedId(undefined);
       setPreviewDirty(false);
       setPreviewFetching(true);
@@ -1428,6 +1468,8 @@ function App() {
         setPreview(rendered);
         setPreviewSubject(rendered.subject);
         setPreviewBody(rendered.body);
+        setLinkedinSubject(fillRecipientTokens(batchContent?.linkedinSubject ?? "", selected));
+        setLinkedinMessage(fillRecipientTokens(batchContent?.linkedinMessage ?? "", selected));
         setPreviewLoadedId(rendered.candidateId);
         setPreviewDirty(false);
         setPreviewFetching(false);
@@ -1482,6 +1524,7 @@ function App() {
   const pendingCount = displayCandidates.filter((candidate) => !candidate.email && candidate.status !== "email_not_found").length;
   const discoveryPercent = displayCandidates.length === 0 ? 0 : Math.round((discoveredCount / displayCandidates.length) * 100);
   const activeLookupId = workerStatus?.online ? workerStatus.status?.candidateId : undefined;
+  const nextDiscovery = peekNextDiscoveryCandidate(displayCandidates, activeLookupId);
 
   const batchCandidateIds = useMemo(() => {
     const ids = new Set(candidates.map((candidate) => candidate.id));
@@ -1692,18 +1735,18 @@ function App() {
     [upcomingSends, trackedSendQueueIds],
   );
 
-  const needsFastPoll =
-    pendingCount > 0 ||
-    isSendingPhase ||
-    tab === "scheduled" ||
-    (Boolean(sendSession) && trackedSendMode === "now") ||
-    (tab === "send" && (scheduledSendCount > 0 || upcomingSends.length > 0 || trackedSendQueueIds.length > 0));
-
-  const pollMs = needsFastPoll
-    ? DISCOVERY_POLL_MS
-    : tab === "send"
-      ? IDLE_POLL_MS
-      : BACKGROUND_POLL_MS;
+  const hasActiveSendOrDiscoveryWork =
+    pendingCount > 0 || isSendingPhase || (Boolean(sendSession) && trackedSendMode === "now");
+  const hasScheduledWorkToWatch =
+    scheduledSendCount > 0 || upcomingSends.length > 0 || trackedSendQueueIds.length > 0;
+  const shouldPollSendTab = tab === "send" && (hasActiveSendOrDiscoveryWork || hasScheduledWorkToWatch);
+  const shouldPollScheduledTab = tab === "scheduled" && hasScheduledWorkToWatch;
+  const pollMs =
+    hasActiveSendOrDiscoveryWork && (tab === "send" || tab === "scheduled")
+      ? DISCOVERY_POLL_MS
+      : shouldPollSendTab || shouldPollScheduledTab
+        ? WATCH_POLL_MS
+        : null;
 
   const scheduleSummary = useMemo(() => {
     const start = activeSchedulePreset === "now" ? new Date() : parseDatetimeLocal(scheduleStartAt);
@@ -1770,12 +1813,11 @@ function App() {
       setPreviewDirty(false);
     }
 
-    const [backlogResult, historyResult, envResult, discoveryResult, workerResult, settingsResult] =
+    const [backlogResult, historyResult, envResult, workerResult, settingsResult] =
       await Promise.allSettled([
         getJobBacklog(),
         getCompanyHistory(),
         getEnvStatus(),
-        nextDiscoveryCandidate(),
         getWorkerStatus(),
         getDiscoverySettings(),
       ]);
@@ -1790,9 +1832,6 @@ function App() {
     }
     if (envResult.status === "fulfilled") {
       setEnvStatus(envResult.value);
-    }
-    if (discoveryResult.status === "fulfilled") {
-      setNextDiscovery(discoveryResult.value);
     }
     if (workerResult.status === "fulfilled") {
       setWorkerStatus(workerResult.value);
@@ -1943,6 +1982,9 @@ function App() {
       next.add(tab);
       return next;
     });
+    if (tab === "send" || tab === "scheduled") {
+      void refresh().catch((error: Error) => setMessage(error.message));
+    }
     if (tab === "setup") {
       void loadTestModeSettings();
       void loadSetupSessions(true);
@@ -1971,14 +2013,27 @@ function App() {
     return () => ro.disconnect();
   }, [tab, candidates.length, upcomingSends.length]);
 
+  useLayoutEffect(() => {
+    const autosize = (node: HTMLTextAreaElement | null) => {
+      if (!node) return;
+      node.style.height = "0px";
+      node.style.height = `${node.scrollHeight}px`;
+    };
+
+    autosize(previewBodyRef.current);
+    autosize(linkedinMessageRef.current);
+  }, [previewBody, linkedinMessage, previewMotion, selectedId]);
+
   // Grove weather prefs live in localStorage; keep App state in sync so Grow always re-renders
   useEffect(() => {
     const syncCity = () => setGroveWeatherCity(readWeatherCity());
     const syncUnit = () => setGroveTempUnit(readTempUnit());
     const syncTheme = () => setThemePref(readThemePreference());
+    const syncPowerMode = () => setPowerMode(readPowerMode());
     window.addEventListener(WEATHER_CITY_CHANGED_EVENT, syncCity);
     window.addEventListener(TEMP_UNIT_CHANGED_EVENT, syncUnit);
     window.addEventListener(THEME_CHANGED_EVENT, syncTheme);
+    window.addEventListener(POWER_MODE_CHANGED_EVENT, syncPowerMode);
     const onStorage = (event: StorageEvent) => {
       if (event.key === WEATHER_CITY_KEY) syncCity();
       if (event.key === TEMP_UNIT_KEY) syncUnit();
@@ -1986,41 +2041,28 @@ function App() {
         applyTheme();
         syncTheme();
       }
+      if (event.key === POWER_MODE_KEY) {
+        applyPowerMode();
+        syncPowerMode();
+      }
     };
     window.addEventListener("storage", onStorage);
     return () => {
       window.removeEventListener(WEATHER_CITY_CHANGED_EVENT, syncCity);
       window.removeEventListener(TEMP_UNIT_CHANGED_EVENT, syncUnit);
       window.removeEventListener(THEME_CHANGED_EVENT, syncTheme);
+      window.removeEventListener(POWER_MODE_CHANGED_EVENT, syncPowerMode);
       window.removeEventListener("storage", onStorage);
     };
-  }, []);
-
-  // Prefetch Grove chunk + analytics while idle so the tab opens without a cold start
-  useEffect(() => {
-    const run = () => {
-      prefetchGrowChunk();
-      void refreshAnalytics().catch(() => {
-        // Prefetch is best-effort; Grow tab will retry on open.
-      });
-    };
-    const ric = window.requestIdleCallback?.bind(window);
-    if (ric) {
-      const id = ric(run, { timeout: 2500 });
-      return () => window.cancelIdleCallback?.(id);
-    }
-    const timer = window.setTimeout(run, 1200);
-    return () => window.clearTimeout(timer);
   }, []);
 
   useEffect(() => {
     writeUiPrefs({
       capturePages,
-      scheduleIntervalMinutes,
       activeSchedulePreset,
       companyName,
     });
-  }, [capturePages, scheduleIntervalMinutes, activeSchedulePreset, companyName]);
+  }, [capturePages, activeSchedulePreset, companyName]);
 
   const subjectRef = useRef(subject);
   const bodyRef = useRef(body);
@@ -2050,6 +2092,9 @@ function App() {
   }, [footer]);
 
   useEffect(() => {
+    if (pollMs === null) {
+      return;
+    }
     let pollGeneration = 0;
     let inFlight = false;
     const timer = window.setInterval(() => {
@@ -2079,9 +2124,6 @@ function App() {
             if (prev && workerStatusPollKey(prev) === workerStatusPollKey(nextWorker)) return prev;
             return nextWorker;
           });
-          if (pendingCount > 0) {
-            setNextDiscovery(await nextDiscoveryCandidate());
-          }
         } catch {
           // Keep the last known UI state if a poll fails.
         } finally {
@@ -2093,7 +2135,7 @@ function App() {
       pollGeneration += 1;
       window.clearInterval(timer);
     };
-  }, [pollMs, pendingCount]);
+  }, [pollMs]);
 
   useEffect(() => {
     const syncPageVisible = () => {
@@ -2160,6 +2202,8 @@ function App() {
     setPreview(rendered);
     setPreviewSubject(rendered.subject);
     setPreviewBody(rendered.body);
+    setLinkedinSubject(fillRecipientTokens(batchContent?.linkedinSubject ?? "", candidate));
+    setLinkedinMessage(fillRecipientTokens(batchContent?.linkedinMessage ?? "", candidate));
     setPreviewLoadedId(rendered.candidateId);
     setPreviewDirty(false);
     setPreviewFetching(false);
@@ -2227,11 +2271,15 @@ function App() {
         company,
         subject: subjectText,
         body: bodyText,
+        linkedinSubject: linkedinSubject.trim() || undefined,
+        linkedinMessage: linkedinMessage.trim() || undefined,
         sourceCandidateId: candidate.id,
       });
       await runPreview(candidate);
+      setLinkedinSubject(fillRecipientTokens(result.companyContent.linkedinSubject ?? "", candidate));
+      setLinkedinMessage(fillRecipientTokens(result.companyContent.linkedinMessage ?? "", candidate));
       setMessage(
-        `Saved email edits for all ${companyCandidates.length} recipient(s) in ${result.companyContent.companyDisplayName}.`,
+        `Saved email and LinkedIn copy for all ${companyCandidates.length} recipient(s) in ${result.companyContent.companyDisplayName}.`,
       );
       await refresh();
       return true;
@@ -2287,6 +2335,8 @@ function App() {
       setPreview(undefined);
       setPreviewSubject("");
       setPreviewBody("");
+      setLinkedinSubject("");
+      setLinkedinMessage("");
       setPreviewLoadedId(undefined);
       setPreviewDirty(false);
     }
@@ -2299,6 +2349,8 @@ function App() {
     setPreview(undefined);
     setPreviewSubject("");
     setPreviewBody("");
+    setLinkedinSubject("");
+    setLinkedinMessage("");
     setPreviewLoadedId(undefined);
     setPreviewDirty(false);
     setMessage(`Cleared ${result.archived.length} candidate(s). History was preserved.`);
@@ -2325,7 +2377,7 @@ function App() {
       setSalesqlAutoFallback(settings.salesqlAutoFallback);
       setMessage(
         settings.salesqlAutoFallback
-          ? "SalesQL auto-fallback ON — Jobright misses will spend a SalesQL credit."
+          ? "SalesQL auto-fallback ON — Jobright misses will spend a SalesQL credit, then try Apollo if SalesQL has no email."
           : "SalesQL auto-fallback OFF — Jobright only, unless you click Check via SalesQL.",
       );
     } catch (error) {
@@ -2340,7 +2392,7 @@ function App() {
       const result = await requestSalesqlSweep();
       setMessage(
         result.queued > 0
-          ? `Queued ${result.queued} candidate(s) for a one-time SalesQL check (uses monthly credits).`
+          ? `Queued ${result.queued} candidate(s) for a one-time SalesQL check (Apollo next if SalesQL misses).`
           : "Nothing to check — every active candidate already has an email.",
       );
       await refresh();
@@ -2625,7 +2677,7 @@ function App() {
     }
 
     // Prefill Send-tab timing as Now so Send immediately works; user can still pick a later time.
-    setScheduleIntervalMinutes(timing.intervalMinutes);
+    applyScheduleIntervalMinutes(timing.intervalMinutes);
     applySchedulePreset("now");
 
     // Clear any in-flight progress tracking — user must click Send/Schedule themselves.
@@ -3040,11 +3092,13 @@ function App() {
 
   function setupSessionMessage(kind: "gmail" | "jobright" | "linkedin"): string {
     if (setupSessionsLoading) {
-      return setupSessions?.[kind].message
-        ? `Checking… (last: ${setupSessions[kind].message})`
-        : "Checking…";
+      return "Checking…";
     }
-    return setupSessions?.[kind].message ?? "Not checked yet — click Refresh session status.";
+    const session = setupSessions?.[kind];
+    if (!session) {
+      return "Not checked yet";
+    }
+    return session.ready ? "Connected" : "Not connected yet";
   }
 
   async function runGenerateContent() {
@@ -3069,7 +3123,7 @@ function App() {
       steps.push({ id: "extract", label: "Reading role & requirements" });
     }
     steps.push({ id: "voice", label: hasLinkedin ? "Matching voice & LinkedIn post" : "Matching your sample voice" });
-    steps.push({ id: "draft", label: "Drafting subject & body" });
+    steps.push({ id: "draft", label: "Drafting email & LinkedIn message" });
     steps.push({ id: "review", label: "Checking tone & rules" });
     steps.push({ id: "polish", label: "Final polish" });
 
@@ -3142,7 +3196,7 @@ function App() {
     setPreviewFetching(false);
     setPreviewMotion("loading");
     setGenerateProgress({ steps, stepIndex: 0, percent: 2 });
-    setMessage(willFetchFromLink ? "Fetching job posting and generating email…" : "Generating email…");
+    setMessage(willFetchFromLink ? "Fetching job posting and generating outreach…" : "Generating outreach…");
 
     let generationComplete = false;
     const paceStartedAt = Date.now();
@@ -3248,8 +3302,8 @@ function App() {
       });
       setMessage(
         willFetchFromLink
-          ? `Fetched the job posting and generated an email for ${content.companyDisplayName}.`
-          : `Generated personalized email for ${content.companyDisplayName}.`,
+          ? `Fetched the job posting and generated email + LinkedIn copy for ${content.companyDisplayName}.`
+          : `Generated personalized email + LinkedIn copy for ${content.companyDisplayName}.`,
       );
 
       // Paint preview once with a reveal — later syncs must stay silent (no second refresh animation).
@@ -3267,6 +3321,8 @@ function App() {
           undefined,
           { animate: true },
         );
+        setLinkedinMessage(fill(content.linkedinMessage ?? ""));
+        setLinkedinSubject(fill(content.linkedinSubject ?? ""));
         if (!selectedId) {
           setSelectedId(paintId);
         }
@@ -3565,6 +3621,11 @@ function App() {
     }
   }
 
+  const setupReadyCount =
+    Number(Boolean(setupSessions?.gmail.ready && setupSessions?.jobright.ready && setupSessions?.linkedin.ready)) +
+    Number(resumes.length > 0) +
+    Number((state?.emailSamples ?? []).length > 0);
+
   return (
     <div className="page">
     <main className="app-shell">
@@ -3572,10 +3633,24 @@ function App() {
       <div className="ambient ambient-b" aria-hidden="true" />
       <header className="app-header">
         <div className="brand-block">
-          <p className="eyebrow">Recruiter Reachout</p>
-          <h1>Outreach dashboard</h1>
+          <div className="brand-title-row">
+            <BrandTree className="brand-tree" />
+            <div>
+              <p className="eyebrow">Recruiter Reachout</p>
+              <h1>Outreach dashboard</h1>
+            </div>
+          </div>
         </div>
         <div className="header-side">
+          <button
+            type="button"
+            className={`power-mode-chip${powerMode === "low" ? " on" : ""}`}
+            aria-pressed={powerMode === "low"}
+            onClick={() => setPowerMode(togglePowerMode(powerMode))}
+            title={powerMode === "low" ? "Low power mode is on" : "Turn on low power mode"}
+          >
+            {powerMode === "low" ? "Low power on" : "Low power"}
+          </button>
           <ThemeModeSwitch
             theme={themePref}
             onToggle={() => setThemePref(toggleThemePreference(themePref))}
@@ -3599,8 +3674,6 @@ function App() {
             <button
               className={tab === "analytics" ? "tab tab-grove active" : "tab tab-grove"}
               onClick={() => setTab("analytics")}
-              onMouseEnter={prefetchGrowChunk}
-              onFocus={prefetchGrowChunk}
             >
               Grove
             </button>
@@ -3816,17 +3889,28 @@ function App() {
             {displayCandidates.length === 0 ? (
               <div className="empty-state">
                 <h2>No recruiters in batch yet</h2>
+                <p className="empty-state-lead">
+                  Start from LinkedIn, bring people into the app, then we’ll help you find emails, generate outreach,
+                  and send in a paced batch.
+                </p>
                 <ol>
                   <li>
-                    On LinkedIn, open the <strong>Recruiter Reachout</strong> extension (v0.1.3+) and click{" "}
-                    <strong>Add this person</strong> or <strong>Save all visible</strong>.
+                    Open LinkedIn and use the <strong>Recruiter Reachout</strong> extension on either:
+                    <ul>
+                      <li>a single recruiter profile → <strong>Add this person</strong></li>
+                      <li>a people search results page → <strong>Save all visible</strong></li>
+                    </ul>
                   </li>
-                  <li>Or enter a company above and click <strong>Find US recruiters</strong> to auto-capture.</li>
-                  <li>People appear here; email discovery starts automatically.</li>
+                  <li>Or enter a company above and click <strong>Find US recruiters</strong> to auto-capture a batch.</li>
+                  <li>New people appear here and email lookup starts automatically in the background.</li>
+                  <li>Once emails are found, review the drafts, choose a resume, then use <strong>Send now</strong> or schedule a batch.</li>
                 </ol>
                 <p className="hint">
-                  If you used <strong>Remove all</strong>, everyone was archived — save again from the extension to
-                  reactivate them. Requires <code>npm run dev</code> (API :4000, dashboard :3000).
+                  Tip: if you used <strong>Remove all</strong>, those recruiters were archived. Save them again from the
+                  extension to reactivate them.
+                </p>
+                <p className="hint">
+                  Local setup reminder: keep the dashboard and API running so the extension can talk to the app.
                 </p>
               </div>
             ) : (
@@ -3976,7 +4060,7 @@ function App() {
                         />
                         <span>
                           Auto-fallback to SalesQL when Jobright misses
-                          <small>Off by default — SalesQL only has ~50 lookups/month</small>
+                          <small>Off by default — SalesQL only has ~50 lookups/month. Apollo runs next only if SalesQL has no email.</small>
                         </span>
                       </label>
                     </div>
@@ -3995,11 +4079,11 @@ function App() {
                   {batchContent ? (
                     <p className="generated-status">
                       <span className="generated-status-dot" aria-hidden="true" />
-                      Email generated · {formatModelLabel(batchContent.model)} ·{" "}
+                      Email + LinkedIn generated · {formatModelLabel(batchContent.model)} ·{" "}
                       {new Date(batchContent.updatedAt).toLocaleString()}
                     </p>
                   ) : (
-                    <p className="hint">Generate an email, then refine it in the preview on the right.</p>
+                    <p className="hint">Generate both messages, then edit them directly in the previews on the right.</p>
                   )}
                   <div className="personalize-fields">
                     <label>
@@ -4067,7 +4151,7 @@ function App() {
                           </span>
                           <div>
                             <strong>Generated successfully</strong>
-                            <p className="hint">Subject and body are ready in the preview.</p>
+                            <p className="hint">Email and LinkedIn message are ready in the preview.</p>
                           </div>
                           <span className="generate-progress-percent">100%</span>
                         </div>
@@ -4117,8 +4201,8 @@ function App() {
                     {busy
                       ? "Generating…"
                       : batchContent
-                        ? `Regenerate email for ${batchCompany}`
-                        : `Generate email for ${batchCompany}`}
+                        ? `Regenerate outreach for ${batchCompany}`
+                        : `Generate outreach for ${batchCompany}`}
                   </button>
                   {(state?.emailSamples ?? []).length === 0 && (
                     <p className="warning">No sample emails yet — add a few in Setup so generation can match your voice.</p>
@@ -4159,17 +4243,26 @@ function App() {
                           min={1}
                           max={60}
                           value={scheduleIntervalMinutes}
-                          onChange={(event) => setScheduleIntervalMinutes(Number(event.target.value) || 12)}
+                          onChange={(event) =>
+                            applyScheduleIntervalMinutes(
+                              Number(event.target.value) || envStatus?.sendIntervalMinutes || DEFAULT_SEND_INTERVAL_MINUTES,
+                            )
+                          }
                         />
                       </label>
                     </div>
+                    <p className="hint">
+                      Default is {envStatus?.sendIntervalMinutes ?? DEFAULT_SEND_INTERVAL_MINUTES} minute
+                      {(envStatus?.sendIntervalMinutes ?? DEFAULT_SEND_INTERVAL_MINUTES) === 1 ? "" : "s"} between emails to stay
+                      Gmail-friendly and reduce spam/block risk.
+                    </p>
                     <div className="schedule-presets interval-presets" role="group" aria-label="Spacing between sends">
                       {INTERVAL_PRESETS.map((minutes) => (
                         <button
                           key={minutes}
                           type="button"
                           className={`schedule-chip ${scheduleIntervalMinutes === minutes ? "active" : ""}`}
-                          onClick={() => setScheduleIntervalMinutes(minutes)}
+                          onClick={() => applyScheduleIntervalMinutes(minutes)}
                         >
                           every {minutes}m
                         </button>
@@ -4372,52 +4465,20 @@ function App() {
             )}
           </section>
 
-          <section className="panel detail-panel">
-            <h2>Recipient detail</h2>
+          <section className="panel detail-panel preview-panel">
+            <div className="preview-panel-head">
+              <div>
+                <h2>Email + LinkedIn</h2>
+                <p className="hint">Edits apply to everyone in this batch while first names stay personalized.</p>
+              </div>
+              {selected && (
+                <span className="preview-recipient-chip">
+                  {selected.firstName || selected.fullName}
+                </span>
+              )}
+            </div>
             {selected ? (
               <>
-                <div className="recipient-hero">
-                  {selected.profilePhotoUrl ? (
-                    <img
-                      className="avatar recipient-avatar"
-                      src={selected.profilePhotoUrl}
-                      alt=""
-                      referrerPolicy="no-referrer"
-                    />
-                  ) : (
-                    <span className="avatar recipient-avatar recipient-avatar-fallback" aria-hidden="true">
-                      {(selected.firstName || selected.fullName).slice(0, 1).toUpperCase()}
-                    </span>
-                  )}
-                  <div>
-                    <strong className="recipient-hero-name">{selected.fullName}</strong>
-                    {(selected.title || selected.company) && (
-                      <p className="recipient-hero-meta">
-                        {[selected.title, selected.company].filter(Boolean).join(" · ")}
-                      </p>
-                    )}
-                  </div>
-                </div>
-                <dl>
-                  <dt>Company</dt>
-                  <dd>{selected.company ?? "Unknown"}</dd>
-                  <dt>LinkedIn</dt>
-                  <dd>{selected.linkedinUrl ? <a href={selected.linkedinUrl} target="_blank" rel="noreferrer">{selected.linkedinUrl}</a> : "Not captured"}</dd>
-                  <dt>Email</dt>
-                  <dd>{selected.email ?? "Waiting on discovery"}</dd>
-                </dl>
-
-                {(selected.emailCandidates?.length ?? 0) > 1 && (
-                  <div>
-                    <p className="step-label">Choose email</p>
-                    {selected.emailCandidates?.map((guess) => (
-                      <button className="guess" key={guess.email} onClick={() => void chooseEmail(selected, guess.email)}>
-                        {guess.email} · {guess.confidence}
-                      </button>
-                    ))}
-                  </div>
-                )}
-
                 <div
                   className={`preview-card preview-motion-${previewMotion}${
                     previewMotion === "loading" || previewMotion === "collapse" || previewFetching
@@ -4436,7 +4497,7 @@ function App() {
                             <div className="preview-content" key={`content-${previewAnimKey}`}>
                               <p className="hint">
                                 To: {preview?.to ?? selected.email ?? "No email selected"}
-                                {previewDirty ? " · unsaved edits" : " · edits apply to everyone in this list"}
+                                {previewDirty ? " · unsaved edits" : ""}
                               </p>
                               {(preview?.validationWarnings?.length ?? 0) > 0 && (
                                 <div className="warning-box">
@@ -4446,9 +4507,11 @@ function App() {
                                   ))}
                                 </div>
                               )}
-                              <label>
-                                Subject
+                              <div className="preview-html editable-mail-preview">
+                                <p className="eyebrow">Email · click anywhere to edit</p>
                                 <input
+                                  className="editable-preview-subject"
+                                  aria-label="Email subject"
                                   value={previewSubject}
                                   onChange={(event) => {
                                     setPreviewSubject(event.target.value);
@@ -4456,22 +4519,28 @@ function App() {
                                   }}
                                   disabled={previewSaving || previewMotion === "collapse"}
                                 />
-                              </label>
-                              <label>
-                                Body
                                 <textarea
+                                  className="editable-preview-body"
+                                  aria-label="Email body"
                                   value={previewBody}
+                                  ref={previewBodyRef}
                                   onChange={(event) => {
                                     setPreviewBody(event.target.value);
                                     setPreviewDirty(true);
                                   }}
-                                  rows={10}
+                                  rows={1}
                                   disabled={previewSaving || previewMotion === "collapse"}
                                 />
-                              </label>
+                                {footer.enabled && (
+                                  <div
+                                    className="editable-preview-footer"
+                                    dangerouslySetInnerHTML={{ __html: footerToHtml(footer) }}
+                                  />
+                                )}
+                              </div>
                               <p className="hint">
-                                Saving updates the email for all recipients in this batch. Their first names stay
-                                personalized. Footer is appended automatically on send.
+                                Saving updates the email and LinkedIn message for everyone in this batch. First names
+                                stay personalized. The footer is appended automatically on send.
                               </p>
                               <div className="preview-edit-actions">
                                 <button
@@ -4486,24 +4555,6 @@ function App() {
                                     Reset to generated
                                   </button>
                                 )}
-                              </div>
-                              <div className="preview-html">
-                                <p className="eyebrow">Send preview</p>
-                                <strong className="preview-live-subject">{previewSubject || "(no subject)"}</strong>
-                                <div
-                                  className="preview-html-body"
-                                  dangerouslySetInnerHTML={{
-                                    __html: `${textToHtml(previewBody || "", {
-                                      jobUrl: jobUrl || batchContent?.generationContext?.jobUrl,
-                                      linkTexts: collectJobLinkTexts({
-                                        jobUrl: jobUrl || batchContent?.generationContext?.jobUrl,
-                                        jobDescription:
-                                          jobDescription || batchContent?.generationContext?.jobDescription,
-                                        emailBody: previewBody,
-                                      }),
-                                    })}\n${footer.enabled ? footerToHtml(footer) : ""}`,
-                                  }}
-                                />
                               </div>
                               <div className="resume-picker">
                                 <p className="eyebrow">Resume attachment</p>
@@ -4536,6 +4587,69 @@ function App() {
                                     : "No resume attachment found — upload one in Setup."}
                                 </p>
                               </div>
+                              <div className="linkedin-section-divider" aria-hidden="true" />
+                              <div className="linkedin-draft-card">
+                                <div className="linkedin-draft-heading">
+                                  <div>
+                                    <p className="eyebrow">LinkedIn message</p>
+                                    <strong>Subject and message, ready to paste</strong>
+                                  </div>
+                                  <div className="linkedin-copy-actions">
+                                    <button
+                                      type="button"
+                                      className="secondary compact"
+                                      disabled={!linkedinSubject.trim()}
+                                      onClick={() => {
+                                        void navigator.clipboard.writeText(linkedinSubject).then(
+                                          () => setMessage("LinkedIn subject copied."),
+                                          () => setMessage("Could not copy the LinkedIn subject automatically."),
+                                        );
+                                      }}
+                                    >
+                                      Copy subject
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="secondary compact"
+                                      disabled={!linkedinMessage.trim()}
+                                      onClick={() => {
+                                        void navigator.clipboard.writeText(linkedinMessage).then(
+                                          () => setMessage("LinkedIn message copied."),
+                                          () => setMessage("Could not copy the LinkedIn message automatically."),
+                                        );
+                                      }}
+                                    >
+                                      Copy message
+                                    </button>
+                                  </div>
+                                </div>
+                                <input
+                                  aria-label="LinkedIn subject"
+                                  className="linkedin-subject-input"
+                                  value={linkedinSubject}
+                                  onChange={(event) => {
+                                    setLinkedinSubject(event.target.value);
+                                    setPreviewDirty(true);
+                                  }}
+                                  placeholder="Generate outreach to create a LinkedIn subject."
+                                  disabled={previewSaving || previewMotion === "collapse"}
+                                />
+                                <textarea
+                                  aria-label="LinkedIn personalized message"
+                                  value={linkedinMessage}
+                                  ref={linkedinMessageRef}
+                                  onChange={(event) => {
+                                    setLinkedinMessage(event.target.value);
+                                    setPreviewDirty(true);
+                                  }}
+                                  rows={1}
+                                  placeholder="Generate outreach to create a LinkedIn message."
+                                  disabled={previewSaving || previewMotion === "collapse"}
+                                />
+                                <small>
+                                  {linkedinMessage.trim() ? linkedinMessage.trim().split(/\s+/).length : 0} words
+                                </small>
+                              </div>
                             </div>
                           ) : null}
                         </div>
@@ -4556,7 +4670,7 @@ function App() {
                           <div className="preview-skeleton preview-skeleton-block" />
                           <p className="hint">
                             {generateProgress && !generateProgress.done
-                              ? "Generating preview…"
+                              ? "Generating outreach previews…"
                               : "Loading preview…"}
                           </p>
                         </div>
@@ -4567,12 +4681,12 @@ function App() {
                       previewMotion === "idle" &&
                       !previewFetching &&
                       !generateProgress && (
-                        <p className="hint">Generate an email to see the preview here.</p>
+                        <p className="hint">Generate outreach to see the editable previews here.</p>
                       )}
                   </div>
               </>
             ) : (
-              <p className="hint">Select a recipient from the batch to inspect and edit their exact email.</p>
+              <p className="hint">Select a recipient from the batch to inspect and edit the outreach.</p>
             )}
           </section>
         </section>
@@ -5083,12 +5197,54 @@ function App() {
           hidden={tab !== "setup"}
           aria-hidden={tab !== "setup"}
         >
+          <section className="panel setup-overview setup-span-full">
+            <div className="setup-overview-copy">
+              <p className="eyebrow">Setup checklist</p>
+              <h2>Get ready in three steps</h2>
+              <p className="hint">
+                Connect your accounts, choose the resume to attach, and add examples of how you write.
+              </p>
+            </div>
+            <div className="setup-progress" aria-label={`${setupReadyCount} of 3 setup steps ready`}>
+              <div className="setup-progress-label">
+                <strong>{setupReadyCount}/3 ready</strong>
+                <span>{setupReadyCount === 3 ? "Ready to send" : "Complete the steps below"}</span>
+              </div>
+              <div className="setup-progress-track" aria-hidden="true">
+                <span style={{ width: `${(setupReadyCount / 3) * 100}%` }} />
+              </div>
+            </div>
+            <ol className="setup-path">
+              <li>
+                <span className="setup-step-number">1</span>
+                <div><strong>Connect sessions</strong><small>Gmail, Jobright, and LinkedIn tools</small></div>
+                <span className={`chip ${setupSessions?.gmail.ready && setupSessions?.jobright.ready && setupSessions?.linkedin.ready ? "ready" : "muted"}`}>
+                  {[setupSessions?.gmail.ready, setupSessions?.jobright.ready, setupSessions?.linkedin.ready].filter(Boolean).length}/3
+                </span>
+              </li>
+              <li>
+                <span className="setup-step-number">2</span>
+                <div><strong>Add a resume</strong><small>The selected PDF is attached to sends</small></div>
+                <span className={`chip ${resumes.length > 0 ? "ready" : "muted"}`}>{resumes.length > 0 ? "Ready" : "Needed"}</span>
+              </li>
+              <li>
+                <span className="setup-step-number">3</span>
+                <div><strong>Add sample emails</strong><small>Two or three strong examples work best</small></div>
+                <span className={`chip ${(state?.emailSamples ?? []).length > 0 ? "ready" : "muted"}`}>
+                  {(state?.emailSamples ?? []).length || "Needed"}
+                </span>
+              </li>
+            </ol>
+          </section>
+
           <section className="panel setup-checklist">
             <div className="setup-section-head">
               <div>
+                <p className="eyebrow">Step 1 · Required</p>
                 <h2>Sessions</h2>
                 <p className="hint">
-                  Sign in once in each automation browser. If a profile is already in use, wait a moment and try Open login again.
+                  Connect the accounts Recruiter Reachout uses to find contacts and send emails. When you&apos;re done, return
+                  here and refresh the status.
                 </p>
               </div>
               <button disabled={setupSessionsLoading} onClick={() => void refreshSetupSessions()}>
@@ -5099,23 +5255,26 @@ function App() {
               <div className="login-row">
                 <div>
                   <strong>Gmail + Streak</strong>
+                  <p className="session-description">Streak is the Gmail extension used to send and track your outreach.</p>
                   <p className={setupSessions?.gmail.ready ? "ok" : "warning"}>{setupSessionMessage("gmail")}</p>
                 </div>
-                <button className="primary" onClick={() => void openLogin("gmail")}>Open login</button>
+                <button className="primary" onClick={() => void openLogin("gmail")}>Connect Gmail</button>
               </div>
               <div className="login-row">
                 <div>
                   <strong>Jobright</strong>
+                  <p className="session-description">Used to find verified recruiter email addresses.</p>
                   <p className={setupSessions?.jobright.ready ? "ok" : "warning"}>{setupSessionMessage("jobright")}</p>
                 </div>
-                <button className="primary" onClick={() => void openLogin("jobright")}>Open login</button>
+                <button className="primary" onClick={() => void openLogin("jobright")}>Connect Jobright</button>
               </div>
               <div className="login-row">
                 <div>
-                  <strong>LinkedIn</strong>
+                  <strong>LinkedIn + SalesQL + Apollo</strong>
+                  <p className="session-description">Used to collect recruiter profiles and find work email addresses.</p>
                   <p className={setupSessions?.linkedin.ready ? "ok" : "warning"}>{setupSessionMessage("linkedin")}</p>
                 </div>
-                <button className="primary" onClick={() => void openLogin("linkedin")}>Open login</button>
+                <button className="primary" onClick={() => void openLogin("linkedin")}>Connect LinkedIn</button>
               </div>
             </div>
             {setupSessions?.checkedAt && (
@@ -5126,43 +5285,11 @@ function App() {
             )}
           </section>
 
-          <section className={`panel test-mode-panel ${testModeEnabled ? "test-mode-on" : ""}`}>
-            <div className="test-mode-header">
-              <div>
-                <h2>Test mode</h2>
-                <p className="hint">Redirect every send to your inbox. Subjects get a [TEST MODE] prefix.</p>
-              </div>
-              <button
-                type="button"
-                className={`toggle-switch ${testModeEnabled ? "on" : ""}`}
-                role="switch"
-                aria-checked={testModeEnabled}
-                aria-label="Toggle test mode"
-                onClick={() => void toggleTestMode(!testModeEnabled)}
-              >
-                <span className="toggle-knob" />
-                <span className="toggle-label">{testModeEnabled ? "On" : "Off"}</span>
-              </button>
-            </div>
-            <label>
-              Test recipient email
-              <input
-                type="email"
-                value={testModeRecipient}
-                onChange={(event) => setTestModeRecipient(event.target.value)}
-                placeholder="you@example.com"
-              />
-            </label>
-            <button onClick={() => void saveTestModeRecipient()}>Save test recipient</button>
-          </section>
-
-          <PreciseLocationSetup />
-
-          <section className="panel setup-span-full">
+          <section className="panel setup-span-full setup-samples">
+            <p className="eyebrow">Step 3 · Required</p>
             <h2>Sample emails</h2>
             <p className="hint">
-              Paste 2–3 of your best real outreach emails. Gemini reuses accomplishments and tone — not the industry of the
-              company you wrote them for.
+              Paste 2–3 concise outreach emails that sound like you. The generator learns your tone and verified experience.
             </p>
             <p className="ok">
               Saved locally · {(state?.emailSamples ?? []).length}{" "}
@@ -5225,9 +5352,13 @@ function App() {
             </button>
           </section>
 
-          <section className="panel setup-span-full">
+          <section className="panel setup-span-full setup-resumes">
+            <p className="eyebrow">Step 2 · Required</p>
             <h2>Resumes</h2>
-            <p className="hint">Upload PDFs with optional nicknames (UI only). The email attaches the original uploaded filename.</p>
+            <p className="hint">
+              Upload at least one PDF and mark the version you want as default. Every outreach email attaches that original
+              file; nicknames only help you tell versions apart here.
+            </p>
             <div className="resume-upload-row">
               <label>
                 Nickname
@@ -5294,11 +5425,47 @@ function App() {
             )}
           </section>
 
+          <section className={`panel test-mode-panel setup-optional ${testModeEnabled ? "test-mode-on" : ""}`}>
+            <div className="test-mode-header">
+              <div>
+                <h2>Test mode</h2>
+                <p className="hint">
+                  Turn this on to try the full sending flow. Every email goes to your inbox instead of the recruiter.
+                </p>
+              </div>
+              <button
+                type="button"
+                className={`toggle-switch ${testModeEnabled ? "on" : ""}`}
+                role="switch"
+                aria-checked={testModeEnabled}
+                aria-label="Toggle test mode"
+                onClick={() => void toggleTestMode(!testModeEnabled)}
+              >
+                <span className="toggle-knob" />
+                <span className="toggle-label">{testModeEnabled ? "On" : "Off"}</span>
+              </button>
+            </div>
+            <label>
+              Test recipient email
+              <input
+                type="email"
+                value={testModeRecipient}
+                onChange={(event) => setTestModeRecipient(event.target.value)}
+                placeholder="you@example.com"
+              />
+            </label>
+            <button onClick={() => void saveTestModeRecipient()}>Save test recipient</button>
+          </section>
+
+          <div className="setup-weather setup-optional">
+            <PreciseLocationSetup />
+          </div>
+
           <section className="panel footer-panel setup-span-full">
             <div className="footer-panel-header">
               <div>
                 <h2>Email footer</h2>
-                <p className="hint">Appended to every send automatically. Edits save as you type.</p>
+                <p className="hint">Appended to every email automatically.</p>
               </div>
               <button
                 type="button"
@@ -5757,7 +5924,7 @@ function App() {
         </section>
       )}
 
-      {visitedTabs.has("analytics") && (
+      {tab === "analytics" && (
         <section
           className={`analytics-stack analytics-funland tab-panel${tab === "analytics" ? " tab-panel-live" : " tab-panel-dormant"}`}
           key="analytics"
@@ -5874,13 +6041,13 @@ function App() {
                           }}
                         />
                       </div>
-                      {analytics.goal.goalMetDates.length > 0 && (
+                      {analytics.goalProgress.goalMetDates.length > 0 && (
                         <div className="streak-dots" aria-label="Recent goal days">
                           {Array.from({ length: 14 }, (_, index) => {
                             const date = new Date();
                             date.setDate(date.getDate() - (13 - index));
                             const key = localYmd(date);
-                            const met = analytics.goal.goalMetDates.includes(key);
+                            const met = analytics.goalProgress.goalMetDates.includes(key);
                             return <span key={key} className={met ? "streak-dot on" : "streak-dot"} title={key} />;
                           })}
                         </div>
@@ -6075,6 +6242,7 @@ function App() {
                   <div className="stat accent"><strong>{formatCompact(analytics.usage.jobrightLookups)}</strong><span>Jobright lookups</span></div>
                   <div className="stat"><strong>{analytics.usage.jobrightEmailsFound}</strong><span>Emails via Jobright</span></div>
                   <div className="stat"><strong>{analytics.usage.salesqlEmailsFound}</strong><span>Emails via SalesQL</span></div>
+                  <div className="stat"><strong>{analytics.usage.apolloEmailsFound ?? 0}</strong><span>Emails via Apollo</span></div>
                   <div className="stat"><strong>{formatCompact(analytics.usage.geminiCalls)}</strong><span>Gemini calls{analytics.usage.geminiCallsEstimated ? "*" : ""}</span></div>
                   <div className="stat"><strong>{formatCompact(analytics.usage.charactersGenerated)}</strong><span>Chars generated</span></div>
                   <div className="stat"><strong>{analytics.usage.linkedInCaptureSaves}</strong><span>LinkedIn captures</span></div>
@@ -6168,7 +6336,7 @@ function App() {
               </section>
             </>
           )}
-        </section>
+          </section>
       )}
 
       {showCatToast && (
@@ -6229,11 +6397,7 @@ function App() {
   );
 }
 
-createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
-);
+createRoot(document.getElementById("root")!).render(<App />);
 
 function formatModelLabel(model?: string): string {
   const value = model?.trim();

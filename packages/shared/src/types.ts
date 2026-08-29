@@ -41,8 +41,11 @@ export interface RecruiterCandidate {
   /** When an email was first discovered for this person (ISO). Used by Analytics daily buckets. */
   emailDiscoveredAt?: string;
   discoveryAttempts?: number;
-  /** One-shot override: when set, the worker skips Jobright and goes straight to SalesQL for this candidate. */
-  forceProvider?: "salesql";
+  /**
+   * One-shot override: skip Jobright and run the Finder chain (Apollo → SalesQL).
+   * `"salesql"` is the legacy alias kept so existing queues and tests keep working.
+   */
+  forceProvider?: "salesql" | "finder";
   /** Optional per-recipient subject override from the preview editor (already personalized). */
   customSubject?: string;
   /** Optional per-recipient body override from the preview editor (already personalized, no footer). */
@@ -66,8 +69,8 @@ export type EmailPattern =
   | "first_last_initial"
   | "api_verified";
 
-/** Email-discovery backends the worker can chain (Jobright first, SalesQL fallback, etc.). */
-export type DiscoveryProvider = "jobright" | "salesql";
+/** Email-discovery backends the worker can chain (Jobright first, then Finder: Apollo → SalesQL). */
+export type DiscoveryProvider = "jobright" | "salesql" | "apollo";
 
 export interface ProviderUsage {
   provider: DiscoveryProvider;
@@ -96,15 +99,23 @@ export interface WorkerStatus {
   provider?: DiscoveryProvider;
   /** ISO timestamp of the last heartbeat from the worker process. */
   lastHeartbeatAt: string;
+  /**
+   * ISO timestamp of when the CURRENT worker process booted. Stable across a
+   * single session (including laptop sleep/wake, which resumes the same
+   * process) and changes on every crash+respawn. Lets the API tell "my own
+   * slow send" from "a dead predecessor's leaked in_progress job" when deciding
+   * whether a fresh heartbeat should shield a stale job from reclaim.
+   */
+  workerStartedAt?: string;
   updatedAt: string;
 }
 
 /** Dashboard/worker knobs for how email discovery spends provider credits. */
 export interface DiscoverySettings {
   /**
-   * When true, Jobright `not_found` automatically falls through to SalesQL.
-   * Default false — SalesQL is opt-in via the dashboard toggle or "Check via SalesQL" actions,
-   * because the free plan only has ~50 lookups/month.
+   * When true, Jobright `not_found` automatically falls through to Finder
+   * (Apollo → SalesQL). Default false — Finder sources spend monthly credits,
+   * so they stay opt-in via this toggle or "Check via Finder".
    */
   salesqlAutoFallback: boolean;
   updatedAt: string;
@@ -349,6 +360,10 @@ export interface CompanyContent {
   companyDisplayName: string;
   subject: string;
   body: string;
+  /** Short subject line for LinkedIn outreach when the user sends an InMail/message. */
+  linkedinSubject?: string;
+  /** Short, editable LinkedIn outreach generated from the same evidence as the email. */
+  linkedinMessage?: string;
   source: CompanyContentSource;
   model?: string;
   /** Inputs used for the last Gemini generation — survive restarts. */
@@ -453,6 +468,10 @@ export interface AnalyticsUsageFun {
   jobrightEmailsFound: number;
   /** Emails verified via SalesQL. */
   salesqlEmailsFound: number;
+  /** Emails verified via Apollo. */
+  apolloEmailsFound: number;
+  /** Emails verified via any Finder source (Apollo + SalesQL). */
+  finderEmailsFound: number;
   activeDays: number;
   avgSendsPerActiveDay: number;
   longestStreak: number;
@@ -522,6 +541,14 @@ export interface AnalyticsSummary {
     goal: number;
     met: boolean;
     streak: number;
+    /**
+     * Effective goal-met local days (YYYY-MM-DD) backing `streak`/`longestStreak`:
+     * the persisted `goal.goalMetDates` unioned with days the current goal is met
+     * from schedule data. Prefer this over `goal.goalMetDates` for UI (calendars,
+     * streak dots) so what's highlighted matches the streak number — the raw
+     * persisted set omits met days on which the app was never opened-and-refreshed.
+     */
+    goalMetDates: string[];
     /**
      * Consecutive days with outreach activity: a successful Gmail send, or scheduling
      * at least one email (queue click). Scheduling for later still secures that local day.

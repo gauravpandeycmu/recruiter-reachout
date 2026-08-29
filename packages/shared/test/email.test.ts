@@ -47,6 +47,23 @@ describe("email helpers", () => {
     expect(rendered.missingPlaceholders).toEqual([]);
   });
 
+  it("normalizes a stored all-caps first name when rendering", () => {
+    const rendered = renderEmail(
+      {
+        id: "1",
+        fullName: "SWAMINATHAN PISUPATI",
+        firstName: "SWAMINATHAN",
+        emailCandidates: [],
+        status: "new",
+        createdAt: "now",
+        updatedAt: "now",
+        isActive: true,
+      },
+      { subject: "Hello {firstName}", body: "Hi {firstName}," },
+    );
+    expect(rendered.body).toBe("Hi Swaminathan,");
+  });
+
   it("appends an enabled footer to text and html bodies", () => {
     const rendered = renderEmail(
       {

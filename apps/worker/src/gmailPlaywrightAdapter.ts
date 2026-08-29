@@ -111,6 +111,35 @@ export async function dismissGmailBlockers(page: Page): Promise<void> {
       })
       .catch(() => {});
   }
+
+  // Google HATS / Chat satisfaction surveys sit in a fullscreen iframe
+  // (id=google-hats-survey) and intercept compose clicks for 30s+.
+  // Do NOT press Escape here — that closes the Gmail compose draft.
+  const survey = page.locator(
+    'iframe#google-hats-survey, iframe[name="google-hats-survey"], iframe[title="Google Survey"]',
+  );
+  if (await survey.first().isVisible({ timeout: 400 }).catch(() => false)) {
+    const frame = page.frameLocator(
+      'iframe#google-hats-survey, iframe[name="google-hats-survey"], iframe[title="Google Survey"]',
+    );
+    await clickFirstVisible(
+      [
+        frame.getByRole("button", { name: /no thanks|not now|close|dismiss|got it|skip/i }),
+        frame.locator('[aria-label="Close"], [aria-label="close"]'),
+      ],
+      1200,
+      { force: true },
+    );
+    await page
+      .evaluate(() => {
+        for (const el of document.querySelectorAll(
+          'iframe#google-hats-survey, iframe[name="google-hats-survey"], iframe[title="Google Survey"], [id^="google-hats"]',
+        )) {
+          el.remove();
+        }
+      })
+      .catch(() => {});
+  }
 }
 
 async function assertGmailSession(page: Page): Promise<void> {
@@ -339,7 +368,11 @@ export function createGmailPlaywrightAdapter(page: Page): GmailPlaywrightAdapter
         .locator('div[aria-label="Message Body"], div[aria-label="Message body"], div[g_editable="true"]')
         .first();
       await bodyField.waitFor({ state: "visible", timeout: 10000 });
-      await bodyField.click();
+      await dismissGmailBlockers(page);
+      // Focus without a pointer click — Google survey iframes intercept clicks.
+      await bodyField.evaluate((el) => {
+        (el as HTMLElement).focus();
+      });
       // Prefer HTML for signature formatting. Gmail Trusted Types often blocks
       // innerHTML/insertHTML — try clipboard write + paste shortcut, then plain text.
       if (input.htmlBody?.trim()) {
@@ -391,7 +424,9 @@ export function createGmailPlaywrightAdapter(page: Page): GmailPlaywrightAdapter
                 }),
               ]);
             }, input.htmlBody);
-            await bodyField.click();
+            await bodyField.evaluate((el) => {
+              (el as HTMLElement).focus();
+            });
             await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
             await page.keyboard.press(process.platform === "darwin" ? "Meta+V" : "Control+V");
             await page.waitForTimeout(300);

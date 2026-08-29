@@ -39,6 +39,23 @@ main.mode-profile {
   justify-content: space-between;
 }
 
+.popup-brand-block {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+}
+
+.popup-brand-tree {
+  border-radius: 12px;
+  box-shadow: 0 8px 18px rgb(20 35 60 / 10%);
+  display: block;
+  flex: 0 0 auto;
+  height: 38px;
+  object-fit: cover;
+  width: 38px;
+}
+
 .eyebrow {
   color: var(--muted);
   font-size: 11px;

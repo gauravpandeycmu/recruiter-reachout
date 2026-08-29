@@ -1,13 +1,25 @@
 /**
  * Common job / requisition ID patterns found in pasted postings and email bodies.
  * Prefer labeled forms ("Job ID: 123") over bare codes to reduce false positives.
+ *
+ * IMPORTANT: `req` / `requisition` must be whole words (`\b` after the label). Without
+ * that, the English word "requirements" was parsed as label `req` + id `uirements`,
+ * which the LLM then pasted into cold emails and the send pipeline hyperlinked.
  */
 const UUID_JOB_ID_RE =
   /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
-const LABELED_UUID_JOB_ID_RE =
-  /\b(?:job\s*(?:id|code|number|ref(?:erence)?)|req(?:uisition)?\s*(?:id|number|#)?|requisition|posting\s*(?:id|number)|reference\s*(?:id|number|#)|opening\s*id)\s*[:#]?\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi;
-const LABELED_JOB_ID_RE =
-  /\b(?:job\s*(?:id|code|number|ref(?:erence)?)|req(?:uisition)?\s*(?:id|number|#)?|requisition|posting\s*(?:id|number)|reference\s*(?:id|number|#)|opening\s*id)\s*[:#]?\s*([A-Z0-9][A-Z0-9/_-]{2,36})\b/gi;
+/** Mongo/ObjectId-style ATS keys used by Jobright and some aggregators. */
+const OPAQUE_HEX_JOB_ID_RE = /^[0-9a-f]{20,32}$/i;
+const JOB_ID_LABEL =
+  "(?:job\\s*(?:id|code|number|ref(?:erence)?)|req(?:uisition)?\\b(?:\\s*(?:id|number|#))?|requisition\\b|posting\\s*(?:id|number)|reference\\s*(?:id|number|#)|opening\\s*id)";
+const LABELED_UUID_JOB_ID_RE = new RegExp(
+  String.raw`\b${JOB_ID_LABEL}\s*[:#]?\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b`,
+  "gi",
+);
+const LABELED_JOB_ID_RE = new RegExp(
+  String.raw`\b${JOB_ID_LABEL}\s*[:#]?\s*([A-Z0-9][A-Z0-9/_-]{2,36})\b`,
+  "gi",
+);
 const BARE_JOB_ID_RE = /\b((?:JR|REQ|R|JOB|JD)[-_ ]?\d{4,12})\b/gi;
 /** Pure numeric req IDs (Apple, many ATS boards). */
 const NUMERIC_JOB_ID_RE = /\b(\d{5,12})\b/g;
@@ -19,6 +31,12 @@ export function isUuidJobId(id?: string): boolean {
     return false;
   }
   return UUID_JOB_ID_RE.test(cleaned) && cleaned.length >= 36;
+}
+
+/** True for machine-oriented ATS identifiers that should not appear in outreach prose. */
+export function isOpaqueAtsJobId(id?: string): boolean {
+  const cleaned = id?.trim();
+  return Boolean(cleaned && (isUuidJobId(cleaned) || OPAQUE_HEX_JOB_ID_RE.test(cleaned)));
 }
 
 /**
@@ -73,7 +91,7 @@ export function collectJobLinkTexts(options: {
   const bodyLower = options.emailBody?.toLowerCase() ?? "";
 
   const preferRoleTitleForUuid = (id?: string): string[] | undefined => {
-    if (!id || !isUuidJobId(id) || !roleTitle) {
+    if (!id || !isOpaqueAtsJobId(id) || !roleTitle) {
       return undefined;
     }
     if (bodyLower.includes(roleTitle.toLowerCase())) {
@@ -82,7 +100,7 @@ export function collectJobLinkTexts(options: {
     return undefined;
   };
 
-  // Prefer the URL path ID when it also appears in the email (most reliable).
+  // Prefer the URL path/query ID when it also appears in the email (most reliable).
   if (fromUrl && options.emailBody?.toLowerCase().includes(fromUrl.toLowerCase())) {
     return preferRoleTitleForUuid(fromUrl) ?? [fromUrl];
   }
@@ -96,11 +114,16 @@ export function collectJobLinkTexts(options: {
       return preferRoleTitleForUuid(id) ?? [id];
     }
   }
+  // URL carries a real ID the body never mentions (common for Microsoft ?query=)
+  // — fall back to hyperlinking the role title when the prose already names it.
+  if (fromUrl && roleTitle && bodyLower.includes(roleTitle.toLowerCase())) {
+    return [roleTitle];
+  }
   if (fromUrl) {
     return preferRoleTitleForUuid(fromUrl) ?? [fromUrl];
   }
   // UUID in JD but not URL — still link the role title when present.
-  const jdUuid = fromJd.find(isUuidJobId);
+  const jdUuid = fromJd.find(isOpaqueAtsJobId);
   if (jdUuid) {
     const viaRole = preferRoleTitleForUuid(jdUuid);
     if (viaRole) {
@@ -126,7 +149,8 @@ export function extractJobIdFromUrl(jobUrl?: string): string | undefined {
     return undefined;
   }
   try {
-    const path = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`).pathname;
+    const url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+    const path = url.pathname;
     // Ashby and similar: /notion/<uuid> or /jobs/<uuid>
     const uuid = path.match(
       /\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\/|$)/i,
@@ -134,13 +158,30 @@ export function extractJobIdFromUrl(jobUrl?: string): string | undefined {
     if (uuid?.[1]) {
       return normalizeJobId(uuid[1]);
     }
+    const opaqueHex = path.match(/\/([0-9a-f]{20,32})(?:\/|$)/i);
+    if (opaqueHex?.[1]) {
+      return normalizeJobId(opaqueHex[1]);
+    }
     const prefixed = path.match(/\/((?:JR|REQ|R|JOB|JD)[-_]?\d{4,12})(?:\/|$)/i);
     if (prefixed?.[1]) {
       return normalizeJobId(prefixed[1]);
     }
     // /details/200629114-software-engineer or /778812/
     const numeric = path.match(/\/(\d{5,12})(?:\/|$|-)/);
-    return normalizeJobId(numeric?.[1]);
+    if (numeric?.[1]) {
+      return normalizeJobId(numeric[1]);
+    }
+    // Microsoft careers and similar: ?query=200047407 or ?jobId=…
+    for (const key of ["query", "jobId", "job_id", "reqId", "req_id", "requisitionId"]) {
+      const value = url.searchParams.get(key)?.trim();
+      if (value && /^\d{5,12}$/.test(value)) {
+        return normalizeJobId(value);
+      }
+      if (value && isOpaqueAtsJobId(value)) {
+        return normalizeJobId(value);
+      }
+    }
+    return undefined;
   } catch {
     return undefined;
   }
@@ -180,7 +221,18 @@ function normalizeJobId(raw: string | undefined): string | undefined {
   if (cleaned.length < 3 || cleaned.length > 40) {
     return undefined;
   }
-  if (/^(https?|www|and|the|for|with|from|this|that|role|team)$/i.test(cleaned)) {
+  // Reject English leftovers from over-eager "req…" label matches (e.g. "uirements"
+  // carved out of "requirements") and other non-ID tokens.
+  if (
+    /^(https?|www|and|the|for|with|from|this|that|role|team|uirements|uirements?|ments|leveraging|customer|internal|external)$/i.test(
+      cleaned,
+    )
+  ) {
+    return undefined;
+  }
+  // Real req IDs are almost always numeric, prefixed (JR/REQ/…), or UUIDs — not
+  // a bare alphabetic fragment with no digits.
+  if (/^[A-Za-z][A-Za-z_-]*$/.test(cleaned) && !/^(JR|REQ|R|JOB|JD)$/i.test(cleaned)) {
     return undefined;
   }
   return cleaned;

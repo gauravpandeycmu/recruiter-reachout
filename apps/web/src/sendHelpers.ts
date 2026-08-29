@@ -1,7 +1,9 @@
+import type { RecruiterCandidate } from "@recruiter/shared";
 import type { UpcomingSendView } from "./api.js";
 
 /** Shared window: Send-now CTA and Next-up dueNow must agree. */
 export const SEND_NOW_WINDOW_MS = 90_000;
+export const DEFAULT_SEND_INTERVAL_MINUTES = 1;
 
 /** Soft tint accents — backgrounds come from CSS so dark mode stays readable. */
 export const RESUME_TINTS = [
@@ -189,14 +191,14 @@ export function deriveBatchScheduleTiming(
   intervalMinutes: number;
   useNowPreset: boolean;
 } {
-  const presets = options?.intervalPresets?.length ? [...options.intervalPresets] : [4, 8, 12];
+  const presets = options?.intervalPresets?.length ? [...options.intervalPresets] : [DEFAULT_SEND_INTERVAL_MINUTES, 2, 5, 10];
   const now = options?.now ?? new Date();
   const times = items
     .map((item) => new Date(item.scheduledFor).getTime())
     .filter((value) => Number.isFinite(value))
     .sort((a, b) => a - b);
 
-  let intervalMinutes = presets[0] ?? 4;
+  let intervalMinutes = presets[0] ?? DEFAULT_SEND_INTERVAL_MINUTES;
   if (times.length >= 2) {
     const gaps: number[] = [];
     for (let i = 1; i < times.length; i += 1) {
@@ -243,6 +245,28 @@ export function filterScheduledTabItems<T extends { jobMode?: string }>(items: T
 export function isIntentionalWorkerHibernation(message?: string): boolean {
   const msg = (message ?? "").toLowerCase();
   return /process exited|hibernating|restarts automatically/.test(msg);
+}
+
+/** Read-only "who's next" for the dashboard. Must never hit GET /next-discovery —
+ *  that endpoint claims the candidate, which would stall the worker's Jobright lookup. */
+export function peekNextDiscoveryCandidate(
+  candidates: RecruiterCandidate[],
+  activeLookupId?: string,
+): RecruiterCandidate | undefined {
+  const pending = candidates.filter(
+    (candidate) =>
+      !candidate.email && candidate.status !== "email_not_found" && Boolean(candidate.linkedinUrl?.trim()),
+  );
+  if (pending.length === 0) {
+    return undefined;
+  }
+  const looking = activeLookupId ? pending.find((candidate) => candidate.id === activeLookupId) : undefined;
+  if (looking) {
+    return looking;
+  }
+  return [...pending].sort((a, b) =>
+    (a.lastDiscoveryAttemptAt ?? "").localeCompare(b.lastDiscoveryAttemptAt ?? ""),
+  )[0];
 }
 
 export function discoveryStatusLabel(input: {
@@ -405,4 +429,3 @@ export function buildSendSessionFromUpcoming(
     startedAt: new Date().toISOString(),
   };
 }
-

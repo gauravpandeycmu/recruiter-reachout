@@ -46,6 +46,17 @@ describe("discoverEmailOnSalesql", () => {
     expect(adapter.closeOverlay).toHaveBeenCalled();
   });
 
+  it("passes the tagged company into the panel email picker", async () => {
+    const adapter = createFakeAdapter({
+      readRevealedEmail: vi.fn().mockResolvedValue("atalnikov@apple.com"),
+    });
+    await discoverEmailOnSalesql(adapter, "https://www.linkedin.com/in/atalnikov", {
+      dryRun: false,
+      company: "Apple",
+    });
+    expect(adapter.readRevealedEmail).toHaveBeenCalledWith(1500, "Apple");
+  });
+
   it("returns error (not not_found) when the overlay never appears — inconclusive, not a confirmed miss", async () => {
     // Regression: the overlay failing to open collapses several distinct,
     // purely transient causes (badge slow to load, panel toggle glitch,

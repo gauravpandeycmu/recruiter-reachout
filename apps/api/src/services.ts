@@ -19,7 +19,7 @@ import type {
   TestModeSettings,
   TrackingEvent,
 } from "@recruiter/shared";
-import { dedupeRepeatedPersonName, extractFirstName, inferCompanyFromEmail, isValidEmail, linkedInProfileSlug, linkedInUrlsMatch, normalizeWhitespace, preferLinkedInUrl, renderEmail, shouldRewriteCompanyFromEmail, validateCandidateInput } from "@recruiter/shared";
+import { cleanCompanyLabel, dedupeRepeatedPersonName, discoveryProviderLabel, extractFirstName, inferCompanyFromEmail, isFinderForce, isFinderProvider, isValidEmail, linkedInProfileSlug, linkedInUrlsMatch, normalizeWhitespace, pickOutreachEmail, preferLinkedInUrl, renderEmail, shouldRewriteCompanyFromEmail, suggestCompanyForCapture, validateCandidateInput } from "@recruiter/shared";
 import { audit } from "@recruiter/shared/auditLog";
 import {
   createGmailAccount,
@@ -32,7 +32,7 @@ import {
   listBounceMessages,
   type GmailAttachment,
 } from "./gmail.js";
-import { addPublicTracking, createTrackingLink, getPublicTrackingBaseUrl } from "./tracking.js";
+import { addPublicTracking, getOrCreateTrackingLink, getPublicTrackingBaseUrl } from "./tracking.js";
 import { assertWithinPacingCaps, scheduleCandidates, scheduleCandidatesExplicit, type ExplicitScheduleInput, type ExplicitScheduleResult } from "./scheduler.js";
 import { applyBounce, parseBounceMessage, parseGmailMessageText } from "./bounces.js";
 import { assertCanSend } from "./sendGate.js";
@@ -77,6 +77,8 @@ export interface CandidateStatusCheck {
   knownEmail?: string;
   knownEmails?: string[];
   company?: string;
+  /** Prefill for the extension: existing tag, else catalog/parse match. */
+  suggestedCompany?: string;
 }
 
 export interface BulkCandidateResult {
@@ -121,14 +123,51 @@ export function createCandidate(input: Partial<RecruiterCandidate>): RecruiterCa
   };
 }
 
+export type CaptureCompanyHints = Partial<RecruiterCandidate> & { linkedinCompanySlug?: string };
+
+export function listKnownCompanyNames(store: Store): string[] {
+  const counts = new Map<string, { name: string; n: number }>();
+  const add = (raw?: string) => {
+    const name = cleanCompanyLabel(raw);
+    if (!name) {
+      return;
+    }
+    const key = name.toLowerCase();
+    const previous = counts.get(key);
+    const preferCased = name !== name.toLowerCase();
+    const keepPrevious = previous && previous.name !== previous.name.toLowerCase() && !preferCased;
+    counts.set(key, { name: keepPrevious ? previous.name : name, n: (previous?.n ?? 0) + 1 });
+  };
+  for (const candidate of store.listCandidates()) {
+    add(candidate.company);
+  }
+  for (const content of store.listCompanyContent()) {
+    add(content.companyDisplayName);
+    add(content.company);
+  }
+  for (const job of store.listJobs()) {
+    add(job.companyName);
+  }
+  return [...counts.values()].sort((a, b) => b.n - a.n).map((row) => row.name);
+}
+
 export function checkCandidateStatuses(store: Store, inputs: Array<Partial<RecruiterCandidate>>, company?: string): CandidateStatusCheck[] {
+  const knownCompanies = listKnownCompanyNames(store);
   return dedupeCandidateInputs(withCompany(inputs, company)).map((candidate) => {
     const existing = findExistingCandidate(store, candidate);
+    const suggestedCompany = suggestCompanyForCapture({
+      existingPersonCompany: existing?.company,
+      parsedCompany: candidate.company,
+      linkedinCompanySlug: (candidate as CaptureCompanyHints).linkedinCompanySlug,
+      headline: candidate.title,
+      knownCompanies,
+    });
     if (!existing) {
       return {
         key: candidateKey(candidate),
         candidate,
         status: "new" as const,
+        suggestedCompany,
       };
     }
     const knownEmails = collectKnownEmails(existing);
@@ -140,6 +179,7 @@ export function checkCandidateStatuses(store: Store, inputs: Array<Partial<Recru
       knownEmail,
       knownEmails: knownEmails.length > 0 ? knownEmails : undefined,
       company: existing.company,
+      suggestedCompany: suggestedCompany ?? existing.company,
     };
     if (knownEmail) {
       return { ...base, status: "known_email" as const };
@@ -203,7 +243,13 @@ function saveOneBulkCandidate(store: Store, candidate: Partial<RecruiterCandidat
         ...knownFields,
       };
     }
-    // Reactivate and preserve known email
+    // Reactivate and preserve known email. When the person has no known email we
+    // reset status to a fresh "new" — which must come with a fresh discovery
+    // budget too. Leaving a stale discoveryAttempts (e.g. 3 from a prior
+    // email_not_found parking) makes the worker re-park the re-added person after
+    // a single miss instead of the intended MAX_DISCOVERY_ATTEMPTS, silently
+    // giving them one attempt. Matches requestDiscovery's fresh-start semantics.
+    const startsFresh = !existing.email;
     const reactivated = store.updateCandidate(existing.id, {
       ...candidate,
       linkedinUrl: preferLinkedInUrl(existing.linkedinUrl, candidate.linkedinUrl),
@@ -213,6 +259,7 @@ function saveOneBulkCandidate(store: Store, candidate: Partial<RecruiterCandidat
       isActive: true,
       archivedAt: undefined,
       status: existing.email ? existing.status : "new",
+      ...(startsFresh ? { discoveryAttempts: 0, lastError: undefined } : {}),
     });
     return {
       key: candidateKey(candidate),
@@ -478,6 +525,8 @@ export async function generateContentForCompany(
     companyDisplayName: company.trim(),
     subject: generated.subject,
     body: generated.body,
+    linkedinSubject: generated.linkedinSubject,
+    linkedinMessage: generated.linkedinMessage,
     source: "generated",
     model: generated.model,
     generationContext: {
@@ -612,8 +661,8 @@ export interface DiscoveryReport {
   status: "dry_run" | "found" | "not_found" | "error";
   email?: string;
   message?: string;
-  provider?: "jobright" | "salesql";
-  /** True only when a real SalesQL Reveal Info credit was actually spent —
+  provider?: "jobright" | "salesql" | "apollo";
+  /** True only when a real overlay Access/Reveal credit was actually spent —
    *  lets recordDiscoveryResult count usage against real spend instead of
    *  outcome status alone. */
   creditSpent?: boolean;
@@ -624,7 +673,9 @@ export type WorkerStatusInput = {
   message: string;
   candidateId?: string;
   candidateName?: string;
-  provider?: "jobright" | "salesql";
+  provider?: "jobright" | "salesql" | "apollo";
+  /** ISO boot time of the reporting worker process (session identity). */
+  workerStartedAt?: string;
 };
 
 let lastWorkerHeartbeatAuditAt = 0;
@@ -643,6 +694,9 @@ export function updateWorkerStatus(store: Store, input: WorkerStatusInput): impo
     candidateName,
     provider: input.provider,
     lastHeartbeatAt: now,
+    // Preserve the last-known session id if a heartbeat omits it (older worker),
+    // so reclaim never loses the discriminator mid-session.
+    workerStartedAt: input.workerStartedAt ?? store.getWorkerStatus()?.workerStartedAt,
     updatedAt: now,
   });
   if (input.phase !== "idle") {
@@ -703,22 +757,27 @@ export function currentMonthKey(date: Date = new Date()): string {
   return date.toISOString().slice(0, 7);
 }
 
-export function getProviderMonthlyLimit(provider: "jobright" | "salesql"): number | undefined {
+export function getProviderMonthlyLimit(provider: "jobright" | "salesql" | "apollo"): number | undefined {
   if (provider === "salesql") {
     const raw = process.env.SALESQL_MONTHLY_LIMIT ?? "50";
+    const limit = Number(raw);
+    return Number.isFinite(limit) ? limit : 50;
+  }
+  if (provider === "apollo") {
+    const raw = process.env.APOLLO_MONTHLY_LIMIT ?? "50";
     const limit = Number(raw);
     return Number.isFinite(limit) ? limit : 50;
   }
   return undefined;
 }
 
-export function getProviderUsageCount(store: Store, provider: "jobright" | "salesql", monthKey = currentMonthKey()): number {
+export function getProviderUsageCount(store: Store, provider: "jobright" | "salesql" | "apollo", monthKey = currentMonthKey()): number {
   return store.getProviderUsage(provider, monthKey)?.count ?? 0;
 }
 
 export function canUseDiscoveryProvider(
   store: Store,
-  provider: "jobright" | "salesql",
+  provider: "jobright" | "salesql" | "apollo",
   monthKey = currentMonthKey(),
 ): { allowed: boolean; used: number; limit?: number } {
   const limit = getProviderMonthlyLimit(provider);
@@ -731,7 +790,7 @@ export function canUseDiscoveryProvider(
 
 export async function incrementProviderUsage(
   store: Store,
-  provider: "jobright" | "salesql",
+  provider: "jobright" | "salesql" | "apollo",
   monthKey = currentMonthKey(),
 ): Promise<void> {
   const existing = store.getProviderUsage(provider, monthKey);
@@ -766,12 +825,19 @@ function isEligibleForDiscovery(candidate: RecruiterCandidate, cutoffMs: number)
   return !Number.isFinite(claimedAt) || claimedAt <= cutoffMs;
 }
 
-/** Read-only: is there a discovery candidate waiting (claimed-but-stale counts)?
+/** Still needs an email lookup (ignores claim state). Used by pending-work so the
+ *  worker does not self-exit while a discoveryClaimedAt is in flight — counting only
+ *  "eligible to claim" made hasDiscovery flip false mid-lookup and hibernate the
+ *  process with orphaned claims (Jobright/SalesQL then never finish). */
+export function needsDiscoveryLookup(candidate: RecruiterCandidate): boolean {
+  return !candidate.email && candidate.status !== "email_not_found" && Boolean(candidate.linkedinUrl?.trim());
+}
+
+/** Read-only: is there discovery work outstanding (waiting OR currently claimed)?
  *  Used by pending-work's hasDiscovery flag, which must NOT claim — it's polled
  *  continuously just to decide whether to wake discovery browsers at all. */
-export function hasEligibleDiscoveryCandidate(store: Store, now = new Date()): boolean {
-  const cutoff = now.getTime() - DISCOVERY_CLAIM_STALE_MS;
-  return store.listActiveCandidates().some((candidate) => isEligibleForDiscovery(candidate, cutoff));
+export function hasEligibleDiscoveryCandidate(store: Store, _now = new Date()): boolean {
+  return store.listActiveCandidates().some((candidate) => needsDiscoveryLookup(candidate));
 }
 
 /**
@@ -793,10 +859,24 @@ export function nextDiscoveryCandidate(store: Store, now = new Date()): Recruite
   return store.updateCandidate(next.id, { discoveryClaimedAt: now.toISOString() });
 }
 
-export async function recordDiscoveryResult(store: Store, candidateId: string, report: DiscoveryReport): Promise<RecruiterCandidate> {
+export async function recordDiscoveryResult(store: Store, candidateId: string, incoming: DiscoveryReport): Promise<RecruiterCandidate> {
   const candidate = store.listCandidates().find((item) => item.id === candidateId);
   if (!candidate) {
     throw new Error("Candidate not found.");
+  }
+  let report = incoming;
+  if (report.status === "found") {
+    const foundEmail = report.email?.trim().toLowerCase();
+    const alreadyHasEmail = Boolean(candidate.email?.includes("@"));
+    // Only refuse a previous-employer address when we would have saved it.
+    // A late lookup must not turn a user-pasted current email into a not_found miss.
+    if (!alreadyHasEmail && foundEmail?.includes("@") && !pickOutreachEmail([foundEmail], candidate.company)) {
+      report = {
+        ...report,
+        status: "not_found",
+        message: `Found ${foundEmail}, but it looks like a previous employer — not using it.`,
+      };
+    }
   }
   const patch: Partial<RecruiterCandidate> = {
     lastDiscoveryAttemptAt: new Date().toISOString(),
@@ -814,35 +894,36 @@ export async function recordDiscoveryResult(store: Store, candidateId: string, r
       throw new Error("Discovery result is missing a valid email.");
     }
     const provider = report.provider ?? "jobright";
-    const providerLabel = provider === "salesql" ? "SalesQL" : "Jobright";
-    patch.email = email;
-    patch.emailCandidates = [
-      {
-        email,
-        pattern: "api_verified",
-        confidence: "high",
-        reason: `Verified via ${providerLabel}'s email lookup.`,
-        evidence: provider,
-      },
-    ];
-    patch.status = "email_guessed";
+    const providerLabel = discoveryProviderLabel(provider);
+    // A user-pasted / chosen address must not be clobbered by a lookup that
+    // finished after they already filled the email (PATCH mid-flight).
+    if (!candidate.email?.includes("@")) {
+      patch.email = email;
+      patch.emailCandidates = [
+        {
+          email,
+          pattern: "api_verified",
+          confidence: "high",
+          reason: `Verified via ${providerLabel}'s email lookup.`,
+          evidence: provider,
+        },
+      ];
+      patch.status = "email_guessed";
+      if (!candidate.emailDiscoveredAt) {
+        patch.emailDiscoveredAt = new Date().toISOString();
+      }
+      const inferredCompany = inferCompanyFromEmail(email);
+      if (inferredCompany && shouldRewriteCompanyFromEmail({ ...candidate, email, company: candidate.company })) {
+        patch.company = inferredCompany;
+      } else if (inferredCompany && !candidate.company?.trim()) {
+        patch.company = inferredCompany;
+      }
+    }
     patch.lastError = undefined;
     patch.discoveryAttempts = 0;
-    if (!candidate.emailDiscoveredAt) {
-      patch.emailDiscoveredAt = new Date().toISOString();
-    }
-    const inferredCompany = inferCompanyFromEmail(email);
-    if (inferredCompany && shouldRewriteCompanyFromEmail({ ...candidate, email, company: candidate.company })) {
-      patch.company = inferredCompany;
-    } else if (inferredCompany && !candidate.company?.trim()) {
-      patch.company = inferredCompany;
-    }
-    if (provider === "salesql") {
-      // "Already visible" (no Reveal click needed) never spends a credit —
-      // only count a real spend, or the local counter over-counts relative
-      // to SalesQL's own account usage.
+    if (isFinderProvider(provider)) {
       if (report.creditSpent) {
-        await incrementProviderUsage(store, "salesql");
+        await incrementProviderUsage(store, provider);
       }
     } else {
       await incrementProviderUsage(store, "jobright");
@@ -852,27 +933,29 @@ export async function recordDiscoveryResult(store: Store, candidateId: string, r
     patch.discoveryAttempts = attempts;
     const provider = report.provider ?? "jobright";
     const defaultMessage =
-      provider === "salesql"
-        ? "SalesQL: No Emails Found for this LinkedIn profile."
-        : "Jobright: no contact info found for this LinkedIn profile.";
-    if (provider === "salesql") {
+      provider === "apollo"
+        ? "Apollo: No email found for this LinkedIn profile."
+        : provider === "salesql"
+          ? "SalesQL: No Emails Found for this LinkedIn profile."
+          : "Jobright: no contact info found for this LinkedIn profile.";
+    if (isFinderProvider(provider)) {
       if (report.creditSpent) {
-        await incrementProviderUsage(store, "salesql");
+        await incrementProviderUsage(store, provider);
       }
     } else {
       await incrementProviderUsage(store, "jobright");
     }
-    // A user-forced SalesQL check ("Look up via SalesQL") concluding not_found
+    // A user-forced Finder check ("Look up via Finder") concluding not_found
     // is a deliberate one-shot action — park immediately, same as before. But
-    // an AUTOMATIC SalesQL not_found (reached via the ordinary Jobright ->
-    // SalesQL fallback chain) used to park on the very first miss too,
+    // an AUTOMATIC Finder not_found (reached via the ordinary Jobright ->
+    // Finder fallback chain) used to park on the very first miss too,
     // skipping the shared attempts budget entirely — asymmetric with
     // Jobright, which gets MAX_DISCOVERY_ATTEMPTS tries. Both providers now
     // share the same budget unless the check was explicitly forced.
-    if (attempts >= MAX_DISCOVERY_ATTEMPTS || candidate.forceProvider === "salesql") {
+    if (attempts >= MAX_DISCOVERY_ATTEMPTS || isFinderForce(candidate.forceProvider)) {
       patch.status = "email_not_found";
       patch.lastError =
-        candidate.forceProvider === "salesql"
+        isFinderForce(candidate.forceProvider)
           ? report.message ?? defaultMessage
           : `${report.message ?? defaultMessage} (gave up after ${attempts} attempts; clear the error to retry.)`;
     } else {
@@ -885,19 +968,16 @@ export async function recordDiscoveryResult(store: Store, candidateId: string, r
     // the worker keeps retrying next pass instead of eventually giving up on
     // a candidate that may never have actually been hard to find.
     patch.lastError = report.message ?? "Jobright automation error.";
-    // A real SalesQL credit can still be spent on a path that ends in
-    // "error" (e.g. Reveal Info was clicked but the result failed to parse
+    // A real overlay credit can still be spent on a path that ends in
+    // "error" (e.g. Access/Reveal was clicked but the result failed to parse
     // before the hard timeout fired) — count it, or the local usage counter
-    // under-counts relative to SalesQL's own account usage.
-    if (report.provider === "salesql" && report.creditSpent) {
-      await incrementProviderUsage(store, "salesql");
+    // under-counts relative to the provider's own account usage.
+    if (isFinderProvider(report.provider) && report.creditSpent) {
+      await incrementProviderUsage(store, report.provider);
     }
-    // Conclusive SalesQL quota denial: clear the force flag so we don't hot-loop
-    // the same forced SalesQL attempt every 1.5s.
-    if (
-      report.provider === "salesql" &&
-      /quota/i.test(report.message ?? "")
-    ) {
+    // Conclusive Finder quota denial: clear the force flag so we don't hot-loop
+    // the same forced Finder attempt every 1.5s.
+    if (isFinderProvider(report.provider) && /quota/i.test(report.message ?? "")) {
       patch.forceProvider = undefined;
     }
   }
@@ -932,6 +1012,7 @@ export async function requestDiscovery(
     discoveryAttempts: 0,
     lastDiscoveryAttemptAt: undefined,
     lastError: undefined,
+    discoveryClaimedAt: undefined,
     forceProvider: options.forceSalesql ? "salesql" : undefined,
   });
   if (!updated) {
@@ -953,12 +1034,80 @@ export async function requestSalesqlSweep(store: Store): Promise<{ queued: numbe
       discoveryAttempts: 0,
       lastDiscoveryAttemptAt: undefined,
       lastError: undefined,
+      discoveryClaimedAt: undefined,
       forceProvider: "salesql",
     });
     candidateIds.push(candidate.id);
   }
   await store.save();
   return { queued: candidateIds.length, candidateIds };
+}
+
+/** Dashboard-safe candidate fields. Claim/status/attempts stay worker-owned. */
+const CANDIDATE_CLIENT_PATCH_KEYS = [
+  "email",
+  "customSubject",
+  "customBody",
+  "fullName",
+  "firstName",
+  "title",
+  "company",
+  "location",
+  "linkedinUrl",
+] as const;
+
+export function patchCandidateFromClient(
+  store: Store,
+  id: string,
+  body: Record<string, unknown>,
+): RecruiterCandidate | undefined {
+  const candidate = store.listCandidates().find((row) => row.id === id);
+  if (!candidate) {
+    return undefined;
+  }
+  const patch: Partial<RecruiterCandidate> = {};
+  for (const key of CANDIDATE_CLIENT_PATCH_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(body, key)) {
+      continue;
+    }
+    const value = body[key];
+    if (value === undefined || value === null) {
+      (patch as Record<string, unknown>)[key] = undefined;
+      continue;
+    }
+    if (typeof value !== "string") {
+      throw new Error(`${key} must be a string.`);
+    }
+    (patch as Record<string, unknown>)[key] = value;
+  }
+  if (Object.keys(patch).length === 0) {
+    throw new Error("No updatable candidate fields provided.");
+  }
+  if (typeof patch.fullName === "string") {
+    patch.fullName = dedupeRepeatedPersonName(normalizeWhitespace(patch.fullName));
+    if (patch.fullName && typeof patch.firstName !== "string") {
+      patch.firstName = extractFirstName(patch.fullName);
+    }
+  }
+  if (typeof patch.email === "string") {
+    const email = patch.email.trim().toLowerCase();
+    if (!email) {
+      delete patch.email;
+    } else if (!isValidEmail(email)) {
+      throw new Error("Email is invalid.");
+    } else {
+      patch.email = email;
+      patch.discoveryClaimedAt = undefined;
+      patch.lastError = undefined;
+      if (candidate.status === "new" || candidate.status === "email_not_found" || candidate.status === "content_ready") {
+        patch.status = "email_guessed";
+      }
+    }
+  }
+  if (Object.keys(patch).length === 0) {
+    throw new Error("No updatable candidate fields provided.");
+  }
+  return store.updateCandidate(id, patch);
 }
 
 export function setOutreachContent(store: Store, input: Partial<OutreachContent>): OutreachContent {
@@ -1119,7 +1268,7 @@ export async function selectResume(store: Store, resumeId: string): Promise<Outr
  */
 export async function applyBatchPreviewEdits(
   store: Store,
-  input: { company: string; subject: string; body: string; sourceCandidateId: string },
+  input: { company: string; subject: string; body: string; linkedinSubject?: string; linkedinMessage?: string; sourceCandidateId: string },
 ): Promise<{ companyContent: CompanyContent; updatedCandidates: number }> {
   const subjectText = input.subject.trim();
   const bodyText = input.body.trim();
@@ -1144,6 +1293,12 @@ export async function applyBatchPreviewEdits(
     companyDisplayName: existing?.companyDisplayName || input.company.trim() || companyKey,
     subject: templateSubject,
     body: templateBody,
+    linkedinSubject: input.linkedinSubject?.trim()
+      ? personalizeToTemplate(input.linkedinSubject, source)
+      : existing?.linkedinSubject,
+    linkedinMessage: input.linkedinMessage?.trim()
+      ? personalizeToTemplate(input.linkedinMessage, source)
+      : existing?.linkedinMessage,
     source: existing?.source ?? "manual",
     model: existing?.model,
     generationContext: existing?.generationContext,
@@ -1168,12 +1323,28 @@ export async function applyBatchPreviewEdits(
 }
 
 function personalizeToTemplate(text: string, candidate: RecruiterCandidate): string {
-  let out = text;
   const first = (candidate.firstName || extractFirstName(candidate.fullName) || "").trim();
-  if (first) {
-    out = out.split(first).join("{firstName}");
+  if (!first) {
+    return text;
   }
-  return out;
+  // Whole-word replace (not a raw substring split) so a first name that also
+  // appears INSIDE a longer word — "Ana" in "Analyst", "Sam" in "Samsung",
+  // "Art" in "Started" — isn't converted to {firstName}. The old split/join
+  // templated those substrings, which then rendered as every OTHER recipient's
+  // name mid-word when the company batch was applied (e.g. "Analyst role" for a
+  // source "Ana" became "Boblyst role" for a recipient "Bob").
+  //
+  // Unicode-aware boundaries (lookaround over \p{L}\p{N}_, NOT ASCII-only \b):
+  // JS `\b` only knows [A-Za-z0-9_], so `\bJosé\b` fails to match because the
+  // trailing `é` (non-word to \b) is not a boundary — leaving an accent-final
+  // name ("José", "Renée", "André", "Chloé") un-templated, which then hardcodes
+  // the SOURCE recruiter's name into the shared company template and greets
+  // every OTHER recipient of the batch by the source's name. The lookarounds
+  // treat any Unicode letter/number as part of the word, so accent-final names
+  // template correctly while "Ana" inside "Analytics" (followed by a letter)
+  // still does not.
+  const escaped = first.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return text.replace(new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, "gu"), "{firstName}");
 }
 
 export interface TestModeStatus {
@@ -1237,6 +1408,51 @@ export function applyTestModeRecipientOverride(rendered: RenderedEmail, store: S
     to: testMode.recipient,
     subject: `[TEST MODE] ${rendered.subject}`,
   };
+}
+
+/**
+ * Last-chance TEST_MODE rewrite at claim time. Schedule bakes `to` into the job;
+ * if the user turns TEST MODE on after queueing, the worker would otherwise
+ * Gmail the real recruiter. Enabling it here is the send-time safety net.
+ */
+export function applyTestModeToClaimedSendJob(store: Store, job: SendJob): SendJob {
+  const testMode = getTestModeStatus(store);
+  if (!testMode.enabled || !testMode.recipient) {
+    return job;
+  }
+  const alreadyRedirected = job.to.trim().toLowerCase() === testMode.recipient.toLowerCase();
+  const alreadyTagged = job.subject.startsWith("[TEST MODE] ");
+  if (alreadyRedirected && alreadyTagged) {
+    return job;
+  }
+  return store.upsertSendJob({
+    ...job,
+    to: testMode.recipient,
+    subject: alreadyTagged ? job.subject : `[TEST MODE] ${job.subject}`,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+/**
+ * Claim-time recipient: TEST MODE still wins; otherwise use the candidate's
+ * current email so a Recipients-tab guess change after queueing is what Gmail
+ * actually sends to.
+ */
+export function applyClaimTimeRecipient(store: Store, job: SendJob): SendJob {
+  const testMode = getTestModeStatus(store);
+  if (testMode.enabled) {
+    return applyTestModeToClaimedSendJob(store, job);
+  }
+  const candidate = store.listCandidates().find((row) => row.id === job.candidateId);
+  const email = candidate?.email?.trim().toLowerCase();
+  if (!email || !isValidEmail(email) || job.to.trim().toLowerCase() === email) {
+    return job;
+  }
+  return store.upsertSendJob({
+    ...job,
+    to: email,
+    updatedAt: new Date().toISOString(),
+  });
 }
 
 export async function getSetupSessionStatus(force = false): Promise<SetupSessionStatus> {
@@ -1345,9 +1561,9 @@ async function validateSendCandidate(
     store.listCandidates(),
     targetEmail,
     {
-      dailySendCap: Number(process.env.DAILY_SEND_LIMIT ?? 30),
-      hourlySendCap: Number(process.env.HOURLY_SEND_LIMIT ?? 5),
-      domainDailySendCap: Number(process.env.DOMAIN_DAILY_SEND_LIMIT ?? 5),
+      dailySendCap: Number(process.env.DAILY_SEND_LIMIT ?? 200),
+      hourlySendCap: Number(process.env.HOURLY_SEND_LIMIT ?? 100),
+      domainDailySendCap: Number(process.env.DOMAIN_DAILY_SEND_LIMIT ?? 100),
     },
     pacingAt,
     options?.scheduledFor ? "calendar" : "rolling",
@@ -1364,7 +1580,7 @@ export function previewEmail(store: Store, candidateId: string) {
   }
   const rendered = renderEmail(candidate, content);
   const trackingBase = process.env.PUBLIC_TRACKING_BASE_URL?.replace(/\/$/, "") ?? "http://localhost:4000";
-  const trackingLink = store.getTrackingLink(candidateId) ?? createTrackingLink(store, candidateId);
+  const trackingLink = getOrCreateTrackingLink(store, candidateId);
   return {
     ...rendered,
     htmlBody: addPublicTracking(rendered.htmlBody, trackingBase, trackingLink.id),
@@ -1639,9 +1855,9 @@ export async function scheduleSends(
     { ...input, startAt: effectiveStartAt.toISOString(), intervalMinutes, jitterSeconds: 0 },
     {
       intakeCapPerDay: Number(process.env.DAILY_INTAKE_LIMIT ?? 300),
-      sendCapPerDay: Number(process.env.DAILY_SEND_LIMIT ?? 50),
-      perHourCap: Number(process.env.HOURLY_SEND_LIMIT ?? 20),
-      perDomainCap: Number(process.env.DOMAIN_DAILY_SEND_LIMIT ?? 20),
+      sendCapPerDay: Number(process.env.DAILY_SEND_LIMIT ?? 200),
+      perHourCap: Number(process.env.HOURLY_SEND_LIMIT ?? 100),
+      perDomainCap: Number(process.env.DOMAIN_DAILY_SEND_LIMIT ?? 100),
       startDate: effectiveStartAt,
       jitterSeconds: 0,
     },
@@ -2072,7 +2288,11 @@ export async function addPersonToScheduledBatch(
 }
 
 export function nextSendJob(store: Store) {
-  return claimNextSendJob(store);
+  const job = claimNextSendJob(store);
+  if (!job) {
+    return undefined;
+  }
+  return applyClaimTimeRecipient(store, job);
 }
 
 /** Soonest pending send — used by the worker to hibernate until warmup.
@@ -2278,6 +2498,19 @@ export async function resumePausedSendBatch(
   const jobs: SendJob[] = [];
   const nowIso = new Date().toISOString();
   for (const item of paused) {
+    // No-double-send guard: a paused row whose latest job already COMPLETED was
+    // actually sent — never resume it into a second live send. Reachable only via
+    // a scheduledInGmail:true completion (job `completed`, row left `scheduled`)
+    // that was then paused; resuming reuses that job and flips it back to pending.
+    // The worker hardcodes scheduledInGmail:false today, so this is a latent guard
+    // (a normal completion sets the row to `sent`, which pause never touches).
+    const latestJob = store
+      .listSendJobs()
+      .filter((job) => job.queueItemId === item.id)
+      .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))[0];
+    if (latestJob?.status === "completed") {
+      continue;
+    }
     const scheduledFor = scheduledForById.get(item.id) ?? startAt.toISOString();
     store.upsertSendQueueItem({
       ...item,
@@ -2404,6 +2637,19 @@ async function rescheduleQueuedSendLocked(
     [...jobsForItem].filter((entry) => entry.status === "failed").sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))[0];
   if (job?.status === "in_progress") {
     throw new Error("That send is already in progress — wait for it to finish.");
+  }
+  // No-double-send guard: a row whose latest job already COMPLETED was actually
+  // sent — never reschedule / Send-now it into a second live job. `job` only ever
+  // reuses a pending/in_progress/failed job, so a lone `completed` job leaves it
+  // undefined and would fall through to createSendJobFromQueueItem below. Reachable
+  // only via a scheduledInGmail:true completion (job `completed`, row left
+  // `scheduled`); a normal completion sets the row to `sent`, which is rejected
+  // above — so this is a latent guard while the worker reports scheduledInGmail:false.
+  if (!job) {
+    const latestJob = [...jobsForItem].sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))[0];
+    if (latestJob?.status === "completed") {
+      throw new Error("That send has already been sent.");
+    }
   }
 
   const now = new Date();
@@ -2610,6 +2856,46 @@ export async function updateScheduledCompanyBatch(
   return { jobsUpdated };
 }
 
+/**
+ * Re-render every still-pending send job for a single candidate from the current
+ * template + candidate fields. Used when a background pass (e.g. LinkedIn profile
+ * enrich) fills in a candidate's real name AFTER their send was already scheduled:
+ * the job's frozen subject/body still greets the placeholder ("Hi Recruiter,"),
+ * so the queued email would go out with the wrong greeting. This re-freezes the
+ * job from `previewEmail`, exactly like `updateScheduledCompanyBatch`, but without
+ * touching the candidate's own copy (no customSubject/customBody edit here).
+ *
+ * Best-effort: a job whose content can't be re-rendered (missing content/resume,
+ * candidate gone) is left untouched rather than throwing. Returns how many jobs
+ * were re-rendered. Caller is responsible for `store.save()`.
+ */
+export function rerenderPendingSendJobsForCandidate(store: Store, candidateId: string): number {
+  let jobsUpdated = 0;
+  for (const job of store.listSendJobs()) {
+    if (job.candidateId !== candidateId || job.status !== "pending") {
+      continue;
+    }
+    let rendered: ReturnType<typeof previewEmail>;
+    try {
+      rendered = applyTestModeRecipientOverride(previewEmail(store, candidateId), store);
+    } catch {
+      continue;
+    }
+    if (job.subject === rendered.subject && job.textBody === rendered.textBody && job.htmlBody === rendered.htmlBody) {
+      continue;
+    }
+    store.upsertSendJob({
+      ...job,
+      subject: rendered.subject,
+      textBody: rendered.textBody,
+      htmlBody: rendered.htmlBody,
+      updatedAt: new Date().toISOString(),
+    });
+    jobsUpdated += 1;
+  }
+  return jobsUpdated;
+}
+
 export async function retryFailedSends(
   store: Store,
   input: { queueItemIds: string[] },
@@ -2646,9 +2932,41 @@ export async function retryFailedSends(
     if (!isFailedRow && !isScheduledNeedingRetry) {
       continue;
     }
+    // No-double-send guard: a row whose latest job already COMPLETED was actually
+    // sent — never resurrect it into a second live send. Reachable only via a
+    // scheduledInGmail:true completion, which marks the job `completed` but flips
+    // its queue row back to `scheduled` (so it looks retry-eligible: scheduled +
+    // no *live* job). The worker hardcodes scheduledInGmail:false today, so this is
+    // latent, but the guard costs nothing in production (a normal completion sets
+    // the row to `sent`, which is never retry-eligible) and closes the class if
+    // native Gmail schedule-send is ever enabled.
+    if (previous?.status === "completed") {
+      continue;
+    }
     const candidate = store.listCandidates().find((person) => person.id === item.candidateId);
     if (!candidate?.email) {
       continue;
+    }
+    // No-double-send guard: if this row has no live job of its own but the
+    // candidate already holds a live (pending/in_progress) send on ANOTHER queue
+    // row, resurrecting/creating a job here would email the same recruiter twice.
+    // Reachable via a duplicate-candidate merge, which neutralizes the merged-away
+    // row to `failed` ("Superseded by duplicate-candidate merge") and re-points it
+    // onto the keeper — the keeper still has its own live job. Explicitly retrying
+    // that superseded row (it targets the same person) must not manufacture a
+    // second live send. Leave the row untouched so heal can't resurrect it either.
+    if (!hasActiveJob) {
+      const candidateHasOtherLiveJob = store
+        .listSendJobs()
+        .some(
+          (job) =>
+            job.candidateId === item.candidateId &&
+            job.queueItemId !== item.id &&
+            (job.status === "pending" || job.status === "in_progress"),
+        );
+      if (candidateHasOtherLiveJob) {
+        continue;
+      }
     }
     store.upsertSendQueueItem({
       ...item,
@@ -2733,12 +3051,26 @@ export function healOrphanedScheduledSendJobs(store: Store): { healed: number } 
     if (!candidate?.email) {
       continue;
     }
-    const payload = buildSendJobPayload(store, {
-      candidateId: item.candidateId,
-      mode: "schedule",
-      scheduledFor: item.scheduledFor,
-      queueItemId: item.id,
-    });
+    // buildSendJobPayload throws when outreach content / resume isn't configured
+    // yet (or the candidate email regressed). Never let one un-buildable row abort
+    // the whole heal — that would crash API startup and drop every OTHER orphan.
+    // Leave the row scheduled; the next heal picks it up once content is ready.
+    let payload;
+    try {
+      payload = buildSendJobPayload(store, {
+        candidateId: item.candidateId,
+        mode: "schedule",
+        scheduledFor: item.scheduledFor,
+        queueItemId: item.id,
+      });
+    } catch (error) {
+      audit("schedule.heal_orphan_skipped", {
+        queueItemId: item.id,
+        candidateId: item.candidateId,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+      continue;
+    }
     createSendJobFromQueueItem(store, item, payload);
     healed += 1;
   }
@@ -2966,12 +3298,44 @@ export async function assignCandidateToJob(store: Store, candidateId: string, jo
 export async function scheduleToday(store: Store) {
   const settings = {
     intakeCapPerDay: Number(process.env.DAILY_INTAKE_LIMIT ?? 300),
-    sendCapPerDay: Number(process.env.DAILY_SEND_LIMIT ?? 50),
-    perHourCap: Number(process.env.HOURLY_SEND_LIMIT ?? 5),
-    perDomainCap: Number(process.env.DOMAIN_DAILY_SEND_LIMIT ?? 5),
+    sendCapPerDay: Number(process.env.DAILY_SEND_LIMIT ?? 200),
+    perHourCap: Number(process.env.HOURLY_SEND_LIMIT ?? 100),
+    perDomainCap: Number(process.env.DOMAIN_DAILY_SEND_LIMIT ?? 100),
     startDate: new Date(),
   };
-  const result = scheduleCandidates(store.listActiveCandidates(), settings, store.listSuppressions());
+  // scheduleCandidates does NOT dedupe against the existing queue — it schedules
+  // every active candidate handed to it. Scheduling (unlike Send-now) never
+  // archives the candidate, so a person already scheduled via the explicit flow
+  // (or a prior scheduleToday) stays active and would be scheduled AGAIN here,
+  // producing a duplicate queue row + (post-heal) a second pending job → the same
+  // email sent twice. Exclude anyone who already holds an active queue row or an
+  // in-flight/pending job before scheduling.
+  const busyCandidateIds = new Set<string>();
+  for (const item of store.listSendQueue()) {
+    if (item.status === "scheduled" || item.status === "queued" || item.status === "paused") {
+      busyCandidateIds.add(item.candidateId);
+    }
+    // Already emailed: the backlog path never archives, so after a send COMPLETES
+    // (queue row → sent, job → completed) the person is still active with no active
+    // row/job. Without excluding them, the next "Schedule today's queue" run would
+    // re-schedule and send the SAME email a second time.
+    if (item.status === "sent") {
+      busyCandidateIds.add(item.candidateId);
+    }
+  }
+  // `completed` covers both queue-backed sends and bare send-now (which leaves a
+  // completed job with no queue row) — the job record persists after the send, so
+  // this is the reliable "already emailed, don't re-send" signal without over-
+  // blocking intentional re-contact (which goes through the explicit Schedule flow).
+  for (const job of store.listSendJobs()) {
+    if (job.status === "pending" || job.status === "in_progress" || job.status === "completed") {
+      busyCandidateIds.add(job.candidateId);
+    }
+  }
+  const eligibleCandidates = store
+    .listActiveCandidates()
+    .filter((candidate) => !busyCandidateIds.has(candidate.id));
+  const result = scheduleCandidates(eligibleCandidates, settings, store.listSuppressions());
 
   // scheduleCandidates only enforces hourly/daily/domain caps — it has no notion
   // of company blocks, so its naive Math.floor(slot / perHourCap) math can (and
@@ -3020,6 +3384,12 @@ export async function scheduleToday(store: Store) {
   for (const item of [...result.scheduledToday, ...result.rolledOver, ...result.suppressed]) {
     store.upsertSendQueueItem(item);
   }
+  // Unlike the explicit Schedule flow (scheduleSends), scheduleCandidates only
+  // writes queue rows — it never creates the SendJob the worker actually claims.
+  // Without this, every "Schedule today's queue" row is a ghost: it shows as
+  // "scheduled" but never sends until the next API restart runs startup heal.
+  // Create the backing pending jobs now via the same orphan-healer used at boot.
+  healOrphanedScheduledSendJobs(store);
   await store.save();
   return result;
 }
@@ -3215,7 +3585,20 @@ function dedupeCandidateInputs(inputs: Array<Partial<RecruiterCandidate>>): Arra
 }
 
 function candidateKey(candidate: Partial<RecruiterCandidate>): string {
-  return normalizeLinkedInUrl(candidate.linkedinUrl) || normalizeCandidateName(candidate.fullName) || randomUUID();
+  const url = normalizeLinkedInUrl(candidate.linkedinUrl);
+  if (url) {
+    return url;
+  }
+  const name = normalizeCandidateName(candidate.fullName);
+  if (!name) {
+    return randomUUID();
+  }
+  // Match findExistingCandidate's identity for URL-less people: name is only the
+  // same person when the company also matches. Keying on name alone silently
+  // dropped a genuinely distinct same-name recruiter at a different company from
+  // the same import (e.g. two "John Smith" rows pasted without LinkedIn URLs).
+  const company = normalizeWhitespace(candidate.company ?? "").toLowerCase();
+  return company ? `${name}|${company}` : name;
 }
 
 function normalizeLinkedInUrl(url: string | undefined): string {

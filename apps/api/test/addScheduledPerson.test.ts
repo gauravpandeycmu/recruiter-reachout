@@ -12,6 +12,7 @@ import {
   scheduleSends,
   setOutreachContent,
 } from "../src/services.js";
+import { globalSendGapMs } from "../src/sendJobs.js";
 import { Store } from "../src/store.js";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -65,6 +66,21 @@ describe("addPersonToScheduledBatch", () => {
     expect(guessFullNameFromLinkedInUrl("https://www.linkedin.com/in/annaliese-godderz")).toBe(
       "Annaliese Godderz",
     );
+    // Trailing member-id digits are stripped, not turned into a name token.
+    expect(guessFullNameFromLinkedInUrl("https://www.linkedin.com/in/jane-doe-847")).toBe("Jane Doe");
+  });
+
+  it("refuses to invent a name from an opaque LinkedIn member-id slug", () => {
+    // Search-card / truncated hrefs use LinkedIn's obfuscated member id
+    // (ACoAAB…), NOT a human slug. Deriving "Acoaab…" from it would greet a real
+    // recruiter by a garbage name — the guard must return undefined so the caller
+    // falls through to the email/provided name instead.
+    expect(
+      guessFullNameFromLinkedInUrl("https://www.linkedin.com/in/ACoAAB1x2Y3zQ9"),
+    ).toBeUndefined();
+    // Too-short / empty slugs carry no name either.
+    expect(guessFullNameFromLinkedInUrl("https://www.linkedin.com/in/jd")).toBeUndefined();
+    expect(guessFullNameFromLinkedInUrl(undefined)).toBeUndefined();
   });
 
   it("appends a known email after the last company slot using batch spacing", async () => {
@@ -105,12 +121,12 @@ describe("addPersonToScheduledBatch", () => {
     expect(result.candidate.email).toBe("new.hire@seatgeek.com");
     expect(result.candidate.linkedinUrl).toContain("linkedin.com/in/new-hire");
     expect(result.enrichQueued).toBe(true);
-    expect(result.intervalMinutes).toBe(4);
+    expect(result.intervalMinutes).toBe(globalSendGapMs() / 60_000);
 
     const upcoming = listUpcomingSends(store).filter((item) => item.company === "SeatGeek");
     expect(upcoming).toHaveLength(3);
     const times = upcoming.map((item) => new Date(item.scheduledFor).getTime()).sort((a, b) => a - b);
-    expect(times[2]! - times[1]!).toBe(4 * 60_000);
+    expect(times[2]! - times[1]!).toBe(globalSendGapMs());
 
     const enrichJobs = store.listLinkedInProfileEnrichJobs();
     expect(enrichJobs.some((job) => job.candidateId === result.candidate.id && job.status === "pending")).toBe(true);

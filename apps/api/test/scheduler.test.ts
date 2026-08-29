@@ -166,6 +166,26 @@ describe("assertWithinPacingCaps", () => {
     ).toThrow("Daily per-domain send limit reached for target.com");
   });
 
+  it("does not count a far-future scheduled send against the rolling hourly cap (regression)", () => {
+    // Regression: validateSendCandidate feeds pending scheduled jobs into the
+    // pacing check as synthetic send events dated at their (future) scheduledFor.
+    // The rolling hourly filter had no upper bound (`t >= now - 1h`), so a send
+    // scheduled days out counted toward the *current* clock hour — a Send-now
+    // was falsely blocked with "Hourly send limit reached" for as long as a
+    // future batch sat on the schedule. A send next week cannot share a 60-min
+    // window with one happening now, so it must not count.
+    const nextWeek = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+    const events = [sendEvent("future", nextWeek.toISOString())];
+    const tightHourly = { dailySendCap: 50, hourlySendCap: 1, domainDailySendCap: 50 };
+    expect(() => assertWithinPacingCaps(events, [], "new@example.com", tightHourly, now, "rolling")).not.toThrow();
+    // ...but a send within the next hour DOES still share the window and counts.
+    const soon = new Date(now.getTime() + 20 * 60 * 1000);
+    const soonEvents = [sendEvent("soon", soon.toISOString())];
+    expect(() => assertWithinPacingCaps(soonEvents, [], "new@example.com", tightHourly, now, "rolling")).toThrow(
+      "Hourly send limit reached",
+    );
+  });
+
   it("does not reset the daily cap at UTC midnight when it isn't local midnight (regression)", () => {
     // Regression: the old implementation compared UTC calendar-day strings, so
     // a send from earlier the same local day that happened to fall on the
