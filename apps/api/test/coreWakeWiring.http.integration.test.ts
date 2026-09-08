@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createCandidate, flushWake, startHttpApp, type HttpApp } from "./helpers/httpApp.js";
 import { __resetWorkerSupervisorForTests, __setWorkerSupervisorTestHooks } from "../src/workerSupervisor.js";
+import { updateWorkerStatus } from "../src/services.js";
 
 /**
  * Route side-effects the first HTTP suite wave left open:
@@ -47,6 +48,66 @@ describe("core wake + wiring HTTP integration", () => {
     });
     await flushWake();
     expect(spawns).toBeGreaterThan(0);
+  });
+
+  it("LinkedIn send interrupts an already-running worker's idle sleep", async () => {
+    app = await startHttpApp({ autoEnsureWorker: true });
+    __resetWorkerSupervisorForTests();
+    let wakeSignals = 0;
+    __setWorkerSupervisorTestHooks({
+      isProcessAlive: () => true,
+      isLockAlive: () => true,
+      signalWorker: (signal) => {
+        if (signal === "SIGUSR1") wakeSignals += 1;
+        return true;
+      },
+    });
+    updateWorkerStatus(app.store, {
+      phase: "idle",
+      message: "Browsers asleep.",
+      lastHeartbeatAt: new Date().toISOString(),
+    });
+    const person = app.store.upsertCandidate(
+      createCandidate({
+        fullName: "LinkedIn Wake",
+        linkedinUrl: "https://www.linkedin.com/in/linkedin-wake",
+      }),
+    );
+    app.store.updateCandidate(person.id, { linkedinMessageAvailability: "free" });
+    await app.store.save();
+
+    await app.fetchJson("/api/linkedin-message/send", {
+      method: "POST",
+      body: JSON.stringify({ candidateId: person.id, message: "Hi, concise LinkedIn message." }),
+      expectStatus: 201,
+    });
+    await flushWake();
+    expect(wakeSignals).toBe(1);
+  });
+
+  it("does not re-check LinkedIn after a confirmed send", async () => {
+    app = await startHttpApp({ autoEnsureWorker: false });
+    const person = app.store.upsertCandidate(
+      createCandidate({
+        fullName: "Already Messaged",
+        linkedinUrl: "https://www.linkedin.com/in/already-messaged",
+      }),
+    );
+    app.store.updateCandidate(person.id, {
+      linkedinMessageAvailability: "free",
+      linkedinMessageSentAt: "2026-09-02T12:00:00.000Z",
+      linkedinMessageStatusText: "Free message",
+    });
+    await app.store.save();
+
+    await app.fetchJson("/api/linkedin-message/check", {
+      method: "POST",
+      body: JSON.stringify({ candidateId: person.id }),
+      expectStatus: 409,
+    });
+    const unchanged = app.store.listCandidates().find((candidate) => candidate.id === person.id)!;
+    expect(unchanged.linkedinMessageAvailability).toBe("free");
+    expect(unchanged.linkedinMessageSentAt).toBe("2026-09-02T12:00:00.000Z");
   });
 
   it("schedule mode=schedule does not wake the worker", async () => {

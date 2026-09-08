@@ -34,6 +34,17 @@ export type BrowserActions = {
   closeDiscovery: boolean;
 };
 
+/** Keep a recently checked LinkedIn session open for the likely follow-up send,
+ * unless Gmail has real work due and should take resource priority. */
+export function shouldKeepLinkedInMessagingWarm(input: {
+  hasLiveLinkedInPage: boolean;
+  warmUntilMs: number;
+  nowMs: number;
+  needGmail: boolean;
+}): boolean {
+  return input.hasLiveLinkedInPage && !input.needGmail && input.nowMs < input.warmUntilMs;
+}
+
 /** Translate a hibernation decision + current browser state into open/close actions. */
 export function planBrowserActions(
   decision: Pick<HibernationDecision, "needGmail" | "needDiscovery">,
@@ -82,6 +93,7 @@ export function decideHibernation(input: {
   hasDiscoveryWork?: boolean;
   hasCaptureWork?: boolean;
   hasEnrichWork?: boolean;
+  hasLinkedInMessageWork?: boolean;
 }): HibernationDecision {
   const now = input.now ?? new Date();
   const warmupMs = input.warmupMs ?? 90_000;
@@ -127,7 +139,7 @@ export function decideHibernation(input: {
   // hasDiscovery from the API now stays true for in-flight claims too, so we do not
   // self-exit mid-lookup and orphan discoveryClaimedAt.
   const needDiscovery = Boolean(
-    !needGmail && (input.hasCaptureWork || input.hasEnrichWork || input.hasDiscoveryWork),
+    !needGmail && (input.hasCaptureWork || input.hasEnrichWork || input.hasLinkedInMessageWork || input.hasDiscoveryWork),
   );
 
   if (needDiscovery || needGmail) {

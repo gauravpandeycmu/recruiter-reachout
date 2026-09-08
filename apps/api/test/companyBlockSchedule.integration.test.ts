@@ -471,8 +471,8 @@ describe("company-block + claim + hibernate work integration", () => {
       .sort((a, b) => a.scheduledFor.localeCompare(b.scheduledFor));
     expect(notionAfter.map((item) => item.scheduledFor)).toEqual([
       tomorrow8.toISOString(),
-      new Date(tomorrow8.getTime() + 4 * 60_000).toISOString(),
-      new Date(tomorrow8.getTime() + 8 * 60_000).toISOString(),
+      new Date(tomorrow8.getTime() + 60_000).toISOString(),
+      new Date(tomorrow8.getTime() + 2 * 60_000).toISOString(),
     ]);
   });
 

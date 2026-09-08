@@ -2,6 +2,7 @@ import type {
   DiscoverySettings,
   LinkedInCaptureJob,
   LinkedInProfileEnrichJob,
+  LinkedInMessageTask,
   RecruiterCandidate,
   SendJob,
   WorkerPhase,
@@ -77,6 +78,7 @@ export interface WorkerApiClient {
       hasDiscovery: boolean;
       hasCapture: boolean;
       hasEnrich: boolean;
+      hasLinkedInMessage: boolean;
     }>;
   fetchSendJob(jobId: string): Promise<SendJob | undefined>;
   reportSendResult(jobId: string, result: { success: boolean; failureReason?: string; scheduledInGmail?: boolean }): Promise<SendJob>;
@@ -102,6 +104,19 @@ export interface WorkerApiClient {
       failureReason?: string;
     },
   ): Promise<LinkedInProfileEnrichJob>;
+  fetchNextLinkedInMessageTask(): Promise<LinkedInMessageTask | undefined>;
+  reportLinkedInMessageResult(
+    taskId: string,
+    result: {
+      success: boolean;
+      availability?: "free" | "inmail" | "unavailable";
+      inmailCredits?: number;
+      connectionDegree?: "1st" | "2nd" | "3rd" | "unknown";
+      statusText?: string;
+      sent?: boolean;
+      failureReason?: string;
+    },
+  ): Promise<RecruiterCandidate>;
 }
 
 /** Thin fetch wrapper against the local API, using the same endpoints the dashboard already uses. */
@@ -206,6 +221,7 @@ export function createApiClient(options: ApiClientOptions = {}): WorkerApiClient
       hasDiscovery: boolean;
       hasCapture: boolean;
       hasEnrich: boolean;
+      hasLinkedInMessage: boolean;
     }> {
       const response = await fetch(`${baseUrl}/api/automation/pending-work`);
       if (!response.ok) {
@@ -218,6 +234,7 @@ export function createApiClient(options: ApiClientOptions = {}): WorkerApiClient
         hasDiscovery: boolean;
         hasCapture: boolean;
         hasEnrich: boolean;
+        hasLinkedInMessage: boolean;
       };
     },
 
@@ -315,6 +332,27 @@ export function createApiClient(options: ApiClientOptions = {}): WorkerApiClient
         throw new Error(`Failed to report LinkedIn profile enrich result (${response.status}): ${await response.text()}`);
       }
       return (await response.json()) as LinkedInProfileEnrichJob;
+    },
+
+    async fetchNextLinkedInMessageTask(): Promise<LinkedInMessageTask | undefined> {
+      const response = await fetch(`${baseUrl}/api/automation/next-linkedin-message`);
+      if (response.status === 404) return undefined;
+      if (!response.ok) {
+        throw new Error(`Failed to fetch next LinkedIn message task (${response.status}): ${await response.text()}`);
+      }
+      return (await response.json()) as LinkedInMessageTask;
+    },
+
+    async reportLinkedInMessageResult(taskId, result): Promise<RecruiterCandidate> {
+      const response = await fetch(`${baseUrl}/api/automation/linkedin-message-result/${taskId}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(result),
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to report LinkedIn message result (${response.status}): ${await response.text()}`);
+      }
+      return (await response.json()) as RecruiterCandidate;
     },
   };
 }

@@ -901,6 +901,15 @@ export class Store {
     return this.listJson<LlmUsageEvent>("llm_usage_events");
   }
 
+  getJobPostingCache(url: string): { jobDescription: string; roleTitle?: string } | undefined {
+    const cached = this.getJson<{ jobDescription: string; roleTitle?: string; cachedAt: number }>("job_posting_cache", url);
+    return cached && Date.now() - cached.cachedAt < 24 * 60 * 60 * 1000 ? cached : undefined;
+  }
+
+  setJobPostingCache(url: string, posting: { jobDescription: string; roleTitle?: string }): void {
+    this.putJson("job_posting_cache", url, { ...posting, cachedAt: Date.now() });
+  }
+
   getWeatherCache(key: string): WeatherSnapshot | undefined {
     return this.getJson<WeatherSnapshot>("weather_cache", key);
   }
@@ -957,6 +966,7 @@ export class Store {
       "test_mode_settings",
       "analytics_goal_settings",
       "llm_usage_events",
+      "job_posting_cache",
       "weather_cache",
       "ip_location_cache",
     ]) {

@@ -14,6 +14,7 @@ const MAX_RAW_PAGE_TEXT_CHARS = 200_000;
 /** Text budget sent to the extraction model (long postings are compacted, not dropped). */
 const MAX_LLM_INPUT_CHARS = 48_000;
 const MAX_EXTRACTED_JD_CHARS = 6_000;
+const READER_FALLBACK_TIMEOUT_MS = 30_000;
 
 export interface ExtractedJobPosting {
   jobDescription: string;
@@ -27,6 +28,27 @@ const BROWSER_HEADERS = {
   "user-agent":
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
 } as const;
+
+/**
+ * Some public careers sites serve a Cloudflare challenge or an empty JS shell
+ * to server-side requests. The reader returns the rendered public text, so it
+ * is a narrow fallback rather than the default route for every job link.
+ */
+async function fetchRenderedJobPostingText(jobUrl: string): Promise<{ html: string; contentType: string }> {
+  const readerUrl = `https://r.jina.ai/http://${jobUrl}`;
+  const response = await fetchWithTimeout(readerUrl, {
+    method: "GET",
+    headers: { accept: "text/plain", "x-return-format": "markdown" },
+  }, READER_FALLBACK_TIMEOUT_MS);
+  if (!response.ok) {
+    throw new Error(`Job-page reader fallback failed (${response.status}).`);
+  }
+  const text = (await response.text()).trim();
+  if (text.length < 80 || /just a moment|verify you are human|cf-mitigated/i.test(text)) {
+    throw new Error("Job-page reader fallback did not return a usable posting.");
+  }
+  return { html: text.slice(0, MAX_HTML_BYTES), contentType: "text/plain" };
+}
 
 export function normalizeJobPostingUrl(value?: string): string | undefined {
   const raw = value?.trim();
@@ -532,9 +554,9 @@ export function tryExtractAppleJobFromHtml(html: string): ExtractedJobPosting | 
   }
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit = {}): Promise<Response> {
+async function fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs = FETCH_TIMEOUT_MS): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, { ...init, signal: controller.signal, redirect: "follow" });
   } catch (error) {
@@ -599,6 +621,16 @@ export async function fetchJobPostingHtml(jobUrl: string): Promise<{ html: strin
   });
 
   if (!response.ok) {
+    // 401/403/429 are typical for bot challenges and rate protection. A
+    // rendered reader can still access many otherwise-public job postings.
+    if ([401, 403, 429].includes(response.status)) {
+      try {
+        return await fetchRenderedJobPostingText(url);
+      } catch {
+        // Preserve the actionable direct-fetch failure below if the fallback
+        // is unavailable or the job truly is not public.
+      }
+    }
     throw new Error(
       `Could not load the job posting (${response.status}). Paste the description manually, or use a public careers URL.`,
     );
@@ -695,20 +727,31 @@ export function parseExtractedJobPosting(text: string): ExtractedJobPosting {
   };
 }
 
-async function callGemini(prompt: string, apiKey: string, model: string): Promise<string> {
+async function callGemini(prompt: string, apiKey: string, model: string, deadlineAt = Date.now() + 15_000): Promise<string> {
+  const startedAt = performance.now();
   let lastError: Error | undefined;
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-      {
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) {
+      throw new Error("Timed out extracting the job posting.");
+    }
+    let response: Response;
+    try {
+      response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
+        signal: AbortSignal.timeout(remainingMs),
         body: JSON.stringify({
           contents: [{ role: "user", parts: [{ text: prompt }] }],
           generationConfig: { temperature: 0.2, responseMimeType: "application/json" },
         }),
-      },
-    );
+      });
+    } catch (error) {
+      if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+        throw new Error("Timed out extracting the job posting.");
+      }
+      throw error;
+    }
 
     if (response.ok) {
       const payload = (await response.json()) as GeminiResponse;
@@ -718,6 +761,8 @@ async function callGemini(prompt: string, apiKey: string, model: string): Promis
         model,
         promptChars: prompt.length,
         responseChars: text.length,
+        durationMs: performance.now() - startedAt,
+        attempts: attempt + 1,
       });
       return text;
     }
@@ -749,6 +794,7 @@ export type GenerationProgressStep = "fetch" | "extract" | "voice" | "draft" | "
 export async function resolveJobDescriptionFromUrl(
   jobUrl: string,
   onProgress?: (step: GenerationProgressStep) => void,
+  generationDeadlineAt = Date.now() + 58_000,
 ): Promise<ExtractedJobPosting> {
   const url = normalizeJobPostingUrl(jobUrl);
   if (!url) {
@@ -785,10 +831,21 @@ export async function resolveJobDescriptionFromUrl(
   const apiKey = process.env.GEMINI_API_KEY?.trim();
   const model = process.env.GEMINI_MODEL?.trim() || DEFAULT_MODEL;
   const compactText = compactPageTextForExtraction(pageText);
+  // Complete, clearly sectioned postings can be passed directly to the writer.
+  // Keep the actual page facts; another model summarization adds no information.
+  const direct = tryHeuristicJobExtraction(pageText, url);
+  if (direct?.roleTitle && direct.jobDescription.length >= 300 &&
+      /responsibilities|what you.ll do/i.test(direct.jobDescription) &&
+      /qualifications|requirements|what you.ll bring/i.test(direct.jobDescription) &&
+      pageText.length <= MAX_EXTRACTED_JD_CHARS) {
+    return { ...direct, jobDescription: pageText };
+  }
+  // Page understanding must not consume the time needed to write the email.
+  const extractionDeadlineAt = Math.min(generationDeadlineAt - 35_000, Date.now() + 15_000);
 
   if (apiKey) {
     try {
-      const raw = await callGemini(buildJobExtractionPrompt(compactText, url), apiKey, model);
+      const raw = await callGemini(buildJobExtractionPrompt(compactText, url), apiKey, model, extractionDeadlineAt);
       return parseExtractedJobPosting(raw);
     } catch (error) {
       const fallback = tryHeuristicJobExtraction(pageText, url);

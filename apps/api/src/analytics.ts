@@ -126,8 +126,9 @@ export function buildAnalyticsSummary(
   const longestSendStreak = computeLongestStreak([...outreachDates], localDate, activityToday);
   const usage = buildUsageFun(store, events, candidates, longestStreak, tzOffsetMinutes);
   const hourly = buildScheduleClickHourly(store, tzOffsetMinutes);
-  // Running unique companies emailed — same source as companiesReached (send events).
-  const cumulativeSends = buildCumulativeCompaniesReached(events, candidateById, dailyWithSchedule, tzOffsetMinutes);
+  // Running email total, plotted daily. Sends before the visible 180-day window
+  // become the opening baseline so the final point still matches all-time sent.
+  const cumulativeSends = buildCumulativeEmailsSent(events, dailyWithSchedule, tzOffsetMinutes);
   // All-time distinct companies must come from ALL send events, not the last point
   // of the 180-day chart — otherwise a company last emailed >180 days ago silently
   // drops out of "companies reached" while its send still counts in allTime.sent.
@@ -427,31 +428,27 @@ function buildScheduleClickHourly(
   return counts.map((sent, hour) => ({ hour, sent }));
 }
 
-/**
- * Running unique companies emailed (send events) — same definition as companiesReached.
- * Re-scheduling the same company on later days does not inflate the climb.
- */
-function buildCumulativeCompaniesReached(
+/** Running sent-email total, with older sends carried into the chart baseline. */
+function buildCumulativeEmailsSent(
   events: TrackingEvent[],
-  candidateById: Map<string, RecruiterCandidate>,
   daily: AnalyticsSummary["daily"],
   tzOffsetMinutes: number,
 ): AnalyticsSummary["cumulativeSends"] {
-  const byDay = new Map(daily.map((day) => [day.date, new Set<string>()] as const));
+  const firstVisibleDate = daily[0]?.date;
+  const byDay = new Map<string, number>(daily.map((day) => [day.date, 0]));
+  let total = 0;
   for (const event of events) {
     if (event.type !== "send") continue;
     const date = toOffsetYmd(event.createdAt, tzOffsetMinutes);
-    const set = byDay.get(date);
-    if (!set) continue;
-    const company = resolveEventCompany(event, candidateById);
-    if (company) set.add(company.toLowerCase());
-  }
-  const seen = new Set<string>();
-  return daily.map((day) => {
-    for (const company of byDay.get(day.date) ?? []) {
-      seen.add(company);
+    if (firstVisibleDate && date < firstVisibleDate) {
+      total += 1;
+      continue;
     }
-    return { date: day.date, total: seen.size };
+    if (byDay.has(date)) byDay.set(date, (byDay.get(date) ?? 0) + 1);
+  }
+  return daily.map((day) => {
+    total += byDay.get(day.date) ?? 0;
+    return { date: day.date, total };
   });
 }
 

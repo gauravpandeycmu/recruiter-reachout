@@ -18,6 +18,7 @@ const sample = {
 describe("generateCompanyEmailContent", () => {
   const originalApiKey = process.env.GEMINI_API_KEY;
   const originalModel = process.env.GEMINI_MODEL;
+  const originalRetryBaseMs = process.env.GEMINI_RETRY_BASE_MS;
   const originalFetch = globalThis.fetch;
 
   beforeEach(() => {
@@ -27,6 +28,7 @@ describe("generateCompanyEmailContent", () => {
   afterEach(() => {
     process.env.GEMINI_API_KEY = originalApiKey;
     process.env.GEMINI_MODEL = originalModel;
+    process.env.GEMINI_RETRY_BASE_MS = originalRetryBaseMs;
     globalThis.fetch = originalFetch;
     vi.restoreAllMocks();
   });
@@ -79,9 +81,15 @@ describe("generateCompanyEmailContent", () => {
       model: "gemini-test-model",
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url] = fetchMock.mock.calls[0] as [string];
+    const [url, request] = fetchMock.mock.calls[0] as [string, { body: string }];
     expect(url).toContain("gemini-test-model");
     expect(url).toContain("key=test-key");
+    const requestBody = JSON.parse(request.body) as {
+      contents: Array<{ parts: Array<{ text?: string; inlineData?: unknown }> }>;
+    };
+    expect(requestBody.contents[0]?.parts).toHaveLength(1);
+    expect(requestBody.contents[0]?.parts[0]?.text).toContain("== SAMPLES");
+    expect(requestBody.contents[0]?.parts[0]?.inlineData).toBeUndefined();
   });
 
   it("throws a descriptive error when the Gemini API responds with a failure status", async () => {
@@ -90,6 +98,27 @@ describe("generateCompanyEmailContent", () => {
     await expect(generateCompanyEmailContent({ company: "Acme", samples: [sample] })).rejects.toThrow(
       "Gemini API failed (400)",
     );
+  });
+
+  it("retries a temporary Gemini capacity error", async () => {
+    process.env.GEMINI_RETRY_BASE_MS = "0";
+    const goodDraft = {
+      subject: "Quick note, {firstName}",
+      body: "Hi {firstName}, Acme looks great.",
+      linkedinSubject: "Acme role",
+      linkedinMessage:
+        "Hi {firstName},\n\nI am reaching out about Acme. I have attached my resume and would appreciate it if you could take a quick look at my application.",
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("high demand", { status: 503 }))
+      .mockResolvedValueOnce(geminiResponse(JSON.stringify(goodDraft)));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await generateCompanyEmailContent({ company: "Acme", samples: [sample] });
+
+    expect(result.subject).toBe("Quick note, {firstName}");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("runs a repair call when the draft breaks a rule, and returns the fixed version", async () => {
@@ -181,8 +210,8 @@ describe("buildPersonalizationPrompt", () => {
     expect(prompt).toContain("== JOB DESCRIPTION ==");
     expect(prompt).toContain("PyTorch");
     expect(prompt).toContain("Role applying for: ML Intern");
-    expect(prompt).toContain("HOW TO TAILOR");
-    expect(prompt).toContain("one distinctive requirement");
+    expect(prompt).toContain("JOB MATCH");
+    expect(prompt).toContain("central requirement");
     expect(prompt).toContain("deterministic checks");
     expect(prompt).toContain("without claiming database-internals experience");
   });
@@ -248,6 +277,25 @@ describe("buildPersonalizationPrompt", () => {
     expect(prompt).toContain("ignore each sample's target-company industry");
   });
 
+  it("prefers recently sent emails over setup samples for voice and structure", () => {
+    const prompt = buildPersonalizationPrompt({
+      company: "Whatnot",
+      samples: [sample],
+      approvedSamples: [
+        {
+          id: "sent-1",
+          subject: "AI Engineering - CMU Graduate Student",
+          body: "Hi {firstName},\n\nI saw your post and wanted to reach out.\n\nPlease consider my attached resume.",
+          createdAt: new Date().toISOString(),
+        },
+      ],
+    });
+    expect(prompt).toContain("Recent sent emails are the strongest signal");
+    expect(prompt).toContain("RECENT SENT EMAILS (preferred voice + structure");
+    expect(prompt).toContain("AI Engineering - CMU Graduate Student");
+    expect(prompt).toContain("at most two technical specifics");
+  });
+
   it("allows widely known company knowledge when no company fact is provided", () => {
     const prompt = buildPersonalizationPrompt({ company: "Apple", samples: [sample] });
     expect(prompt).not.toContain("mention only the company name");
@@ -282,11 +330,17 @@ describe("buildPersonalizationPrompt", () => {
     expect(prompt).toContain("2. WHO + PROOF");
     expect(prompt).toContain("3. ASK");
     expect(prompt).toContain("aim for 60-100 words (hard cap 110)");
+    expect(prompt).toContain("wanted to reach out");
+    expect(prompt).toContain("Do not reduce this to school alone");
+    expect(prompt).toContain("exactly one concrete PROFESSIONAL accomplishment");
+    expect(prompt).toContain("consider my application");
+    expect(prompt).toContain("Do not add a generic sales sentence");
+    expect(prompt).toContain("Naming the exact company and role in the hook is already valid personalization");
   });
 
   it("ends with one low-effort action and bans ceremonial or self-serving asks", () => {
     const prompt = buildPersonalizationPrompt({ company: "Acme", samples: [sample] });
-    expect(prompt).toContain("one specific, low-effort action");
+    expect(prompt).toContain("Exactly one ask at the end");
     expect(prompt).toContain("omit 'I look forward to hearing from you'");
     expect(prompt).toContain('"what roles are available"');
     expect(prompt).toContain("at most one relevant credential");
@@ -309,11 +363,11 @@ describe("buildPersonalizationPrompt", () => {
     expect(managerPrompt).toContain("one distinctive responsibility");
   });
 
-  it("allows one concrete-enthusiasm clause but bans generic mission-gushing", () => {
+  it("allows a concrete relevance clause but bans generic company-selling language", () => {
     const prompt = buildPersonalizationPrompt({ company: "Acme", samples: [sample] });
-    expect(prompt).toContain("Enthusiasm for the company helps");
-    expect(prompt).toContain("pointed at something concrete");
-    expect(prompt).toContain("never generic mission-gushing");
+    expect(prompt).toContain("company-specific relevance clause only when it is concrete");
+    expect(prompt).toContain("Do not add a generic sales sentence");
+    expect(prompt).toContain("excited/eager to bring this focus");
   });
 
   it("truncates very long job descriptions", () => {
@@ -322,7 +376,7 @@ describe("buildPersonalizationPrompt", () => {
       samples: [sample],
       jobDescription: "x".repeat(10000),
     });
-    expect(prompt.length).toBeLessThan(18000);
+    expect(prompt.length).toBeLessThan(20000);
   });
 
   it("preserves late qualification details when compacting a long job description", () => {
@@ -369,7 +423,10 @@ describe("buildPersonalizationPrompt", () => {
     expect(prompt).toContain("LLM-as-a-judge");
     expect(prompt).toContain("PRODUCTION / BACKEND EXPERIENCE (Epsilon)");
     expect(prompt).toContain("Reduced data-ingestion latency from 30 seconds to 5 seconds");
-    expect(prompt).toContain("scaled it beyond 7,000 RPS");
+    expect(prompt).not.toContain("scaled it beyond 7,000 RPS");
+    expect(prompt).toContain("Do not use academic, course, hackathon, or personal projects");
+    expect(prompt).toContain("most recent and differentiated engineering experience");
+    expect(prompt).toContain("For broad or general software engineering, keep T-Mobile as the default");
     expect(prompt).toContain("LinkedIn message rules");
     expect(prompt).toContain('"linkedinSubject": string');
     expect(prompt).toContain('"linkedinMessage": string');
@@ -445,6 +502,89 @@ describe("validateGeneratedEmail", () => {
       samples,
     );
     expect(issues.join(" ")).toContain("templated");
+  });
+
+  it("flags generic bring-this-focus company mirroring", () => {
+    const issues = validateGeneratedEmail(
+      {
+        subject: "2027 New Grad Software Engineer",
+        body: [
+          "Hi {firstName},",
+          "",
+          "I saw your post about the new grad role and wanted to reach out.",
+          "",
+          "I am a graduate student at Carnegie Mellon University. At Epsilon, I reduced data pipeline latency from 30 to 5 seconds. I am excited to bring this focus on performance and scalability to the live-stream experience at Whatnot.",
+          "",
+          "I've attached my resume and would appreciate it if you could consider my application.",
+        ].join("\n"),
+      },
+      samples,
+    );
+    expect(issues.join(" ")).toMatch(/excited to bring this|templated/i);
+  });
+
+  it("flags manufactured standalone company-interest sentences", () => {
+    const issues = validateGeneratedEmail(
+      {
+        subject: "Software Engineer at Whatnot",
+        body:
+          "Hi {firstName},\n\nI saw the Software Engineer role at Whatnot and wanted to reach out. I built an agent validation framework using Kubernetes and OpenAI APIs. I am particularly interested in the real-time infrastructure powering Whatnot's marketplace. Please consider my application.",
+      },
+      samples,
+    );
+    expect(issues.join(" ")).toMatch(/particularly interested in|templated/i);
+  });
+
+  it("flags overloaded proof and missing company personalization for a broad role", () => {
+    const issues = validateGeneratedEmail(
+      {
+        subject: "Software Engineer, 2027 New Grad",
+        body: [
+          "Hi {firstName},",
+          "",
+          "I saw your post about the new grad roles and wanted to reach out.",
+          "",
+          "I am a CMU graduate student with three years at Epsilon and a recent T-Mobile internship. I built an autonomous voice-agent validation framework using OpenAI Realtime APIs and integrated it into GitLab CI/CD with ephemeral Kubernetes environments to run concurrent scenarios.",
+          "",
+          "I've attached my resume and would appreciate it if you could consider my application.",
+        ].join("\n"),
+      },
+      samples,
+      {
+        company: "Whatnot",
+        roleTitle: "Software Engineer, 2027 New Grad",
+        jobDescription: "Build and operate reliable services for a high-trust live marketplace.",
+        linkedinPost: "Our new grad software engineering roles are live.",
+      },
+    );
+    expect(issues.join(" ")).toMatch(/Mention Whatnot naturally/i);
+    expect(issues.join(" ")).toMatch(/proof sentence is overloaded/i);
+  });
+
+  it("rejects a standalone project when verified professional experience is available", () => {
+    const issues = validateGeneratedEmail(
+      {
+        subject: "SDE II, AWS Networking Applications",
+        body: [
+          "Hi {firstName},",
+          "",
+          "I saw your post about the SDE II opening for AWS Networking Applications at Amazon and wanted to reach out regarding req 10387371.",
+          "",
+          "I am a graduate student at Carnegie Mellon with 3 years of experience at Epsilon. I built a Go/gRPC ranking API and migrated it to EKS with Terraform, scaling the system beyond 7,000 RPS.",
+          "",
+          "I have attached my resume and would appreciate it if you could consider my application. Thank you for your time.",
+        ].join("\n"),
+      },
+      samples,
+      {
+        company: "Amazon",
+        roleTitle: "Software Development Engineer II, AWS Networking Applications (SIDR)",
+        jobDescription:
+          "Design network control plane software and build large-scale distributed systems using C, C++, Java, or Python.",
+        linkedinPost: "We're hiring an SDE II for AWS Networking Applications (SIDR).",
+      },
+    );
+    expect(issues.join(" ")).toMatch(/standalone academic\/personal project/i);
   });
 
   it("flags generic aligns-well language", () => {
@@ -572,7 +712,7 @@ describe("validateGeneratedEmail", () => {
         body: [
           "Hi {firstName},",
           "",
-          "I saw your post about engineers who have changed how they build with AI and wanted to reach out about the Software Engineer (AI-Native), Database Engineering role.",
+          "I saw your post about engineers who have changed how they build with AI and wanted to reach out about Snowflake's Software Engineer (AI-Native), Database Engineering role.",
           "",
           "At T-Mobile, I built an autonomous validation framework with deterministic checks and LLM-as-a-judge evaluation, then integrated it into GitLab CI/CD on Kubernetes. That work directly matches the role's focus on AI-assisted development, automated verification, and production reliability.",
         ].join("\n"),

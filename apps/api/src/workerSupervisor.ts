@@ -25,6 +25,7 @@ let startingUntil = 0;
 export type WorkerSupervisorHooks = {
   isProcessAlive?: (pid: number) => boolean;
   isLockAlive?: () => boolean;
+  signalWorker?: (signal: NodeJS.Signals) => boolean;
   spawnWorker?: (args: { cwd: string; tsx: string; entry: string }) => { pid?: number } | ChildProcess;
 };
 
@@ -105,6 +106,9 @@ function workerLogPath(): string {
 }
 
 function signalRunningWorker(signal: NodeJS.Signals = "SIGUSR1"): boolean {
+  if (testHooks.signalWorker) {
+    return testHooks.signalWorker(signal);
+  }
   const pid = managedChild?.pid;
   if (pid && isPidAlive(pid)) {
     try {
@@ -307,7 +311,7 @@ export function wakeWorkerForDiscovery(store: Store): void {
  */
 export function shouldWorkerBeRunning(store: Store, now: Date = new Date()): boolean {
   const pending = getPendingWorkerWork(store, now);
-  if (pending.hasInProgressSend || pending.hasDiscovery || pending.hasCapture || pending.hasEnrich) {
+  if (pending.hasInProgressSend || pending.hasDiscovery || pending.hasCapture || pending.hasEnrich || pending.hasLinkedInMessage) {
     return true;
   }
   const nowMs = now.getTime();

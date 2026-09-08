@@ -3,8 +3,41 @@ import {
   decideHibernation,
   msUntilWake,
   planBrowserActions,
+  shouldKeepLinkedInMessagingWarm,
   shouldSelfExit,
 } from "../src/workerHibernate.js";
+
+describe("LinkedIn message warm window", () => {
+  it("keeps either live LinkedIn browser path warm before expiry", () => {
+    expect(
+      shouldKeepLinkedInMessagingWarm({
+        hasLiveLinkedInPage: true,
+        warmUntilMs: 20_000,
+        nowMs: 10_000,
+        needGmail: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("closes at expiry and yields immediately when Gmail is needed", () => {
+    expect(
+      shouldKeepLinkedInMessagingWarm({
+        hasLiveLinkedInPage: true,
+        warmUntilMs: 10_000,
+        nowMs: 10_000,
+        needGmail: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldKeepLinkedInMessagingWarm({
+        hasLiveLinkedInPage: true,
+        warmUntilMs: 20_000,
+        nowMs: 10_000,
+        needGmail: true,
+      }),
+    ).toBe(false);
+  });
+});
 
 describe("msUntilWake", () => {
   const now = new Date("2030-06-01T12:00:00.000Z");

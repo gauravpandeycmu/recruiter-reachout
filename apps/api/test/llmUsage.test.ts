@@ -40,6 +40,8 @@ describe("llmUsage", () => {
       model: "gemini-test",
       promptChars: -4.2,
       responseChars: 12.7,
+      durationMs: 123.6,
+      attempts: 2,
       company: "  Acme  ",
     });
 
@@ -50,6 +52,8 @@ describe("llmUsage", () => {
       model: "gemini-test",
       promptChars: 0,
       responseChars: 13,
+      durationMs: 124,
+      attempts: 2,
       company: "Acme",
     });
     expect(events[0]?.id).toBeTruthy();

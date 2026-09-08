@@ -17,7 +17,7 @@ export function appDataPollKey(data: AppData): string {
     // email presence. Omitting them let a poll fetch the enriched data but then
     // discard it (unchanged key → setState keeps prev), so the directory kept
     // showing the placeholder name / blank avatar until an unrelated change.
-    cSig += `|${c.id}:${c.status}:${c.email ? "1" : "0"}:${c.fullName ?? ""}:${c.profilePhotoUrl ? "1" : "0"}:${c.lastError ?? ""}`;
+    cSig += `|${c.id}:${c.status}:${c.email ? "1" : "0"}:${c.fullName ?? ""}:${c.profilePhotoUrl ? "1" : "0"}:${c.lastError ?? ""}:${c.linkedinMessageAvailability ?? ""}:${c.linkedinInmailCredits ?? ""}:${c.linkedinMessageStatusText ?? ""}:${c.linkedinMessageSentAt ?? ""}`;
   }
   const upcoming = data.upcomingSends ?? [];
   let uSig = `${upcoming.length}`;
@@ -28,12 +28,20 @@ export function appDataPollKey(data: AppData): string {
     // the Scheduled tab reflects a post-enrich name/avatar update too.
     uSig += `|${u.queueItemId}:${u.scheduledFor}:${u.jobMode ?? ""}:${u.jobStatus ?? ""}:${u.failureReason ?? ""}:${u.fullName ?? ""}:${u.profilePhotoUrl ? "1" : "0"}`;
   }
+  const companyContentSig = [...(data.companyContent ?? [])]
+    .sort((left, right) => left.company.localeCompare(right.company))
+    .map(
+      (content) =>
+        `${content.company}:${content.updatedAt}:${content.subject}:${content.linkedinSubject ?? ""}:${content.linkedinMessage ?? ""}`,
+    )
+    .join("|");
   const events = data.events;
   const lastEvent = events[events.length - 1];
   return [
     cSig,
     qSig,
     uSig,
+    companyContentSig,
     data.gmailAccount?.email ?? "",
     events.length,
     lastEvent ? `${lastEvent.id ?? ""}:${lastEvent.type}:${lastEvent.createdAt}` : "",

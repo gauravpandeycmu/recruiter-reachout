@@ -223,6 +223,39 @@ describe("page text compaction and heuristic fallback", () => {
     expect(extracted.roleTitle).toContain("Software Development Engineer");
     expect(extracted.jobDescription).toMatch(/scalable services/i);
   });
+
+  it("uses the rendered-page fallback after a careers site blocks the direct request", async () => {
+    const url = "https://careers.example.com/roles/29bad846-de60-4be7-a222-69b97e044930";
+    vi.stubEnv("GEMINI_API_KEY", "test-key");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const requestUrl = String(input);
+      if (requestUrl === url) {
+        return new Response("blocked", { status: 403 });
+      }
+      if (requestUrl.startsWith("https://r.jina.ai/http://https://careers.example.com/")) {
+        return new Response(
+          "Title: Software Engineer, 2027 New Grad\n\nLocation: New York\n\n## Role\nBuild production software with a fast-moving engineering team.\n\n## You\nStrong programming fundamentals and enthusiasm for scalable systems.",
+          { status: 200, headers: { "content-type": "text/plain" } },
+        );
+      }
+      if (requestUrl.includes("generativelanguage.googleapis.com")) {
+        return new Response(
+          JSON.stringify({
+            candidates: [{ content: { parts: [{ text: JSON.stringify({ roleTitle: "Software Engineer, 2027 New Grad", jobDescription: "Software Engineer, 2027 New Grad. Build production software and scalable systems with a fast-moving engineering team." }) }] } }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${requestUrl}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const extracted = await resolveJobDescriptionFromUrl(url);
+
+    expect(extracted.roleTitle).toBe("Software Engineer, 2027 New Grad");
+    expect(extracted.jobDescription).toContain("scalable systems");
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).startsWith("https://r.jina.ai/http://"))).toBe(true);
+  });
 });
 
 describe("schema.org JobPosting JSON-LD", () => {

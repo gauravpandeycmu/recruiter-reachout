@@ -157,7 +157,7 @@ describe("POST /api/send-queue/reschedule-company HTTP integration (full API)", 
       .filter((item) => people.some((person) => person.id === item.candidateId))
       .sort((a, b) => a.scheduledFor.localeCompare(b.scheduledFor));
     expect(after[0]!.scheduledFor).toBe(tomorrow8.toISOString());
-    expect(after[1]!.scheduledFor).toBe(new Date(tomorrow8.getTime() + 4 * 60_000).toISOString());
-    expect(after[2]!.scheduledFor).toBe(new Date(tomorrow8.getTime() + 8 * 60_000).toISOString());
+    expect(after[1]!.scheduledFor).toBe(new Date(tomorrow8.getTime() + 60_000).toISOString());
+    expect(after[2]!.scheduledFor).toBe(new Date(tomorrow8.getTime() + 2 * 60_000).toISOString());
   });
 });

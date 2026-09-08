@@ -19,6 +19,11 @@ import {
   createLinkedInProfileEnrichJob,
 } from "./linkedinProfileEnrichJobs.js";
 import {
+  claimNextLinkedInMessageTask,
+  completeLinkedInMessageTask,
+  queueLinkedInMessageTask,
+} from "./linkedinMessaging.js";
+import {
   addEmailSample,
   bulkCreateCandidates,
   createCampaign,
@@ -620,6 +625,90 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
       }
       await store.save();
       sendJson(res, 200, job);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/linkedin-message/check") {
+      const body = (await readJsonAudited(req, "http.body", { method: req.method, path: url.pathname })) as { candidateId?: string };
+      const candidate = store.listCandidates().find((row) => row.id === body.candidateId?.trim());
+      if (!candidate) {
+        sendJson(res, 404, { error: "Candidate not found." });
+        return;
+      }
+      if (candidate.linkedinMessageSentAt) {
+        sendJson(res, 409, { error: "A LinkedIn message has already been sent to this person." });
+        return;
+      }
+      const task = queueLinkedInMessageTask(store, { candidateId: candidate.id, action: "check" });
+      await store.save();
+      // A live worker may be inside its battery-saving idle sleep. Interrupt it
+      // immediately so Check does not wait for the next one-minute poll.
+      maybeWakeNow();
+      sendJson(res, 201, task);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/linkedin-message/send") {
+      const body = (await readJsonAudited(req, "http.body", { method: req.method, path: url.pathname })) as {
+        candidateId?: string;
+        subject?: string;
+        message?: string;
+        resumeId?: string;
+      };
+      const candidate = store.listCandidates().find((row) => row.id === body.candidateId?.trim());
+      if (!candidate) {
+        sendJson(res, 404, { error: "Candidate not found." });
+        return;
+      }
+      if (candidate.linkedinMessageSentAt) {
+        sendJson(res, 409, { error: "A LinkedIn message has already been sent to this person." });
+        return;
+      }
+      const canSendFree = candidate.linkedinMessageAvailability === "free";
+      const canSendInmail =
+        candidate.linkedinMessageAvailability === "inmail" && (candidate.linkedinInmailCredits ?? 0) > 0;
+      if (!canSendFree && !canSendInmail) {
+        sendJson(res, 409, { error: "Check LinkedIn messaging first. Sending is available only for a free message or when an InMail credit is available." });
+        return;
+      }
+      const resume = resolveSelectedResume(store.getContent(), body.resumeId?.trim());
+      const task = queueLinkedInMessageTask(store, {
+        candidateId: candidate.id,
+        action: "send",
+        subject: body.subject,
+        message: body.message,
+        resumePath: resume?.path,
+        resumeFileName: resume?.fileName,
+      });
+      await store.save();
+      // Sending is an explicit user action: wake an existing sleeping worker
+      // immediately, not merely ensure that its process exists.
+      maybeWakeNow();
+      sendJson(res, 201, task);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/automation/next-linkedin-message") {
+      const task = claimNextLinkedInMessageTask(store);
+      if (!task) {
+        sendJson(res, 404, { error: "No pending LinkedIn message tasks." });
+        return;
+      }
+      await store.save();
+      sendJson(res, 200, task);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname.match(/^\/api\/automation\/linkedin-message-result\/[^/]+$/)) {
+      const taskId = url.pathname.split("/")[4] ?? "";
+      const body = (await readJsonAudited(req, "http.body", { method: req.method, path: url.pathname })) as Parameters<typeof completeLinkedInMessageTask>[2];
+      const candidate = completeLinkedInMessageTask(store, taskId, body);
+      if (!candidate) {
+        sendJson(res, 404, { error: "LinkedIn message task not found." });
+        return;
+      }
+      await store.save();
+      sendJson(res, 200, candidate);
       return;
     }
 

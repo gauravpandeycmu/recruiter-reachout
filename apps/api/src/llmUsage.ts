@@ -24,6 +24,8 @@ export function recordLlmUsage(input: {
   model?: string;
   promptChars: number;
   responseChars: number;
+  durationMs?: number;
+  attempts?: number;
   company?: string;
 }): void {
   if (!listener) {
@@ -35,6 +37,9 @@ export function recordLlmUsage(input: {
     model: input.model,
     promptChars: Math.max(0, Math.round(input.promptChars)),
     responseChars: Math.max(0, Math.round(input.responseChars)),
+    durationMs:
+      input.durationMs === undefined ? undefined : Math.max(0, Math.round(input.durationMs)),
+    attempts: input.attempts === undefined ? undefined : Math.max(1, Math.round(input.attempts)),
     company: input.company?.trim() || undefined,
     createdAt: new Date().toISOString(),
   });

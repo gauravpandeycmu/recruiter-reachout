@@ -50,6 +50,13 @@ export interface RecruiterCandidate {
   customSubject?: string;
   /** Optional per-recipient body override from the preview editor (already personalized, no footer). */
   customBody?: string;
+  /** Latest LinkedIn compose availability discovered for this profile. */
+  linkedinMessageAvailability?: "checking" | "free" | "inmail" | "unavailable" | "error";
+  linkedinInmailCredits?: number;
+  linkedinConnectionDegree?: "1st" | "2nd" | "3rd" | "unknown";
+  linkedinMessageStatusText?: string;
+  linkedinMessageCheckedAt?: string;
+  linkedinMessageSentAt?: string;
 }
 
 export interface EmailGuess {
@@ -416,6 +423,10 @@ export interface LlmUsageEvent {
   model?: string;
   promptChars: number;
   responseChars: number;
+  /** End-to-end provider latency for this individual extraction/draft/repair call. */
+  durationMs?: number;
+  /** Number of HTTP attempts used by this call, including the successful attempt. */
+  attempts?: number;
   company?: string;
   createdAt: string;
 }
@@ -523,7 +534,7 @@ export interface AnalyticsSummary {
   };
   providerUsage: Array<{ provider: string; monthKey: string; count: number }>;
   daily: AnalyticsDayBucket[];
-  /** Running unique companies emailed (send events) across the daily window. */
+  /** Running sent-email total by day; includes the pre-window all-time baseline. */
   cumulativeSends: Array<{ date: string; total: number }>;
   hourly: AnalyticsHourBucket[];
   queueBreakdown: AnalyticsQueueBreakdown;
@@ -624,4 +635,19 @@ export interface LinkedInProfileEnrichJob {
   failureReason?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export type LinkedInMessageTaskAction = "check" | "prepare" | "send";
+
+/** Ephemeral worker task used to inspect or send through LinkedIn's compose UI. */
+export interface LinkedInMessageTask {
+  id: string;
+  candidateId: string;
+  linkedinUrl: string;
+  action: LinkedInMessageTaskAction;
+  subject?: string;
+  message?: string;
+  resumePath?: string;
+  resumeFileName?: string;
+  createdAt: string;
 }

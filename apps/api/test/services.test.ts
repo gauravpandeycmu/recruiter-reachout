@@ -13,6 +13,7 @@ import {
   createCandidate,
   createEvent,
   generateContentForCompany,
+  listRecentApprovedEmailSamples,
   listEmailSamples,
   MAX_DISCOVERY_ATTEMPTS,
   hasEligibleDiscoveryCandidate,
@@ -39,6 +40,55 @@ import {
 import { Store } from "../src/store.js";
 
 describe("api services", () => {
+  it("uses recent completed sends as deduplicated style samples without names or footers", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-sent-style-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+    const base = {
+      candidateId: "candidate-1",
+      mode: "send_now" as const,
+      scheduledFor: "2026-08-31T12:00:00.000Z",
+      status: "completed" as const,
+      to: "person@example.com",
+      subject: "Software Engineer role",
+      htmlBody: "<p>email</p>",
+      resumePath: "/tmp/resume.pdf",
+      resumeFileName: "resume.pdf",
+      resumeMimeType: "application/pdf",
+      createdAt: "2026-08-31T12:00:00.000Z",
+    };
+    store.upsertSendJob({
+      ...base,
+      id: "sent-1",
+      textBody: "Hi Alex,\n\nI saw your post and wanted to reach out.\n\nBest,\nGaurav\nCMU",
+      updatedAt: "2026-08-31T12:01:00.000Z",
+    });
+    store.upsertSendJob({
+      ...base,
+      id: "sent-2",
+      textBody: "Hi Priya,\n\nI saw your post and wanted to reach out.\n\nBest,\nGaurav\nCMU",
+      updatedAt: "2026-08-31T12:02:00.000Z",
+    });
+    store.upsertSendJob({
+      ...base,
+      id: "failed-1",
+      status: "failed",
+      textBody: "Hi Sam,\n\nThis was never sent.",
+      updatedAt: "2026-08-31T12:03:00.000Z",
+    });
+
+    expect(listRecentApprovedEmailSamples(store)).toEqual([
+      expect.objectContaining({
+        id: "sent-sent-2",
+        subject: "Software Engineer role",
+        body: "Hi {firstName},\n\nI saw your post and wanted to reach out.",
+      }),
+    ]);
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("stores candidates and creates validated draft payloads", async () => {
     const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
     const store = new Store(join(directory, "store.json"));
@@ -494,6 +544,7 @@ describe("email samples and per-company personalization", () => {
 
     const content = await generateContentForCompany(store, "Acme Corp", {
       jobUrl: "https://jobs.acme.com/778812",
+      roleTitle: "Stale role from the previous posting",
     });
 
     expect(content.generationContext?.jobDescription).toContain("778812");
@@ -501,6 +552,12 @@ describe("email samples and per-company personalization", () => {
     expect(content.generationContext?.jobUrl).toContain("jobs.acme.com/778812");
     expect(content.body).toContain("778812");
     expect(fetchMock).toHaveBeenCalled();
+
+    await generateContentForCompany(store, "Acme Corp", {
+      jobUrl: "https://jobs.acme.com/778812",
+    });
+    const pageDownloads = fetchMock.mock.calls.filter(([input]) => String(input).includes("jobs.acme.com"));
+    expect(pageDownloads).toHaveLength(1);
 
     store.close();
     await rm(directory, { recursive: true, force: true });

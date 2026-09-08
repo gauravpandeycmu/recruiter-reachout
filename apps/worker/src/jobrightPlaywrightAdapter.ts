@@ -6,7 +6,7 @@ import {
   pickJobrightRevealEmail,
 } from "./jobrightContactResult.js";
 
-const LINKEDIN_INPUT_PLACEHOLDER = /Paste any LinkedIn profile URL/i;
+const LINKEDIN_INPUT_PLACEHOLDER = /(?:paste|enter|add).*(?:linkedin|profile).*(?:url|link)?|linkedin.*(?:url|profile)/i;
 const CONNECT_NOW_TEXT = /Connect Now/i;
 const CANCEL_TEXT = /^Cancel$/i;
 const CONNECT_VIA_EMAIL_TEXT = /Connect Via Email/i;
@@ -16,6 +16,22 @@ function connectViaEmailModal(page: Page) {
   const ant = page.locator(".ant-modal").filter({ hasText: CONNECT_VIA_EMAIL_TEXT });
   const dialog = page.getByRole("dialog").filter({ hasText: CONNECT_VIA_EMAIL_TEXT });
   return ant.or(dialog).last();
+}
+
+function linkedInInputCandidates(page: Page): Locator {
+  // Jobright has changed this placeholder several times. Keep the semantic
+  // match first, then support the current aria-label/input variants.
+  return page.locator(
+    'input[placeholder*="linkedin" i], input[placeholder*="profile" i], input[aria-label*="linkedin" i], input[aria-label*="profile" i], input[name*="linkedin" i], input[name*="profile" i]',
+  );
+}
+
+async function assertJobrightSession(page: Page): Promise<void> {
+  const signIn = page.getByRole("button", { name: /^sign in$/i }).first();
+  const joinNow = page.getByRole("button", { name: /^join now$/i }).first();
+  if ((await signIn.isVisible().catch(() => false)) || (await joinNow.isVisible().catch(() => false))) {
+    throw new Error("Jobright session expired. Open Jobright in Setup and sign in, then retry the lookup.");
+  }
 }
 
 async function readEmailFromRevealModal(modal: Locator): Promise<string | undefined> {
@@ -143,8 +159,9 @@ export function createJobrightPlaywrightAdapter(
 
   async function ensureLinkedInInput() {
     await dismissJobrightBlockingOverlays(page);
+    await assertJobrightSession(page);
     await sleep(300);
-    let input = page.getByPlaceholder(LINKEDIN_INPUT_PLACEHOLDER);
+    let input = page.getByPlaceholder(LINKEDIN_INPUT_PLACEHOLDER).or(linkedInInputCandidates(page)).first();
     if ((await input.count()) === 0 || !(await input.first().isVisible().catch(() => false))) {
       if (jobUrl) {
         await page.goto(jobUrl, { waitUntil: "domcontentloaded", timeout: 45_000 }).catch(() => undefined);
@@ -153,7 +170,8 @@ export function createJobrightPlaywrightAdapter(
       }
       await sleep(800);
       await dismissJobrightBlockingOverlays(page);
-      input = page.getByPlaceholder(LINKEDIN_INPUT_PLACEHOLDER);
+      await assertJobrightSession(page);
+      input = page.getByPlaceholder(LINKEDIN_INPUT_PLACEHOLDER).or(linkedInInputCandidates(page)).first();
       await input.first().waitFor({ state: "attached", timeout: 25_000 });
       await input.first().scrollIntoViewIfNeeded().catch(() => undefined);
       await input.first().waitFor({ state: "visible", timeout: 15_000 });

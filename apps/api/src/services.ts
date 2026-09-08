@@ -39,8 +39,9 @@ import { assertCanSend } from "./sendGate.js";
 import { withKeyLock } from "./asyncLock.js";
 import type { Store } from "./store.js";
 import { generateCompanyEmailContent, type GenerationProgressStep } from "./personalization.js";
-import { resolveJobDescriptionFromUrl } from "./jobPosting.js";
+import { normalizeJobPostingUrl, resolveJobDescriptionFromUrl } from "./jobPosting.js";
 import { createLinkedInProfileEnrichJob } from "./linkedinProfileEnrichJobs.js";
+import { hasPendingLinkedInMessageTask } from "./linkedinMessaging.js";
 import { extractJobIds, resolveCandidateCompany } from "@recruiter/shared";
 
 export type { GenerationProgressStep };
@@ -62,6 +63,7 @@ import {
 export { WORKER_OFFLINE_AFTER_MS };
 import {
   companiesOverlapWithinGap,
+  DEFAULT_SEND_INTERVAL_MINUTES,
   defaultGapMinutes,
   packNewCompanyBlock,
   companyBlocksNeedCompact,
@@ -235,11 +237,25 @@ function saveOneBulkCandidate(store: Store, candidate: Partial<RecruiterCandidat
       };
     }
     if (hasContactHistory(store, existing.id)) {
+      const reactivated = store.updateCandidate(existing.id, {
+        ...candidate,
+        linkedinUrl: preferLinkedInUrl(existing.linkedinUrl, candidate.linkedinUrl),
+        email: existing.email ?? candidate.email,
+        emailCandidates: existing.emailCandidates?.length ? existing.emailCandidates : candidate.emailCandidates,
+        profilePhotoUrl: candidate.profilePhotoUrl || existing.profilePhotoUrl,
+        isActive: true,
+        archivedAt: undefined,
+        // Preserve the sent/contact history and known address, but let this
+        // person participate in a fresh Send batch when explicitly re-added.
+        status: existing.email ? existing.status : "new",
+        ...(!existing.email ? { discoveryAttempts: 0, lastError: undefined } : {}),
+      });
       return {
         key: candidateKey(candidate),
         candidate,
         status: "previously_contacted" as const,
         existingCandidateId: withPhoto.id,
+        savedCandidateId: reactivated?.id,
         ...knownFields,
       };
     }
@@ -469,17 +485,51 @@ export interface GenerateContentOptions {
   passionate?: boolean;
 }
 
+function sentBodyWithoutFooter(value: string): string {
+  return value
+    .replace(/^Hi\s+[^,\n]+,/i, "Hi {firstName},")
+    .replace(/\n{2,}(?:Best|Regards|Sincerely|Thanks),?\s*\n[\s\S]*$/i, "")
+    .trim();
+}
+
+/** Recent completed sends are the strongest available signal of user-approved email style. */
+export function listRecentApprovedEmailSamples(store: Store, limit = 3): EmailSample[] {
+  const seen = new Set<string>();
+  const samples: EmailSample[] = [];
+  const completed = store
+    .listSendJobs()
+    .filter((job) => job.status === "completed" && job.subject.trim() && job.textBody.trim())
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+
+  for (const job of completed) {
+    const body = sentBodyWithoutFooter(job.textBody);
+    const key = `${job.subject.trim().toLowerCase()}\n${body.toLowerCase()}`;
+    if (!body || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    samples.push({ id: `sent-${job.id}`, subject: job.subject.trim(), body, createdAt: job.updatedAt });
+    if (samples.length >= limit) {
+      break;
+    }
+  }
+  return samples;
+}
+
 export async function generateContentForCompany(
   store: Store,
   company: string,
   options: GenerateContentOptions = {},
   onProgress?: (step: GenerationProgressStep) => void,
 ): Promise<CompanyContent> {
+  // Leave a small margin for serializing and streaming the result to the UI.
+  const generationDeadlineAt = Date.now() + 58_000;
   const companyKey = normalizeCompanyKey(company);
   if (!companyKey) {
     throw new Error("Company name is required.");
   }
   const samples = store.listEmailSamples();
+  const approvedSamples = listRecentApprovedEmailSamples(store);
   const recipientTitles =
     options.recipientTitles?.map((title) => title.trim()).filter(Boolean) ??
     store
@@ -490,12 +540,30 @@ export async function generateContentForCompany(
 
   let jobDescription = options.jobDescription?.trim() || undefined;
   let roleTitle = options.roleTitle?.trim() || undefined;
-  const jobUrl = options.jobUrl?.trim() || undefined;
+  const jobUrl = normalizeJobPostingUrl(options.jobUrl);
+  const existing = store.getCompanyContent(companyKey);
+  const cachedContext = existing?.generationContext;
+  const cachedJobUrl = cachedContext?.jobUrl?.trim();
+  // Regenerate should not download and re-extract a posting we already resolved.
+  // The persisted generation context is tied to the exact URL, so changing the
+  // link still forces a fresh read.
+  if (!jobDescription && jobUrl && cachedJobUrl === jobUrl && cachedContext?.jobDescription?.trim()) {
+    jobDescription = cachedContext.jobDescription.trim();
+    if (!roleTitle && cachedContext.roleTitle?.trim()) {
+      roleTitle = cachedContext.roleTitle.trim();
+    }
+  }
   // Link-only: download the posting and extract a JD before the email LLM call.
   if (!jobDescription && jobUrl) {
-    const extracted = await resolveJobDescriptionFromUrl(jobUrl, onProgress);
+    const startedAt = Date.now();
+    const cached = store.getJobPostingCache(jobUrl);
+    const extracted = cached ?? await resolveJobDescriptionFromUrl(jobUrl, onProgress, generationDeadlineAt);
+    store.setJobPostingCache(jobUrl, extracted);
+    audit("generation.extraction", { company, durationMs: Date.now() - startedAt, cached: Boolean(cached) });
     jobDescription = extracted.jobDescription;
-    if (!roleTitle && extracted.roleTitle) {
+    // The fetched posting is authoritative. The UI can still hold the prior
+    // company's role title while a user replaces only the job link.
+    if (extracted.roleTitle) {
       roleTitle = extracted.roleTitle;
     }
   }
@@ -504,6 +572,7 @@ export async function generateContentForCompany(
     {
       company,
       samples,
+      approvedSamples,
       companyFact: options.companyFact,
       roleTitle,
       jobDescription,
@@ -513,11 +582,11 @@ export async function generateContentForCompany(
       passionate: Boolean(options.passionate),
     },
     onProgress,
+    generationDeadlineAt,
   );
   if (generated.warnings?.length) {
     console.warn(`Generated content for ${company} kept issues after repair: ${generated.warnings.join(" | ")}`);
   }
-  const existing = store.getCompanyContent(companyKey);
   const now = new Date().toISOString();
   const content: CompanyContent = {
     id: existing?.id ?? randomUUID(),
@@ -1797,7 +1866,21 @@ function supersedeStaleQueueForCandidates(store: Store, candidateIds: Set<string
   const reason = "Superseded by new schedule";
   for (const item of store.listSendQueue()) {
     if (!candidateIds.has(item.candidateId)) continue;
-    if (item.status !== "paused" && item.status !== "failed") continue;
+    const hasLiveJob = store
+      .listSendJobs()
+      .some(
+        (job) =>
+          job.queueItemId === item.id &&
+          (job.status === "pending" || job.status === "in_progress"),
+      );
+    // A worker failure deliberately leaves the queue row as `scheduled` so it
+    // remains visible with its error. Once its job is no longer live, that row
+    // must not block a fresh Send click as "Already scheduled."
+    const isFailedAttemptStillShown =
+      (item.status === "scheduled" || item.status === "queued") &&
+      Boolean(item.failureReason) &&
+      !hasLiveJob;
+    if (item.status !== "paused" && item.status !== "failed" && !isFailedAttemptStillShown) continue;
     store.upsertSendQueueItem({
       ...item,
       status: "failed",
@@ -2100,29 +2183,9 @@ export function guessFullNameFromLinkedInUrl(url: string | undefined): string | 
   return parts.map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase()).join(" ");
 }
 
-function inferBatchIntervalMinutes(items: Array<{ scheduledFor: string }>): number {
-  const fallback = defaultGapMinutes();
-  const times = items
-    .map((item) => new Date(item.scheduledFor).getTime())
-    .filter((value) => Number.isFinite(value))
-    .sort((a, b) => a - b);
-  if (times.length >= 2) {
-    const gaps: number[] = [];
-    for (let i = 1; i < times.length; i += 1) {
-      gaps.push((times[i]! - times[i - 1]!) / 60_000);
-    }
-    const avg = gaps.reduce((sum, gap) => sum + gap, 0) / gaps.length;
-    // Stretched schedules (~50m) are a bug — don't propagate them when adding people.
-    if (Number.isFinite(avg) && avg >= 1 && avg <= fallback * 2) {
-      return Math.max(1, Math.round(avg));
-    }
-  }
-  return fallback;
-}
-
 /**
  * Add one person (known email) onto an existing company schedule — appends after the
- * last slot using the batch's average spacing. Optional LinkedIn URL queues a photo enrich.
+ * last slot using the product's fixed one-minute spacing. Optional LinkedIn URL queues a photo enrich.
  */
 export async function addPersonToScheduledBatch(
   store: Store,
@@ -2225,12 +2288,7 @@ export async function addPersonToScheduledBatch(
     throw new Error(`${candidate.fullName} is already on the ${company} schedule (paused). Resume them instead.`);
   }
 
-  const intervalMinutes =
-    companyUpcoming.length >= 2
-      ? inferBatchIntervalMinutes(companyUpcoming)
-      : input.intervalMinutes && input.intervalMinutes >= 1
-        ? Math.round(input.intervalMinutes)
-        : inferBatchIntervalMinutes(companyUpcoming);
+  const intervalMinutes = DEFAULT_SEND_INTERVAL_MINUTES;
 
   const lastAt = companyUpcoming
     .map((item) => new Date(item.scheduledFor).getTime())
@@ -2318,6 +2376,7 @@ export function getPendingWorkerWork(store: Store, now = new Date()): {
   hasDiscovery: boolean;
   hasCapture: boolean;
   hasEnrich: boolean;
+  hasLinkedInMessage: boolean;
 } {
   // Reclaim here (not only on claim) so a crashed in_progress job cannot block
   // discovery hibernation decisions for the full stale window.
@@ -2330,6 +2389,7 @@ export function getPendingWorkerWork(store: Store, now = new Date()): {
   const hasEnrich = store
     .listLinkedInProfileEnrichJobs()
     .some((job) => job.status === "pending" || job.status === "in_progress");
+  const hasLinkedInMessage = hasPendingLinkedInMessageTask(store);
   return {
     nextSendDue,
     nextClaimAllowedAt: claimAt?.toISOString(),
@@ -2337,6 +2397,7 @@ export function getPendingWorkerWork(store: Store, now = new Date()): {
     hasDiscovery,
     hasCapture,
     hasEnrich,
+    hasLinkedInMessage,
   };
 }
 
@@ -2772,8 +2833,7 @@ export async function rescheduleCompanyBatch(
     throw new Error("Scheduled send not found.");
   }
 
-  const oldStart = new Date(items[0]!.scheduledFor).getTime();
-  const deltaMs = startAt.getTime() - oldStart;
+  const intervalMinutes = 1;
 
   for (const item of items) {
     const inProgress = store
@@ -2785,8 +2845,8 @@ export async function rescheduleCompanyBatch(
   }
 
   let updated = 0;
-  for (const item of items) {
-    const nextAt = new Date(new Date(item.scheduledFor).getTime() + deltaMs).toISOString();
+  for (const [index, item] of items.entries()) {
+    const nextAt = new Date(startAt.getTime() + index * intervalMinutes * 60_000).toISOString();
     await rescheduleQueuedSend(store, {
       queueItemId: item.id,
       scheduledFor: nextAt,
@@ -2795,13 +2855,16 @@ export async function rescheduleCompanyBatch(
     updated += 1;
   }
 
-  rebalancePendingCompanyBlocks(store);
+  rebalancePendingCompanyBlocks(store, {
+    intervalMinutes,
+    gapMinutes: intervalMinutes,
+  });
   await store.save();
   audit("schedule.reschedule_company_batch", {
     requested: queueItemIds.length,
     updated,
     startAt: startAt.toISOString(),
-    firstAt: items[0] ? new Date(new Date(items[0].scheduledFor).getTime() + deltaMs).toISOString() : undefined,
+    firstAt: items[0] ? startAt.toISOString() : undefined,
   });
   return {
     updated,

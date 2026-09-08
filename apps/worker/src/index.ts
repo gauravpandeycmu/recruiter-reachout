@@ -6,6 +6,7 @@ import { closePersistentBrowserContext, launchPersistentBrowserContext } from ".
 import { runDiscoveryPass } from "./discoveryPass.js";
 import { runLinkedInCapturePass } from "./linkedinCapturePass.js";
 import { runLinkedInProfileEnrichPass } from "./linkedinProfileEnrichPass.js";
+import { runLinkedInMessagingPass } from "./linkedinMessagingPass.js";
 import { createJobrightPlaywrightAdapter, dismissJobrightBlockingOverlays } from "./jobrightPlaywrightAdapter.js";
 import { createSalesqlPlaywrightAdapter } from "./salesqlPlaywrightAdapter.js";
 import { createApolloPlaywrightAdapter } from "./apolloPlaywrightAdapter.js";
@@ -17,7 +18,7 @@ import { tryPrepareStreakExtension, waitForStreakServiceWorker } from "./streakE
 import { GMAIL_USER_DATA_DIR } from "./setupSessions.js";
 import { runSendPass } from "./sendPass.js";
 import { acquireWorkerLock, releaseWorkerLock } from "./workerLock.js";
-import { decideHibernation, shouldSelfExit } from "./workerHibernate.js";
+import { decideHibernation, shouldKeepLinkedInMessagingWarm, shouldSelfExit } from "./workerHibernate.js";
 import { shouldPreferSalesqlBrowserForLinkedInCapture } from "./linkedinCaptureBrowser.js";
 
 const JOBRIGHT_DRY_RUN = (process.env.JOBRIGHT_DRY_RUN ?? "true").toLowerCase() !== "false";
@@ -33,6 +34,10 @@ const DISCOVERY_DELAY_MS = Number(process.env.WORKER_DISCOVERY_DELAY_MS ?? 1500)
 const SEND_DELAY_MS = Number(process.env.WORKER_SEND_DELAY_MS ?? 3000);
 const IDLE_DELAY_MS = Number(process.env.WORKER_IDLE_DELAY_MS ?? 30000);
 const SALESQL_LINKEDIN_DELAY_MS = Number(process.env.SALESQL_LINKEDIN_DELAY_MS ?? 4000);
+/** Keep the already-authenticated LinkedIn tab warm after an availability check.
+ * Users normally review the generated message and click Send shortly after;
+ * avoiding a second Chromium cold start saves several seconds. */
+const LINKEDIN_MESSAGE_WARM_MS = Number(process.env.LINKEDIN_MESSAGE_WARM_MS ?? 2 * 60_000);
 const SALESQL_OVERLAY_TIMEOUT_MS = Number(process.env.SALESQL_OVERLAY_TIMEOUT_MS ?? 45000);
 const SALESQL_REVEAL_TIMEOUT_MS = Number(process.env.SALESQL_REVEAL_TIMEOUT_MS ?? 15000);
 /** How early to wake headed Gmail before the next claimable send.
@@ -396,6 +401,8 @@ async function main(): Promise<void> {
   let running = true;
   let shuttingDown = false;
   let sendPassInFlight = false;
+  let linkedinMessagePassInFlight = false;
+  let linkedinMessageWarmUntil = 0;
 
   /** Single source of truth for turning a pending-work snapshot into a hibernation
    *  decision — used both for the main loop and the pre-exit re-check. */
@@ -412,15 +419,16 @@ async function main(): Promise<void> {
       hasDiscoveryWork: pending?.hasDiscovery,
       hasCaptureWork: pending?.hasCapture,
       hasEnrichWork: pending?.hasEnrich,
+      hasLinkedInMessageWork: pending?.hasLinkedInMessage,
     });
   }
 
   /** Never force-close Chromium out from under a send that's still actually
    *  running — that races the retry logic's own relaunch on the same profile
    *  dir (SingletonLock). Bounded so a genuinely stuck pass can't block shutdown forever. */
-  async function waitForSendPassToSettle(maxMs: number): Promise<void> {
+  async function waitForCriticalBrowserPassesToSettle(maxMs: number): Promise<void> {
     const deadline = Date.now() + maxMs;
-    while (sendPassInFlight && Date.now() < deadline) {
+    while ((sendPassInFlight || linkedinMessagePassInFlight) && Date.now() < deadline) {
       await delay(250);
     }
   }
@@ -433,6 +441,17 @@ async function main(): Promise<void> {
       return await runSendPass(args);
     } finally {
       sendPassInFlight = false;
+    }
+  }
+
+  async function runLinkedInMessagingPassTracked(
+    args: Parameters<typeof runLinkedInMessagingPass>[0],
+  ): ReturnType<typeof runLinkedInMessagingPass> {
+    linkedinMessagePassInFlight = true;
+    try {
+      return await runLinkedInMessagingPass(args);
+    } finally {
+      linkedinMessagePassInFlight = false;
     }
   }
 
@@ -455,14 +474,14 @@ async function main(): Promise<void> {
     log("Received SIGINT, finishing current pass then closing browsers…");
     running = false;
     setTimeout(() => {
-      void waitForSendPassToSettle(45_000).then(() => shutdownBrowsers("SIGINT timeout"));
+      void waitForCriticalBrowserPassesToSettle(45_000).then(() => shutdownBrowsers("SIGINT timeout"));
     }, 8_000).unref();
   });
   process.on("SIGTERM", () => {
     log("Received SIGTERM, finishing current pass then closing browsers…");
     running = false;
     setTimeout(() => {
-      void waitForSendPassToSettle(45_000).then(() => shutdownBrowsers("SIGTERM timeout"));
+      void waitForCriticalBrowserPassesToSettle(45_000).then(() => shutdownBrowsers("SIGTERM timeout"));
     }, 8_000).unref();
   });
   process.on("SIGUSR1", () => {
@@ -509,11 +528,20 @@ async function main(): Promise<void> {
       }
 
       const decision = computeDecision(pending);
+      const hasLiveLinkedInMessagingPage =
+        !pageLooksDead(linkedinCapturePage, linkedinOnlyContext) ||
+        (linkedinCapturePage === salesqlPage && !pageLooksDead(salesqlPage, salesqlContext));
+      const keepLinkedInMessagingWarm = shouldKeepLinkedInMessagingWarm({
+        hasLiveLinkedInPage: hasLiveLinkedInMessagingPage,
+        warmUntilMs: linkedinMessageWarmUntil,
+        nowMs: Date.now(),
+        needGmail: decision.needGmail,
+      });
 
       if (!decision.needGmail) {
         await hibernateGmail(decision.reason);
       }
-      if (!decision.needDiscovery) {
+      if (!decision.needDiscovery && !keepLinkedInMessagingWarm) {
         await hibernateDiscoveryBrowsers(decision.reason);
       }
 
@@ -546,8 +574,17 @@ async function main(): Promise<void> {
       if (decision.needDiscovery && !decision.needGmail) {
         // Do NOT open SalesQL Chromium just to poll empty capture/enrich queues —
         // extensions force a headed window (blank tab + SalesQL signup chrome).
-        if (pending?.hasCapture || pending?.hasEnrich) {
+        if (pending?.hasCapture || pending?.hasEnrich || pending?.hasLinkedInMessage) {
           const capturePage = await ensureLinkedInCapturePage();
+          if (pending?.hasLinkedInMessage) {
+            const messagingPass = await runLinkedInMessagingPassTracked({ apiClient, page: capturePage, log });
+            if (messagingPass.result === "worked") {
+              linkedinMessageWarmUntil =
+                messagingPass.task?.action === "check" ? Date.now() + LINKEDIN_MESSAGE_WARM_MS : 0;
+              await delay(SALESQL_LINKEDIN_DELAY_MS);
+              continue;
+            }
+          }
           const capturePass = await runLinkedInCapturePass({
             apiClient,
             page: capturePage,
@@ -623,6 +660,7 @@ async function main(): Promise<void> {
       }
 
       if (
+        !keepLinkedInMessagingWarm &&
         shouldSelfExit(decision, WORKER_SELF_EXIT_IDLE_MS) &&
         Date.now() - workerStartedAtMs >= WORKER_MIN_UPTIME_MS
       ) {
@@ -654,7 +692,12 @@ async function main(): Promise<void> {
         continue;
       }
 
-      const sleepFor = Math.max(decision.sleepMs || IDLE_DELAY_MS, 1_000);
+      const sleepFor = Math.max(
+        keepLinkedInMessagingWarm
+          ? Math.min(decision.sleepMs || IDLE_DELAY_MS, Math.max(1_000, linkedinMessageWarmUntil - Date.now()))
+          : decision.sleepMs || IDLE_DELAY_MS,
+        1_000,
+      );
       const minutes = Math.max(1, Math.round(sleepFor / 60_000));
       await apiClient
         .reportWorkerStatus({

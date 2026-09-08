@@ -114,6 +114,54 @@ describe("appDataPollKey", () => {
     expect(appDataPollKey(a)).not.toBe(appDataPollKey(b));
   });
 
+  it("changes when regenerated company email or LinkedIn copy changes", () => {
+    const companyContent = {
+      id: "acme-content",
+      company: "acme",
+      companyDisplayName: "Acme",
+      subject: "First draft",
+      body: "Hi {firstName}",
+      linkedinSubject: "First LinkedIn subject",
+      linkedinMessage: "First LinkedIn message",
+      source: "generated" as const,
+      createdAt: "2026-07-01T00:00:00.000Z",
+      updatedAt: "2026-07-01T00:00:00.000Z",
+    };
+    const first = baseData({ companyContent: [companyContent] });
+    const regenerated = baseData({
+      companyContent: [
+        {
+          ...companyContent,
+          subject: "Fresh draft",
+          linkedinMessage: "Fresh LinkedIn message",
+          updatedAt: "2026-07-01T00:01:00.000Z",
+        },
+      ],
+    });
+
+    expect(appDataPollKey(first)).not.toBe(appDataPollKey(regenerated));
+  });
+
+  it("changes when LinkedIn message availability finishes checking", () => {
+    const before = baseData();
+    before.candidates = [{
+      id: "candidate-1",
+      isActive: true,
+      fullName: "Elona L.",
+      firstName: "Elona",
+      linkedinUrl: "https://www.linkedin.com/in/elonalushi/",
+      emailCandidates: [],
+      status: "new",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      linkedinMessageAvailability: "checking",
+    }];
+    const after = structuredClone(before);
+    after.candidates[0]!.linkedinMessageAvailability = "free";
+    after.candidates[0]!.linkedinMessageStatusText = "Free, 1st-degree connection";
+    expect(appDataPollKey(after)).not.toBe(appDataPollKey(before));
+  });
+
   it("changes when queue failureReason changes without a status change", () => {
     const a = baseData({
       sendQueue: [

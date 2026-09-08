@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { bulkCreateCandidates } from "../src/services.js";
+import { createEvent } from "../src/services.js";
 import { Store } from "../src/store.js";
 
 describe("extension bulk save integration", () => {
@@ -67,6 +68,40 @@ describe("extension bulk save integration", () => {
 
     expect(second?.status).toBe("saved_now");
     expect(store.listActiveCandidates()).toHaveLength(1);
+  });
+
+  it("reactivates a previously sent person when Add this person is used again", async () => {
+    directory = await mkdtemp(join(tmpdir(), "recruiter-extension-bulk-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const [first] = bulkCreateCandidates(store, [
+      {
+        fullName: "Previously Sent",
+        linkedinUrl: "https://www.linkedin.com/in/previously-sent",
+        company: "Apple",
+        email: "previously.sent@apple.com",
+      },
+    ]);
+    const id = first?.savedCandidateId ?? "";
+    store.addEvent(createEvent(id, "send"));
+    store.archiveCandidate(id);
+    await store.save();
+
+    const [second] = bulkCreateCandidates(store, [
+      {
+        fullName: "Previously Sent",
+        linkedinUrl: "https://www.linkedin.com/in/previously-sent",
+        company: "Apple",
+      },
+    ]);
+    await store.save();
+
+    expect(second?.status).toBe("previously_contacted");
+    expect(second?.savedCandidateId).toBe(id);
+    expect(store.listActiveCandidates()).toHaveLength(1);
+    expect(store.listActiveCandidates()[0]?.email).toBe("previously.sent@apple.com");
+    expect(store.listEvents().filter((event) => event.candidateId === id && event.type === "send")).toHaveLength(1);
   });
 
   it("matches truncated LinkedIn search hrefs to an existing full profile URL", async () => {

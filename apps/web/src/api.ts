@@ -28,6 +28,8 @@ import type {
 
 export type { WeatherCondition, WeatherSnapshot };
 
+const FIXED_SEND_INTERVAL_MINUTES = 1;
+
 export interface UpcomingSendView {
   queueItemId: string;
   jobId?: string;
@@ -323,6 +325,25 @@ export function sendCandidate(id: string, resumeId?: string): Promise<unknown> {
   });
 }
 
+export function checkLinkedInMessaging(candidateId: string): Promise<unknown> {
+  return request("/api/linkedin-message/check", {
+    method: "POST",
+    body: JSON.stringify({ candidateId }),
+  });
+}
+
+export function sendLinkedInMessage(input: {
+  candidateId: string;
+  subject?: string;
+  message: string;
+  resumeId?: string;
+}): Promise<unknown> {
+  return request("/api/linkedin-message/send", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
 export function createCampaign(input: Partial<Campaign>): Promise<{ campaign: Campaign; searchUrls: string[] }> {
   return request<{ campaign: Campaign; searchUrls: string[] }>("/api/campaigns", {
     method: "POST",
@@ -367,7 +388,6 @@ export function scheduleToday(): Promise<unknown> {
 export interface ScheduleSendsInput {
   candidateIds?: string[];
   startAt?: string;
-  intervalMinutes?: number;
   schedules?: Array<{ candidateId: string; scheduledFor: string }>;
   mode?: "send_now" | "schedule";
   resumeId?: string;
@@ -389,7 +409,7 @@ export function scheduleSends(input: ScheduleSendsInput): Promise<{
 }> {
   return request("/api/send-queue/schedule", {
     method: "POST",
-    body: JSON.stringify(input),
+    body: JSON.stringify({ ...input, intervalMinutes: FIXED_SEND_INTERVAL_MINUTES }),
   });
 }
 
@@ -399,7 +419,6 @@ export function addPersonToScheduledBatch(input: {
   fullName?: string;
   linkedinUrl?: string;
   resumeId?: string;
-  intervalMinutes?: number;
 }): Promise<{
   candidate: RecruiterCandidate;
   upcoming?: UpcomingSendView;
@@ -417,7 +436,7 @@ export function addPersonToScheduledBatch(input: {
 }> {
   return request("/api/send-queue/add-person", {
     method: "POST",
-    body: JSON.stringify(input),
+    body: JSON.stringify({ ...input, intervalMinutes: FIXED_SEND_INTERVAL_MINUTES }),
   });
 }
 
@@ -443,12 +462,11 @@ export function pausePendingSends(input: {
 export function resumePausedSends(input: {
   queueItemIds: string[];
   startAt?: string;
-  intervalMinutes?: number;
   resumeId?: string;
 }): Promise<{ resumed: number; jobs: Array<{ id: string; candidateId: string }> }> {
   return request("/api/send-queue/resume-paused", {
     method: "POST",
-    body: JSON.stringify(input),
+    body: JSON.stringify({ ...input, intervalMinutes: FIXED_SEND_INTERVAL_MINUTES }),
   });
 }
 

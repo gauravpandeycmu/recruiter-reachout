@@ -109,7 +109,7 @@ describe("core schedule + send HTTP integration", () => {
       .map((q) => Date.parse(q.scheduledFor))
       .sort((x, y) => x - y);
     expect(times[0]).toBeGreaterThanOrEqual(newStart.getTime() - 2_000);
-    expect(times[1]! - times[0]!).toBeGreaterThanOrEqual(3 * 60_000);
+    expect(times[1]! - times[0]!).toBe(60_000);
   });
 
   it("send_now → claim → complete is idempotent on double complete", async () => {
@@ -152,6 +152,42 @@ describe("core schedule + send HTTP integration", () => {
 
     const sends = app.store.listEvents().filter((e) => e.type === "send" && e.candidateId === person.id);
     expect(sends.length).toBe(1);
+  });
+
+  it("allows Send again after a worker failure leaves the queue row scheduled", async () => {
+    app = await startHttpApp();
+    const person = seedReady("Retry Person", "RetryCo", "retry@retryco.com");
+    const first = await app.fetchJson<{ jobs: Array<{ id: string }>; queued: Array<{ id: string }> }>(
+      "/api/send-queue/schedule",
+      {
+        method: "POST",
+        body: JSON.stringify({ candidateIds: [person.id], mode: "send_now" }),
+        expectStatus: 200,
+      },
+    );
+    expect(first.body.jobs).toHaveLength(1);
+
+    const claimed = await app.fetchJson<{ id: string }>("/api/automation/next-send", { expectStatus: 200 });
+    await app.fetchJson(`/api/automation/send-result/${claimed.body.id}`, {
+      method: "POST",
+      body: JSON.stringify({ success: false, failureReason: "Gmail session signed out" }),
+      expectStatus: 200,
+    });
+    const failedVisibleRow = app.store.getSendQueueItem(first.body.queued[0]!.id);
+    expect(failedVisibleRow?.status).toBe("scheduled");
+    expect(failedVisibleRow?.failureReason).toContain("signed out");
+
+    const second = await app.fetchJson<{ jobs: Array<{ id: string }>; rejected: unknown[] }>(
+      "/api/send-queue/schedule",
+      {
+        method: "POST",
+        body: JSON.stringify({ candidateIds: [person.id], mode: "send_now" }),
+        expectStatus: 200,
+      },
+    );
+    expect(second.body.jobs).toHaveLength(1);
+    expect(second.body.rejected).toHaveLength(0);
+    expect(app.store.getSendQueueItem(first.body.queued[0]!.id)?.status).toBe("failed");
   });
 
   it("pause mid-batch then resume recreates spaced jobs", async () => {

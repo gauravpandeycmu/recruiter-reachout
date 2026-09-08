@@ -5,7 +5,7 @@ import {
   parseDatetimeLocal,
   toDatetimeLocalValue,
 } from "./scheduleTime";
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
 import type {
   AnalyticsSummary,
   CompanyHistorySummary,
@@ -17,7 +17,7 @@ import type {
   ResumeAsset,
   SetupSessionStatus,
 } from "@recruiter/shared";
-import { DEFAULT_EMAIL_FOOTER, collectJobLinkTexts, footerToHtml, stripBareJobUrls, textToHtml } from "@recruiter/shared";
+import { DEFAULT_EMAIL_FOOTER, collectJobLinkTexts, emailDomain, footerToHtml, isPersonalEmailDomain, normalizeCompanyToken, stripBareJobUrls, textToHtml } from "@recruiter/shared";
 import {
   addEmailSample,
   applyBatchPreviewEdits,
@@ -48,6 +48,8 @@ import {
   reactivateCandidates,
   replaceActiveFromHistory,
   previewEmail,
+  checkLinkedInMessaging,
+  sendLinkedInMessage,
   removeCandidate,
   auditUi,
   removeEmailSample,
@@ -76,7 +78,6 @@ import {
   summarizeUpcomingSends,
   filterScheduledTabItems,
   buildSendSessionFromUpcoming,
-  deriveBatchScheduleTiming,
   formatCompanyBlockShiftMessage,
   discoveryStatusLabel,
   peekNextDiscoveryCandidate,
@@ -145,7 +146,6 @@ const DISCOVERY_POLL_MS = 2500;
 const WATCH_POLL_MS = 15000;
 const FOCUS_REFRESH_DEBOUNCE_MS = 400;
 const RECIPIENT_PAGE_SIZE = 5;
-const HISTORY_PEOPLE_PAGE_SIZE = 12;
 const SCHEDULED_PEOPLE_PAGE_SIZE = 5;
 const TAB_STORAGE_KEY = "recruiter-reachout.active-tab";
 const SAVE_CHANNEL = "recruiter-reachout-saved";
@@ -214,6 +214,169 @@ function allEmailsFor(candidate: RecruiterCandidate): string[] {
     }
   }
   return [...emails];
+}
+
+function companyLogoDomain(company: CompanyHistorySummary): string | undefined {
+  for (const recruiter of company.recruiters) {
+    for (const email of allEmailsFor(recruiter)) {
+      const domain = emailDomain(email);
+      if (domain && !isPersonalEmailDomain(domain)) return domain;
+    }
+  }
+  return undefined;
+}
+
+function companyBrandColor(companyName: string): string {
+  const token = normalizeCompanyToken(companyName);
+  let hash = 0;
+  for (const character of token) hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
+  return `hsl(${hash % 360} 38% 50%)`;
+}
+
+function applyLogoBrandColor(image: HTMLImageElement): void {
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = 32;
+    canvas.height = 32;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) return;
+    context.drawImage(image, 0, 0, 32, 32);
+    const pixels = context.getImageData(0, 0, 32, 32).data;
+    const buckets = new Map<string, { score: number; red: number; green: number; blue: number; count: number }>();
+    let visiblePixels = 0;
+    let colorfulPixels = 0;
+    for (let index = 0; index < pixels.length; index += 4) {
+      const alpha = pixels[index + 3] ?? 0;
+      if (alpha < 96) continue;
+      const red = pixels[index] ?? 0;
+      const green = pixels[index + 1] ?? 0;
+      const blue = pixels[index + 2] ?? 0;
+      const maximum = Math.max(red, green, blue);
+      const minimum = Math.min(red, green, blue);
+      const saturation = maximum - minimum;
+      const lightness = (maximum + minimum) / 2;
+      if (lightness > 242) continue;
+      visiblePixels += 1;
+      if (saturation < 24) continue;
+      colorfulPixels += 1;
+      const key = `${Math.round(red / 48)}-${Math.round(green / 48)}-${Math.round(blue / 48)}`;
+      const bucket = buckets.get(key) ?? { score: 0, red: 0, green: 0, blue: 0, count: 0 };
+      bucket.score += alpha * (1 + saturation / 96);
+      bucket.red += red;
+      bucket.green += green;
+      bucket.blue += blue;
+      bucket.count += 1;
+      buckets.set(key, bucket);
+    }
+    const card = image.closest(".history-company-card");
+    if (!(card instanceof HTMLElement) || visiblePixels === 0) return;
+    const dominant = [...buckets.values()].sort((left, right) => right.score - left.score)[0];
+    const color = dominant && colorfulPixels > 2
+      ? `rgb(${Math.round(dominant.red / dominant.count)} ${Math.round(dominant.green / dominant.count)} ${Math.round(dominant.blue / dominant.count)})`
+      : "rgb(100 116 139)";
+    card.style.setProperty("--history-brand", color);
+  } catch {
+    // Cross-origin site icons can still display; the deterministic card tint remains as fallback.
+  }
+}
+
+function CompanyLogo({ company }: { company: CompanyHistorySummary }) {
+  const [sourceIndex, setSourceIndex] = useState(0);
+  const domain = companyLogoDomain(company);
+  const initial = company.companyName.trim().charAt(0).toUpperCase() || "?";
+  const sources = domain ? [`https://icon.horse/icon/${encodeURIComponent(domain)}`, `https://${domain}/favicon.ico`] : [];
+  return (
+    <span className="history-company-logo" aria-hidden="true">
+      {sources[sourceIndex] ? (
+        <img
+          src={sources[sourceIndex]}
+          alt=""
+          crossOrigin={sourceIndex === 0 ? "anonymous" : undefined}
+          loading="lazy"
+          referrerPolicy="no-referrer"
+          onError={() => setSourceIndex((current) => current + 1)}
+          onLoad={(event) => applyLogoBrandColor(event.currentTarget)}
+        />
+      ) : (
+        <span>{initial}</span>
+      )}
+    </span>
+  );
+}
+
+function HistoryCompanyDetails({
+  company,
+  columns,
+  expanded,
+  page,
+  onPage,
+  onClose,
+}: {
+  company: CompanyHistorySummary;
+  columns: 3 | 4;
+  expanded: boolean;
+  page: number;
+  onPage: (page: number) => void;
+  onClose: () => void;
+}) {
+  const detailsRef = useRef<HTMLElement | null>(null);
+  const pageSize = columns * columns;
+  const pageCount = Math.max(1, Math.ceil(company.recruiters.length / pageSize));
+  const safePage = Math.min(page, pageCount - 1);
+  const people = company.recruiters.slice(safePage * pageSize, (safePage + 1) * pageSize);
+
+  useLayoutEffect(() => {
+    const card = [...document.querySelectorAll<HTMLElement>(".history-company-card")]
+      .find((element) => element.dataset.historyCompany === company.companyName);
+    const details = detailsRef.current;
+    if (!card || !details) return;
+    details.style.setProperty("--history-brand", getComputedStyle(card).getPropertyValue("--history-brand"));
+  }, [company.companyName]);
+
+  return (
+    <section ref={detailsRef} className={`history-company-details${expanded ? " expanded" : ""}`} aria-hidden={!expanded}>
+      <div className="history-company-details-inner">
+        <div className="history-company-details-panel">
+          <div className="history-details-head">
+            <div>
+              <strong>{company.companyName} contacts</strong>
+              <span>{company.recruiters.length} total</span>
+            </div>
+            <button type="button" onClick={onClose}>Close</button>
+          </div>
+          <div className="history-people-grid">
+            {people.map((recruiter) => {
+              const emails = allEmailsFor(recruiter);
+              const chip = candidateChip(recruiter);
+              return (
+                <div className="history-person-card" key={recruiter.id}>
+                  <PersonAvatar candidate={recruiter} size="tiny" />
+                  <div className="history-person-card-body">
+                    <div className="history-person-top">
+                      <strong>{recruiter.fullName}</strong>
+                      <span className={`chip ${chip.tone}`}>{chip.label}</span>
+                    </div>
+                    {recruiter.title && <small className="history-person-title">{recruiter.title}</small>}
+                    <div className="history-person-links">
+                      {recruiter.linkedinUrl ? <a href={recruiter.linkedinUrl} target="_blank" rel="noreferrer">LinkedIn</a> : <span className="hint">No LinkedIn</span>}
+                      {emails.length > 0 ? <span className="history-emails">{emails[0]}</span> : <span className="hint">No email found</span>}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {company.recruiters.length > pageSize && (
+            <div className="list-pagination">
+              <button type="button" disabled={safePage <= 0} onClick={() => onPage(Math.max(0, safePage - 1))}>Previous</button>
+              <span>{safePage * pageSize + 1}–{Math.min((safePage + 1) * pageSize, company.recruiters.length)} of {company.recruiters.length}</span>
+              <button type="button" disabled={safePage >= pageCount - 1} onClick={() => onPage(Math.min(pageCount - 1, safePage + 1))}>Next</button>
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
 }
 
 function avatarInitial(candidate: { firstName?: string; fullName?: string }): string {
@@ -326,7 +489,6 @@ const SCHEDULE_PRESETS: Array<{ id: string; label: string; resolve: () => Date }
 
 const SCHEDULE_PRESET_IDS = new Set(SCHEDULE_PRESETS.map((preset) => preset.id));
 
-const INTERVAL_PRESETS = [1, 2, 5, 10] as const;
 
 function truncatePreview(text: string, max = 220): string {
   const cleaned = text.replace(/\s+/g, " ").trim();
@@ -554,6 +716,8 @@ type BacklogSortKey =
   | "nextScheduledSend";
 
 type HistorySortKey = "companyName" | "recruiterCount" | "sent" | "lastActivityAt";
+type HistoryView = "companies" | "queue";
+type HistoryFilter = "all" | "ready" | "sent" | "needsEmail";
 
 function formatActivityAt(value?: string): string {
   if (!value) {
@@ -597,7 +761,7 @@ function formatCompact(value: number): string {
   return String(Math.round(value));
 }
 
-function CumulativeSendsChart({ points }: { points: Array<{ date: string; total: number }> }) {
+function CumulativeEmailsChart({ points }: { points: Array<{ date: string; total: number }> }) {
   const width = 320;
   const height = 140;
   const pad = 12;
@@ -609,15 +773,19 @@ function CumulativeSendsChart({ points }: { points: Array<{ date: string; total:
   });
   const line = coords.join(" ");
   const area = `${pad},${height - pad} ${line} ${width - pad},${height - pad}`;
+  const finalPoint = coords.at(-1)?.split(",").map(Number) ?? [width - pad, height - pad];
+  const latest = points.at(-1);
   return (
     <div className="svg-chart-wrap">
-      <svg viewBox={`0 0 ${width} ${height}`} className="svg-chart" role="img" aria-label="Cumulative companies reached">
+      <svg viewBox={`0 0 ${width} ${height}`} className="svg-chart" role="img" aria-label="Cumulative emails sent by day">
+        <title>{`${latest?.total ?? 0} emails sent${latest?.date ? ` through ${latest.date}` : ""}`}</title>
         <polygon points={area} className="svg-area" />
         <polyline points={line} className="svg-line" fill="none" />
+        <circle cx={finalPoint[0]} cy={finalPoint[1]} r="4" className="svg-endpoint" />
       </svg>
       <div className="svg-chart-meta">
-        <strong>{points.at(-1)?.total ?? 0}</strong>
-        <span>companies reached</span>
+        <strong>{latest?.total ?? 0}</strong>
+        <span>emails sent</span>
       </div>
     </div>
   );
@@ -847,25 +1015,34 @@ function WeekdayRhythm({ daily }: { daily: Array<{ date: string; sent: number }>
   );
 }
 
-const BUBBLE_PALETTE = ["#3f8f4a", "#3d7ab5", "#b5762a", "#7a5fb5", "#2a8f8a", "#b55a6e", "#5a8a2a", "#4a6a9a"];
-
-function bubbleHighlight(hex: string): string {
-  const c = hex.replace("#", "");
-  const r = Math.min(255, parseInt(c.slice(0, 2), 16) + 48);
-  const g = Math.min(255, parseInt(c.slice(2, 4), 16) + 48);
-  const b = Math.min(255, parseInt(c.slice(4, 6), 16) + 48);
-  return `rgb(${r}, ${g}, ${b})`;
+function CompanyReachLogo({ companyName, domain }: { companyName: string; domain?: string }) {
+  const [failed, setFailed] = useState(false);
+  const initial = companyName.trim().charAt(0).toUpperCase() || "?";
+  return (
+    <span className="company-reach-logo" aria-hidden="true">
+      {domain && !failed ? (
+        <img
+          src={`https://icon.horse/icon/${encodeURIComponent(domain)}`}
+          alt=""
+          loading="lazy"
+          referrerPolicy="no-referrer"
+          onError={() => setFailed(true)}
+        />
+      ) : (
+        <span>{initial}</span>
+      )}
+    </span>
+  );
 }
 
-/**
- * Packed company bubbles — one circle per company, area scaled by emails
- * actually SENT (never scheduled). Greedy spiral packing, largest at center.
- */
-function CompanyBubbles({
+/** Dense word cloud: send volume changes prominence while companies stay close together. */
+function CompanyReachBubbles({
   companies,
+  logoDomains,
   onOpen,
 }: {
   companies: Array<{ companyName: string; sent: number; peopleContacted: number; lastSentAt?: string }>;
+  logoDomains: ReadonlyMap<string, string>;
   onOpen: (companyName: string) => void;
 }) {
   const rows = companies
@@ -874,80 +1051,37 @@ function CompanyBubbles({
     .sort((a, b) => b.sent - a.sent)
     .slice(0, 18);
   if (rows.length === 0) {
-    return <p className="hint">No sends yet — bubbles appear once the first email goes out.</p>;
+    return <p className="hint">Companies appear here once the first email goes out.</p>;
   }
-  const W = 560;
-  const H = 300;
   const maxSent = Math.max(...rows.map((row) => row.sent));
-  const radiusFor = (sent: number) => 18 + Math.sqrt(sent / maxSent) * 44;
-  const placed: Array<{ x: number; y: number; r: number; row: (typeof rows)[number]; color: string }> = [];
-  for (const [i, row] of rows.entries()) {
-    const r = radiusFor(row.sent);
-    const color = BUBBLE_PALETTE[i % BUBBLE_PALETTE.length]!;
-    let x = W / 2;
-    let y = H / 2;
-    if (placed.length > 0) {
-      let angle = placed.length * 2.399963;
-      let radius = 4;
-      for (let step = 0; step < 900; step += 1) {
-        radius += 1.35;
-        angle += 0.32;
-        x = W / 2 + Math.cos(angle) * radius * 1.45;
-        y = H / 2 + Math.sin(angle) * radius * 0.7;
-        const fits =
-          placed.every((p) => Math.hypot(p.x - x, p.y - y) >= p.r + r + 1) &&
-          x - r > 2 && x + r < W - 2 && y - r > 2 && y + r < H - 2;
-        if (fits) break;
-      }
-    }
-    placed.push({ x, y, r, row, color });
-  }
   return (
-    <div className="bubble-chart-wrap">
-      <svg viewBox={`0 0 ${W} ${H}`} className="bubble-chart" role="img" aria-label="Companies sized by emails sent">
-        <defs>
-          {placed.map((p, i) => (
-            <radialGradient key={p.row.companyName} id={`bubble-grad-${i}`} cx="35%" cy="30%" r="65%">
-              <stop offset="0%" stopColor={bubbleHighlight(p.color)} />
-              <stop offset="55%" stopColor={p.color} />
-              <stop offset="100%" stopColor={p.color} stopOpacity={0.88} />
-            </radialGradient>
-          ))}
-        </defs>
-        {placed.map((p, i) => (
-          <g key={p.row.companyName} transform={`translate(${p.x}, ${p.y})`}>
-            <g
-              className="bubble"
-              onClick={() => onOpen(p.row.companyName)}
-              role="button"
-              tabIndex={0}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") onOpen(p.row.companyName);
-              }}
-            >
-              <title>
-                {`${p.row.companyName} · ${p.row.sent} sent · ${p.row.peopleContacted} people${p.row.lastSentAt ? ` · last ${formatActivityAt(p.row.lastSentAt)}` : ""}`}
-              </title>
-              <circle className="bubble-body" cx={0} cy={0} r={p.r} fill={`url(#bubble-grad-${i})`} />
-              <circle className="bubble-shine" cx={-p.r * 0.28} cy={-p.r * 0.32} r={p.r * 0.22} />
-              {p.r >= 30 ? (
-                <>
-                  <text className="bubble-name" x={0} y={-2} textAnchor="middle">
-                    {p.row.companyName.length > 13 ? `${p.row.companyName.slice(0, 12)}…` : p.row.companyName}
-                  </text>
-                  <text className="bubble-count" x={0} y={13} textAnchor="middle">
-                    {p.row.sent} sent
-                  </text>
-                </>
-              ) : p.r >= 21 ? (
-                <text className="bubble-name" x={0} y={4} textAnchor="middle">
-                  {p.row.companyName.slice(0, Math.max(3, Math.floor(p.r / 4.2)))}
-                </text>
-              ) : null}
-            </g>
-          </g>
-        ))}
-      </svg>
+    <div className="company-bubble-cloud" aria-label="Companies sized by emails sent">
+      {rows.map((row) => {
+        const prominence = Math.sqrt(row.sent / maxSent);
+        const height = Math.round(40 + prominence * 18);
+        const fontSize = Math.round(12 + prominence * 3);
+        const key = normalizeCompanyToken(row.companyName);
+        return (
+          <button
+            type="button"
+            className="company-reach-bubble"
+            key={row.companyName}
+            onClick={() => onOpen(row.companyName)}
+            style={{
+              "--reach-brand": companyBrandColor(row.companyName),
+              "--bubble-height": `${height}px`,
+              "--bubble-font-size": `${fontSize}px`,
+            } as React.CSSProperties}
+            title={`${row.companyName} · ${row.sent} sent · ${row.peopleContacted} people${row.lastSentAt ? ` · last ${formatActivityAt(row.lastSentAt)}` : ""}`}
+          >
+            <CompanyReachLogo companyName={row.companyName} domain={logoDomains.get(key)} />
+            <span className="company-bubble-copy">
+              <span className="company-bubble-name">{row.companyName}</span>
+              <span className="company-bubble-count">{row.sent} sent</span>
+            </span>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -1039,6 +1173,7 @@ function App() {
   const [linkedinMessage, setLinkedinMessage] = useState("");
   const [previewDirty, setPreviewDirty] = useState(false);
   const [previewSaving, setPreviewSaving] = useState(false);
+  const [linkedinSendBusy, setLinkedinSendBusy] = useState(false);
   const [previewLoadedId, setPreviewLoadedId] = useState<string>();
   const [previewFetching, setPreviewFetching] = useState(false);
   const [previewAnimKey, setPreviewAnimKey] = useState(0);
@@ -1064,7 +1199,12 @@ function App() {
   const [backlog, setBacklog] = useState<JobBacklogSummary[]>([]);
   const [history, setHistory] = useState<CompanyHistorySummary[]>([]);
   const [historyQuery, setHistoryQuery] = useState("");
+  const [historyView, setHistoryView] = useState<HistoryView>("companies");
+  const [historyFilter, setHistoryFilter] = useState<HistoryFilter>("all");
+  const [historyColumns, setHistoryColumns] = useState<3 | 4>(4);
   const [expandedCompanies, setExpandedCompanies] = useState<Set<string>>(new Set());
+  const [openingHistoryCompanies, setOpeningHistoryCompanies] = useState<Set<string>>(new Set());
+  const [closingHistoryCompanies, setClosingHistoryCompanies] = useState<Set<string>>(new Set());
   const [analytics, setAnalytics] = useState<AnalyticsSummary>();
   const [visitedTabs, setVisitedTabs] = useState<Set<Tab>>(() => new Set([readStoredTab()]));
   const [groveWeatherCity, setGroveWeatherCity] = useState(() => readWeatherCity());
@@ -1102,8 +1242,7 @@ function App() {
   const [setupSessionsLoading, setSetupSessionsLoading] = useState(false);
   const [testModeEnabled, setTestModeEnabled] = useState(false);
   const [testModeRecipient, setTestModeRecipient] = useState("");
-  const [scheduleIntervalMinutes, setScheduleIntervalMinutesState] = useState(DEFAULT_SEND_INTERVAL_MINUTES);
-  const scheduleIntervalPinnedRef = useRef(false);
+  const scheduleIntervalMinutes = DEFAULT_SEND_INTERVAL_MINUTES;
   const [activeSchedulePreset, setActiveSchedulePreset] = useState<string | null>(() => {
     const stored = initialPrefs.activeSchedulePreset;
     return stored && SCHEDULE_PRESET_IDS.has(stored) ? stored : "now";
@@ -1122,20 +1261,6 @@ function App() {
     leaving?: boolean;
   } | null>(null);
 
-  function applyScheduleIntervalMinutes(minutes: number, pin = true): void {
-    const next = Math.max(1, Math.round(minutes) || DEFAULT_SEND_INTERVAL_MINUTES);
-    if (pin) {
-      scheduleIntervalPinnedRef.current = true;
-    }
-    setScheduleIntervalMinutesState(next);
-  }
-
-  useEffect(() => {
-    const configuredInterval = envStatus?.sendIntervalMinutes ?? 0;
-    if (configuredInterval > 0 && !scheduleIntervalPinnedRef.current) {
-      setScheduleIntervalMinutesState(configuredInterval);
-    }
-  }, [envStatus?.sendIntervalMinutes]);
   const [findProgress, setFindProgress] = useState<{
     steps: Array<{ id: string; label: string }>;
     stepIndex: number;
@@ -1264,6 +1389,11 @@ function App() {
     [backlog, backlogSort],
   );
 
+  const historyQueueTotal = useMemo(
+    () => backlog.reduce((sum, job) => sum + job.remaining, 0),
+    [backlog],
+  );
+
   const sortedHistory = useMemo(
     () =>
       sortRows(history, historySort, (company, key) =>
@@ -1272,13 +1402,32 @@ function App() {
     [history, historySort],
   );
 
+  const historyTotals = useMemo(
+    () =>
+      history.reduce(
+        (totals, company) => ({
+          companies: totals.companies + 1,
+          people: totals.people + company.recruiters.length,
+          withEmail: totals.withEmail + (company.withEmail ?? 0),
+          ready: totals.ready + (company.readyUnsent ?? 0),
+          sent: totals.sent + company.sent,
+        }),
+        { companies: 0, people: 0, withEmail: 0, ready: 0, sent: 0 },
+      ),
+    [history],
+  );
+
   const filteredHistory = useMemo(() => {
     const q = historyQuery.trim().toLowerCase();
-    if (!q) {
-      return sortedHistory;
-    }
     return sortedHistory
+      .filter((company) => {
+        if (historyFilter === "ready") return (company.readyUnsent ?? 0) > 0;
+        if (historyFilter === "sent") return company.sent > 0;
+        if (historyFilter === "needsEmail") return company.recruiters.length > (company.withEmail ?? 0);
+        return true;
+      })
       .map((company) => {
+        if (!q) return company;
         const companyHit = company.companyName.toLowerCase().includes(q);
         const recruiters = company.recruiters.filter((recruiter) => {
           if (companyHit) return true;
@@ -1302,7 +1451,7 @@ function App() {
         };
       })
       .filter((company): company is CompanyHistorySummary => Boolean(company));
-  }, [sortedHistory, historyQuery]);
+  }, [sortedHistory, historyQuery, historyFilter]);
 
   /** Distinct companies in the active batch — most recently captured first. */
   const batchCompanies = useMemo(() => {
@@ -1423,6 +1572,8 @@ function App() {
   const previewSkipFetchRef = useRef(false);
   const prevSelectedIdRef = useRef<string | undefined>(undefined);
   const generatingPreviewRef = useRef(false);
+  // Older state snapshots must not overwrite a completed regeneration.
+  const stateSnapshotGenerationRef = useRef(0);
 
   useEffect(() => {
     if (!selected) {
@@ -1771,7 +1922,7 @@ function App() {
       }),
       durationMin: Math.max(0, readyCandidates.length - 1) * scheduleIntervalMinutes,
     };
-  }, [scheduleStartAt, scheduleIntervalMinutes, readyCandidates.length]);
+  }, [scheduleStartAt, readyCandidates.length]);
 
   function applySchedulePreset(presetId: string) {
     const preset = SCHEDULE_PRESETS.find((entry) => entry.id === presetId);
@@ -1783,7 +1934,11 @@ function App() {
   }
 
   async function refresh() {
+    const snapshotGeneration = ++stateSnapshotGenerationRef.current;
     const next = await getState();
+    if (!shouldApplyPollResult(snapshotGeneration, stateSnapshotGenerationRef.current)) {
+      return;
+    }
     setState(next);
     footerReadyRef.current = false;
     if (next.content) {
@@ -2108,8 +2263,13 @@ function App() {
       inFlight = true;
       void (async () => {
         try {
+          const stateSnapshotGeneration = ++stateSnapshotGenerationRef.current;
           const next = await getState();
-          if (!shouldApplyPollResult(generation, pollGeneration)) {
+          if (
+            !shouldApplyPollResult(generation, pollGeneration) ||
+            !shouldApplyPollResult(stateSnapshotGeneration, stateSnapshotGenerationRef.current) ||
+            generatingPreviewRef.current
+          ) {
             return;
           }
           setState((prev) => {
@@ -2575,7 +2735,6 @@ function App() {
         fullName: addPersonName.trim() || undefined,
         linkedinUrl: addPersonLinkedIn.trim() || undefined,
         resumeId: selectedResumeId || undefined,
-        intervalMinutes: scheduleIntervalMinutes,
       });
       closeAddPersonPanel(false);
       const when = formatShortWhen(result.scheduledFor);
@@ -2665,8 +2824,6 @@ function App() {
     const template = state?.companyContent?.find((entry) => entry.company === companyContentKey(company));
     const subjectText = stripTestModePrefix(template?.subject ?? actionable[0]?.subject ?? "");
     const bodyText = template?.body ?? actionable[0]?.body ?? "";
-    const timing = deriveBatchScheduleTiming(actionable, { intervalPresets: INTERVAL_PRESETS });
-
     closeReschedulePanel(false);
     closeAddPersonPanel(false);
     setBatchCompanyChoice(company);
@@ -2677,7 +2834,6 @@ function App() {
     }
 
     // Prefill Send-tab timing as Now so Send immediately works; user can still pick a later time.
-    applyScheduleIntervalMinutes(timing.intervalMinutes);
     applySchedulePreset("now");
 
     // Clear any in-flight progress tracking — user must click Send/Schedule themselves.
@@ -2694,7 +2850,7 @@ function App() {
     setMessage(
       actionable.length === 1
         ? `Loaded ${company} on Send — review timing, then click Send when ready.`
-        : `Loaded ${actionable.length} from ${company} on Send — spacing ${timing.intervalMinutes}m. Click Send when ready (or change the schedule).`,
+        : `Loaded ${actionable.length} from ${company} on Send. Click Send when ready, or choose a later start time.`,
     );
 
     setBusy(true);
@@ -2767,6 +2923,37 @@ function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  function toggleHistoryCompany(name: string): void {
+    if (openingHistoryCompanies.size > 0 || closingHistoryCompanies.size > 0) return;
+
+    const current = [...expandedCompanies][0];
+    const closeCurrent = (companyName: string, after?: () => void) => {
+      setClosingHistoryCompanies(new Set([companyName]));
+      setExpandedCompanies(new Set());
+      window.setTimeout(() => {
+        setClosingHistoryCompanies(new Set());
+        after?.();
+      }, 260);
+    };
+    const openNext = () => {
+      setOpeningHistoryCompanies(new Set([name]));
+      window.setTimeout(() => {
+        setExpandedCompanies(new Set([name]));
+        setOpeningHistoryCompanies(new Set());
+      }, 24);
+    };
+
+    if (current === name) {
+      closeCurrent(name);
+      return;
+    }
+    if (current) {
+      closeCurrent(current, openNext);
+      return;
+    }
+    openNext();
   }
 
   function dismissSendSession() {
@@ -2849,7 +3036,6 @@ function App() {
         const result = await resumePausedSends({
           queueItemIds: pausedIds,
           startAt: startAt.toISOString(),
-          intervalMinutes: scheduleIntervalMinutes,
           resumeId: selectedResumeId || undefined,
         });
         if (result.resumed === 0) {
@@ -2860,7 +3046,7 @@ function App() {
         setTrackedSendMode(sendMode);
         writeTrackedSendMode(sendMode);
         setMessage(
-          `Resumed ${result.resumed} paused send${result.resumed === 1 ? "" : "s"} with ${scheduleIntervalMinutes}m spacing.`,
+          `Resumed ${result.resumed} paused send${result.resumed === 1 ? "" : "s"}.`,
         );
         await refresh();
       } catch (error) {
@@ -2890,7 +3076,6 @@ function App() {
       const result = await scheduleSends({
         candidateIds: readyCandidates.map((candidate) => candidate.id),
         startAt: startAt.toISOString(),
-        intervalMinutes: scheduleIntervalMinutes,
         mode: isScheduleForNow(startAt, activeSchedulePreset) ? "send_now" : "schedule",
         resumeId: selectedResumeId || undefined,
       });
@@ -3281,6 +3466,11 @@ function App() {
       if (content.generationContext?.jobUrl) {
         setJobUrl(content.generationContext.jobUrl);
       }
+      // Extracted descriptions stay in the server cache. Do not populate the
+      // manual override: it would override a different URL entered next.
+      // Invalidate snapshots requested while the provider was generating. Those
+      // responses still contain the prior company email and LinkedIn message.
+      stateSnapshotGenerationRef.current += 1;
       setState((prev) => {
         if (!prev) {
           return {
@@ -3307,8 +3497,13 @@ function App() {
       );
 
       // Paint preview once with a reveal — later syncs must stay silent (no second refresh animation).
-      const previewPerson = selected ?? candidates.find((c) => c.id === previewCandidateId) ?? candidates[0];
-      const paintId = previewPerson?.id ?? previewCandidateId;
+      const previewPerson =
+        companyCandidates.find((candidate) => candidate.id === previewCandidateId) ??
+        companyCandidates[0] ??
+        selected ??
+        candidates.find((candidate) => candidate.id === previewCandidateId) ??
+        candidates[0];
+      const paintId = previewPerson?.id;
       const jobLink = jobUrl.trim() || content.generationContext?.jobUrl;
       if (paintId && previewPerson) {
         const firstName = previewPerson.firstName?.trim() || previewPerson.fullName?.split(/\s+/)[0] || "";
@@ -3338,6 +3533,9 @@ function App() {
             );
           })
           .catch(() => undefined);
+        if (previewPerson.linkedinUrl) {
+          await checkLinkedInMessaging(paintId).catch(() => undefined);
+        }
       }
 
       // Brief success beat, then dismiss — no multi-second pad after the mail exists.
@@ -3356,6 +3554,28 @@ function App() {
       window.clearInterval(creepTimer);
       generatingPreviewRef.current = false;
       setBusy(false);
+    }
+  }
+
+  async function sendSelectedLinkedInMessage(candidate: RecruiterCandidate) {
+    if (!linkedinMessage.trim()) {
+      setMessage("Generate or write the LinkedIn message first.");
+      return;
+    }
+    setLinkedinSendBusy(true);
+    try {
+      await sendLinkedInMessage({
+        candidateId: candidate.id,
+        subject: linkedinSubject.trim() || undefined,
+        message: linkedinMessage.trim(),
+        resumeId: selectedResumeId || undefined,
+      });
+      setMessage(`LinkedIn message queued for ${candidate.fullName}.`);
+      await refresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not queue the LinkedIn message.");
+    } finally {
+      setLinkedinSendBusy(false);
     }
   }
 
@@ -4236,37 +4456,6 @@ function App() {
                           }}
                         />
                       </label>
-                      <label>
-                        Minutes between sends
-                        <input
-                          type="number"
-                          min={1}
-                          max={60}
-                          value={scheduleIntervalMinutes}
-                          onChange={(event) =>
-                            applyScheduleIntervalMinutes(
-                              Number(event.target.value) || envStatus?.sendIntervalMinutes || DEFAULT_SEND_INTERVAL_MINUTES,
-                            )
-                          }
-                        />
-                      </label>
-                    </div>
-                    <p className="hint">
-                      Default is {envStatus?.sendIntervalMinutes ?? DEFAULT_SEND_INTERVAL_MINUTES} minute
-                      {(envStatus?.sendIntervalMinutes ?? DEFAULT_SEND_INTERVAL_MINUTES) === 1 ? "" : "s"} between emails to stay
-                      Gmail-friendly and reduce spam/block risk.
-                    </p>
-                    <div className="schedule-presets interval-presets" role="group" aria-label="Spacing between sends">
-                      {INTERVAL_PRESETS.map((minutes) => (
-                        <button
-                          key={minutes}
-                          type="button"
-                          className={`schedule-chip ${scheduleIntervalMinutes === minutes ? "active" : ""}`}
-                          onClick={() => applyScheduleIntervalMinutes(minutes)}
-                        >
-                          every {minutes}m
-                        </button>
-                      ))}
                     </div>
                     {scheduleSummary && (
                       <p className="schedule-summary">
@@ -4592,7 +4781,11 @@ function App() {
                                 <div className="linkedin-draft-heading">
                                   <div>
                                     <p className="eyebrow">LinkedIn message</p>
-                                    <strong>Subject and message, ready to paste</strong>
+                                    <strong>
+                                      {selected?.linkedinMessageSentAt
+                                        ? "Message sent on LinkedIn"
+                                        : "Subject and message, ready to paste"}
+                                    </strong>
                                   </div>
                                   <div className="linkedin-copy-actions">
                                     <button
@@ -4649,6 +4842,70 @@ function App() {
                                 <small>
                                   {linkedinMessage.trim() ? linkedinMessage.trim().split(/\s+/).length : 0} words
                                 </small>
+                                {selected?.linkedinUrl && (
+                                  <div className="linkedin-send-row">
+                                    <div className="linkedin-availability">
+                                      <span
+                                        className={`chip ${
+                                          selected.linkedinMessageSentAt || selected.linkedinMessageAvailability === "free"
+                                            ? "ready"
+                                            : "muted"
+                                        }`}
+                                      >
+                                        {selected.linkedinMessageSentAt
+                                          ? "Sent"
+                                          : selected.linkedinMessageAvailability === "free"
+                                          ? "Free"
+                                          : selected.linkedinMessageAvailability === "inmail"
+                                            ? `${selected.linkedinInmailCredits ?? "?"} InMails`
+                                            : selected.linkedinMessageAvailability === "checking"
+                                              ? "Checking…"
+                                              : selected.linkedinMessageAvailability === "unavailable"
+                                                ? "Unavailable"
+                                                : selected.linkedinMessageAvailability === "error"
+                                                  ? "Check failed"
+                                                  : "Not checked"}
+                                      </span>
+                                      <small>
+                                        {selected.linkedinMessageSentAt
+                                          ? `Sent on LinkedIn ${formatShortWhen(selected.linkedinMessageSentAt)}`
+                                          : selected.linkedinMessageStatusText ??
+                                            "LinkedIn availability is checked after generation."}
+                                      </small>
+                                    </div>
+                                    {!selected.linkedinMessageSentAt && (
+                                      <div className="linkedin-send-actions">
+                                        {(selected.linkedinMessageAvailability === "error" ||
+                                          selected.linkedinMessageAvailability === "unavailable" ||
+                                          !selected.linkedinMessageAvailability) && (
+                                          <button
+                                            type="button"
+                                            className="secondary compact"
+                                            disabled={linkedinSendBusy}
+                                            onClick={() => void checkLinkedInMessaging(selected.id).then(() => refresh())}
+                                          >
+                                            Check again
+                                          </button>
+                                        )}
+                                        <button
+                                          type="button"
+                                          className="primary compact"
+                                          disabled={
+                                            linkedinSendBusy ||
+                                            !linkedinMessage.trim() ||
+                                            (selected.linkedinMessageAvailability !== "free" &&
+                                              selected.linkedinMessageAvailability !== "inmail") ||
+                                            (selected.linkedinMessageAvailability === "inmail" &&
+                                              (selected.linkedinInmailCredits ?? 0) < 1)
+                                          }
+                                          onClick={() => void sendSelectedLinkedInMessage(selected)}
+                                        >
+                                          {linkedinSendBusy ? "Queuing…" : "Send on LinkedIn"}
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
                               </div>
                             </div>
                           ) : null}
@@ -5612,311 +5869,224 @@ function App() {
           hidden={tab !== "history"}
           aria-hidden={tab !== "history"}
         >
-          <section className="panel">
-            <div className="setup-section-head">
+          <section className="panel history-overview">
+            <div className="history-overview-head">
               <div>
-                <p className="eyebrow">Operations</p>
-                <h2>Backlog scheduler</h2>
-                <p className="hint">Intake up to 300/day · schedule 50/day · roll the rest over.</p>
+                <p className="eyebrow">History</p>
+                <h2>Your outreach, all in one place</h2>
+                <p className="hint">Find anyone you&apos;ve added, see what happened, or continue where you left off.</p>
               </div>
-              <button className="primary" onClick={() => void runScheduleToday()}>
-                Schedule today&apos;s queue
+            </div>
+            <div className="history-summary-grid" aria-label="Outreach summary">
+              <div className="history-summary-item"><strong>{historyTotals.companies}</strong><span>Companies</span></div>
+              <div className="history-summary-item"><strong>{historyTotals.people}</strong><span>People</span></div>
+              <div className="history-summary-item"><strong>{historyTotals.withEmail}</strong><span>Emails found</span></div>
+              <div className="history-summary-item history-summary-ready"><strong>{historyTotals.ready}</strong><span>Ready to send</span></div>
+              <div className="history-summary-item"><strong>{historyTotals.sent}</strong><span>Sent</span></div>
+            </div>
+          </section>
+
+          <section className="panel history-workspace">
+            <div className="history-view-switch" role="tablist" aria-label="History view">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={historyView === "companies"}
+                className={historyView === "companies" ? "active" : ""}
+                onClick={() => setHistoryView("companies")}
+              >
+                Companies
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={historyView === "queue"}
+                className={historyView === "queue" ? "active" : ""}
+                onClick={() => setHistoryView("queue")}
+              >
+                Queue <span>{historyQueueTotal}</span>
               </button>
             </div>
-            <div className="stat-row compact">
-              <div className="stat"><strong>{state?.sendQueue.length ?? 0}</strong><span>In queue</span></div>
-              <div className="stat"><strong>{state?.events.filter((event) => event.type === "send").length ?? 0}</strong><span>Sends logged</span></div>
-              <div className="stat"><strong>{history.length}</strong><span>Companies</span></div>
-            </div>
-          </section>
 
-          <section className="panel">
-            <div className="setup-section-head">
-              <div>
-                <p className="eyebrow">Pipeline</p>
-                <h2>Backlog by company</h2>
-                <p className="hint">Who still needs scheduling vs already sent.</p>
-              </div>
-              {backlog.length > 0 && (
-                <button type="button" onClick={() => setBacklogDetails((value) => !value)}>
-                  {backlogDetails ? "Hide details" : "Show details"}
-                </button>
-              )}
-            </div>
-            {backlog.length > 0 ? (
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <SortableTh label="Company" sortKey="companyName" sort={backlogSort} onSort={(key) => setBacklogSort((prev) => toggleSort(prev, key))} />
-                      <SortableTh label="Remaining" sortKey="remaining" sort={backlogSort} onSort={(key) => setBacklogSort((prev) => toggleSort(prev, key, "desc"))} />
-                      <SortableTh label="Today" sortKey="scheduledToday" sort={backlogSort} onSort={(key) => setBacklogSort((prev) => toggleSort(prev, key, "desc"))} />
-                      <SortableTh label="Sent" sortKey="sent" sort={backlogSort} onSort={(key) => setBacklogSort((prev) => toggleSort(prev, key, "desc"))} />
-                      <SortableTh label="Next" sortKey="nextScheduledSend" sort={backlogSort} onSort={(key) => setBacklogSort((prev) => toggleSort(prev, key))} />
-                      {backlogDetails && (
-                        <>
-                          <SortableTh label="Collected" sortKey="collected" sort={backlogSort} onSort={(key) => setBacklogSort((prev) => toggleSort(prev, key, "desc"))} />
-                          <SortableTh label="High" sortKey="highConfidence" sort={backlogSort} onSort={(key) => setBacklogSort((prev) => toggleSort(prev, key, "desc"))} />
-                          <SortableTh label="Review" sortKey="needsReview" sort={backlogSort} onSort={(key) => setBacklogSort((prev) => toggleSort(prev, key, "desc"))} />
-                          <SortableTh label="Rolled" sortKey="rolledOver" sort={backlogSort} onSort={(key) => setBacklogSort((prev) => toggleSort(prev, key, "desc"))} />
-                          <SortableTh label="Failed" sortKey="failed" sort={backlogSort} onSort={(key) => setBacklogSort((prev) => toggleSort(prev, key, "desc"))} />
-                          <SortableTh label="Supp." sortKey="suppressed" sort={backlogSort} onSort={(key) => setBacklogSort((prev) => toggleSort(prev, key, "desc"))} />
-                        </>
-                      )}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sortedBacklog.map((job) => (
-                      <tr key={job.jobId}>
-                        <td>
-                          <strong>{job.companyName}</strong>
-                          {job.roleTitle ? <small>{job.roleTitle}</small> : null}
-                        </td>
-                        <td>{job.remaining}</td>
-                        <td>{job.scheduledToday}</td>
-                        <td>{job.sent}</td>
-                        <td>{job.nextScheduledSend ? new Date(job.nextScheduledSend).toLocaleString() : "—"}</td>
-                        {backlogDetails && (
-                          <>
-                            <td>{job.collected}</td>
-                            <td>{job.highConfidence}</td>
-                            <td>{job.needsReview}</td>
-                            <td>{job.rolledOver}</td>
-                            <td>{job.failed}</td>
-                            <td>{job.suppressed}</td>
-                          </>
-                        )}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <div className="empty-state compact">
-                <h2>No backlog yet</h2>
-                <ol>
-                  <li>Find recruiters on the Send tab.</li>
-                  <li>Wait for emails to discover.</li>
-                  <li>Come back here to schedule today&apos;s safe queue.</li>
-                </ol>
-              </div>
-            )}
-          </section>
-
-          <section className="panel history-contacts-panel">
-            <div className="setup-section-head">
-              <div>
-                <p className="eyebrow">Contacts</p>
-                <h2>Outreach history</h2>
-                <p className="hint">Everyone you&apos;ve captured — sent or not. Search company, person, email, or LinkedIn.</p>
-              </div>
-              {filteredHistory.length > 1 && (
-                <div className="history-toolbar-actions">
-                  <button
-                    type="button"
-                    onClick={() => setExpandedCompanies(new Set(filteredHistory.map((company) => company.companyName)))}
-                  >
-                    Expand all
-                  </button>
-                  <button type="button" onClick={() => setExpandedCompanies(new Set())}>
-                    Collapse
-                  </button>
+            {historyView === "companies" ? (
+              <div role="tabpanel" className="history-companies-view">
+                <div className="history-section-heading">
+                  <div>
+                    <h2>Companies and people</h2>
+                    <p className="hint">Search your complete contact history and pick up any conversation.</p>
+                  </div>
+                  <div className="history-heading-actions">
+                    <span className="history-result-count">{filteredHistory.length} {filteredHistory.length === 1 ? "company" : "companies"}</span>
+                    <div className="history-density-switch" role="group" aria-label="Cards per row">
+                      <button type="button" className={historyColumns === 3 ? "active" : ""} aria-pressed={historyColumns === 3} onClick={() => setHistoryColumns(3)}>3 columns</button>
+                      <button type="button" className={historyColumns === 4 ? "active" : ""} aria-pressed={historyColumns === 4} onClick={() => setHistoryColumns(4)}>4 columns</button>
+                    </div>
+                  </div>
                 </div>
-              )}
-            </div>
-            <div className="history-toolbar">
-              <label className="history-search">
-                Search
-                <input
-                  value={historyQuery}
-                  onChange={(event) => setHistoryQuery(event.target.value)}
-                  placeholder="Google, Jane Doe, @apple.com…"
-                />
-              </label>
-              <label className="history-sort">
-                Sort
-                <select
-                  value={`${historySort.key}:${historySort.direction}`}
-                  onChange={(event) => {
-                    const [key, direction] = event.target.value.split(":") as [HistorySortKey, "asc" | "desc"];
-                    setHistorySort({ key, direction });
-                  }}
-                >
-                  <option value="lastActivityAt:desc">Last activity</option>
-                  <option value="sent:desc">Most sent</option>
-                  <option value="recruiterCount:desc">Most people</option>
-                  <option value="companyName:asc">Company A–Z</option>
-                </select>
-              </label>
-            </div>
-            {filteredHistory.length > 0 ? (
-              <div className="history-company-grid">
-                {filteredHistory.map((company) => {
-                  const expanded = expandedCompanies.has(company.companyName) || Boolean(historyQuery.trim());
-                  const page = historyPeoplePage[company.companyName] ?? 0;
-                  const pageCount = Math.max(1, Math.ceil(company.recruiters.length / HISTORY_PEOPLE_PAGE_SIZE));
-                  const safePage = Math.min(page, pageCount - 1);
-                  const slice = company.recruiters.slice(
-                    safePage * HISTORY_PEOPLE_PAGE_SIZE,
-                    (safePage + 1) * HISTORY_PEOPLE_PAGE_SIZE,
-                  );
-                  const peopleLabel =
-                    company.recruiters.length === 1 ? "1 person" : `${company.recruiters.length} people`;
-                  return (
-                    <article
-                      className={`history-company-card ${expanded ? "expanded" : ""}`}
-                      key={company.companyName}
+                <div className="history-toolbar">
+                  <label className="history-search">
+                    <span>Search history</span>
+                    <input
+                      type="search"
+                      value={historyQuery}
+                      onChange={(event) => setHistoryQuery(event.target.value)}
+                      placeholder="Company, person, email, or LinkedIn"
+                    />
+                  </label>
+                  <label className="history-sort">
+                    <span>Sort by</span>
+                    <select
+                      value={`${historySort.key}:${historySort.direction}`}
+                      onChange={(event) => {
+                        const [key, direction] = event.target.value.split(":") as [HistorySortKey, "asc" | "desc"];
+                        setHistorySort({ key, direction });
+                      }}
                     >
-                      <div className="history-company-card-header">
-                        <button
-                          type="button"
-                          className="history-company-card-main"
-                          aria-expanded={expanded}
-                          onClick={(event) => {
-                            const name = company.companyName;
-                            const opening = !expandedCompanies.has(name) && !historyQuery.trim();
-                            setExpandedCompanies((prev) => {
-                              const next = new Set(prev);
-                              if (next.has(name)) {
-                                next.delete(name);
-                              } else {
-                                next.add(name);
-                              }
-                              return next;
-                            });
-                            if (!opening) return;
-                            const card = event.currentTarget.closest(".history-company-card");
-                            if (!(card instanceof HTMLElement)) return;
-                            // Let the expand layout settle, then bring the full people list into view.
-                            window.requestAnimationFrame(() => {
-                              window.setTimeout(() => {
-                                card.scrollIntoView({ behavior: "smooth", block: "start" });
-                              }, 80);
-                            });
-                          }}
+                      <option value="lastActivityAt:desc">Recent activity</option>
+                      <option value="sent:desc">Most sent</option>
+                      <option value="recruiterCount:desc">Most people</option>
+                      <option value="companyName:asc">Company A–Z</option>
+                    </select>
+                  </label>
+                </div>
+                <div className="history-filters" aria-label="Filter companies">
+                  {([
+                    ["all", "All"],
+                    ["ready", "Ready to send"],
+                    ["sent", "Sent"],
+                    ["needsEmail", "Needs email"],
+                  ] as Array<[HistoryFilter, string]>).map(([value, label]) => (
+                    <button
+                      type="button"
+                      key={value}
+                      className={historyFilter === value ? "active" : ""}
+                      aria-pressed={historyFilter === value}
+                      onClick={() => setHistoryFilter(value)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {filteredHistory.length > 0 ? (
+                  <div className={`history-company-list columns-${historyColumns}`}>
+                    {filteredHistory.map((company, companyIndex) => {
+                      const expanded = expandedCompanies.has(company.companyName);
+                      const opening = openingHistoryCompanies.has(company.companyName);
+                      const closing = closingHistoryCompanies.has(company.companyName);
+                      const selected = expanded || opening || closing;
+                      const rowStart = Math.floor(companyIndex / historyColumns) * historyColumns;
+                      const rowEnd = Math.min(rowStart + historyColumns, filteredHistory.length) - 1;
+                      const isRowEnd = companyIndex === rowEnd;
+                      const detailCompany = isRowEnd
+                        ? filteredHistory.slice(rowStart, rowEnd + 1).find((entry) =>
+                            expandedCompanies.has(entry.companyName)
+                            || openingHistoryCompanies.has(entry.companyName)
+                            || closingHistoryCompanies.has(entry.companyName),
+                          )
+                        : undefined;
+                      return (
+                        <React.Fragment key={company.companyName}>
+                        <article
+                          className={`history-company-card${selected ? " history-company-selected" : ""}`}
+                          data-history-company={company.companyName}
+                          style={{
+                            "--history-brand": companyBrandColor(company.companyName),
+                          } as React.CSSProperties}
                         >
-                          <div className="history-company-card-top">
-                            <h3>{company.companyName}</h3>
-                            <span className="history-people-count">{peopleLabel}</span>
-                          </div>
-                          <span className={`history-card-chevron ${expanded ? "open" : ""}`} aria-hidden="true">
-                            ▾
-                          </span>
-                        </button>
-                        <button
-                          type="button"
-                          className={expanded ? "history-add-to-send" : "history-add-to-send-icon"}
-                          aria-label={`Add ${company.companyName} to Send`}
-                          title="Add to Send"
-                          disabled={busy || company.recruiters.length === 0}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            void addHistoryCompanyToSend(company);
-                          }}
-                        >
-                          {expanded ? "Add to Send" : "+"}
-                        </button>
-                      </div>
-                      <div
-                        className="history-people-shell"
-                        aria-hidden={!expanded}
-                        {...(!expanded ? { inert: true } : {})}
-                      >
-                        <div className="history-people-inner">
-                          <div className="history-people-panel">
-                            <p className="history-company-meta">
-                              <span>{company.withEmail ?? 0} with email</span>
-                              <span>{company.sent} sent</span>
-                              {(company.readyUnsent ?? 0) > 0 && (
-                                <span>{company.readyUnsent} ready unsent</span>
-                              )}
-                              <span className="history-activity">{formatActivityAt(company.lastActivityAt)}</span>
-                            </p>
-                            <div className="history-people-grid">
-                              {slice.map((recruiter) => {
-                                const emails = allEmailsFor(recruiter);
-                                const chip = candidateChip(recruiter);
-                                return (
-                                  <div className="history-person-card" key={recruiter.id}>
-                                    <PersonAvatar candidate={recruiter} size="tiny" />
-                                    <div className="history-person-card-body">
-                                      <div className="history-person-top">
-                                        <strong>{recruiter.fullName}</strong>
-                                        <span className={`chip ${chip.tone}`}>{chip.label}</span>
-                                      </div>
-                                      {recruiter.title && (
-                                        <small className="history-person-title">{recruiter.title}</small>
-                                      )}
-                                      <div className="history-person-links">
-                                        {recruiter.linkedinUrl ? (
-                                          <a href={recruiter.linkedinUrl} target="_blank" rel="noreferrer">
-                                            LinkedIn
-                                          </a>
-                                        ) : (
-                                          <span className="hint">No LinkedIn</span>
-                                        )}
-                                        {emails.length > 0 ? (
-                                          <span className="history-emails">{emails[0]}</span>
-                                        ) : (
-                                          <span className="hint">No email</span>
-                                        )}
-                                      </div>
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                            {company.recruiters.length > HISTORY_PEOPLE_PAGE_SIZE && (
-                              <div className="list-pagination">
-                                <button
-                                  type="button"
-                                  disabled={safePage <= 0}
-                                  onClick={() =>
-                                    setHistoryPeoplePage((prev) => ({
-                                      ...prev,
-                                      [company.companyName]: Math.max(0, safePage - 1),
-                                    }))
-                                  }
-                                >
-                                  Previous
-                                </button>
-                                <span>
-                                  {safePage * HISTORY_PEOPLE_PAGE_SIZE + 1}–
-                                  {Math.min((safePage + 1) * HISTORY_PEOPLE_PAGE_SIZE, company.recruiters.length)} of{" "}
-                                  {company.recruiters.length}
-                                </span>
-                                <button
-                                  type="button"
-                                  disabled={safePage >= pageCount - 1}
-                                  onClick={() =>
-                                    setHistoryPeoplePage((prev) => ({
-                                      ...prev,
-                                      [company.companyName]: Math.min(pageCount - 1, safePage + 1),
-                                    }))
-                                  }
-                                >
-                                  Next
-                                </button>
+                          <div className="history-company-card-header">
+                            <button
+                              type="button"
+                              className="history-company-card-main"
+                              aria-expanded={expanded}
+                              onClick={() => toggleHistoryCompany(company.companyName)}
+                            >
+                              <CompanyLogo company={company} />
+                              <div className="history-company-identity">
+                                <h3>{company.companyName}</h3>
+                                <span>{company.recruiters.length} {company.recruiters.length === 1 ? "contact" : "contacts"}</span>
                               </div>
-                            )}
+                              <span className="history-view-contacts">
+                                {expanded ? "Hide contacts" : "View contacts"}
+                                <span className={`history-card-chevron ${expanded ? "open" : ""}`} aria-hidden="true">⌄</span>
+                              </span>
+                            </button>
+                            <button
+                              type="button"
+                              className="history-add-to-send"
+                              disabled={busy || company.recruiters.length === 0}
+                              onClick={() => void addHistoryCompanyToSend(company)}
+                            >
+                              <span className="history-send-label-full">Add to Send</span>
+                              <span className="history-send-label-short">Send</span>
+                            </button>
                           </div>
-                        </div>
-                      </div>
-                    </article>
-                  );
-                })}
+                        </article>
+                        {detailCompany && (
+                          <HistoryCompanyDetails
+                            company={detailCompany}
+                            columns={historyColumns}
+                            expanded={expandedCompanies.has(detailCompany.companyName)}
+                            page={historyPeoplePage[detailCompany.companyName] ?? 0}
+                            onPage={(nextPage) => setHistoryPeoplePage((previous) => ({ ...previous, [detailCompany.companyName]: nextPage }))}
+                            onClose={() => toggleHistoryCompany(detailCompany.companyName)}
+                          />
+                        )}
+                        </React.Fragment>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="empty-state compact history-empty">
+                    <h2>{historyQuery.trim() || historyFilter !== "all" ? "No matching companies" : "No history yet"}</h2>
+                    <p className="hint">{historyQuery.trim() || historyFilter !== "all" ? "Try another search or choose a different filter." : "People you add from Send will appear here."}</p>
+                  </div>
+                )}
               </div>
             ) : (
-              <div className="empty-state compact">
-                <h2>{historyQuery.trim() ? "No matches" : "No contacts yet"}</h2>
-                {historyQuery.trim() ? (
-                  <p className="hint">Try a different company, person, or email fragment.</p>
+              <div role="tabpanel" className="history-queue-view">
+                <div className="history-section-heading history-queue-heading">
+                  <div>
+                    <h2>Sending queue</h2>
+                    <p className="hint">Review what is waiting, then schedule the next batch when you&apos;re ready.</p>
+                  </div>
+                  <button className="primary" onClick={() => void runScheduleToday()} disabled={busy || backlog.length === 0}>Schedule today&apos;s queue</button>
+                </div>
+                <div className="history-queue-summary">
+                  <span><strong>{historyQueueTotal}</strong> waiting</span>
+                  <span><strong>{backlog.reduce((sum, job) => sum + job.scheduledToday, 0)}</strong> scheduled today</span>
+                  <span><strong>{backlog.reduce((sum, job) => sum + job.remaining, 0)}</strong> remaining</span>
+                </div>
+                {backlog.length > 0 ? (
+                  <>
+                    <div className="history-queue-tools">
+                      <span>{backlog.length} {backlog.length === 1 ? "company" : "companies"} in this queue</span>
+                      <button
+                        type="button"
+                        onClick={() => setBacklogDetails((value) => !value)}
+                      >
+                        {backlogDetails ? "Hide details" : "Show details"}
+                      </button>
+                    </div>
+                    <div className="table-wrap history-queue-table">
+                      <table>
+                        <thead><tr>
+                          <SortableTh label="Company" sortKey="companyName" sort={backlogSort} onSort={(key) => setBacklogSort((prev) => toggleSort(prev, key))} />
+                          <SortableTh label="Waiting" sortKey="remaining" sort={backlogSort} onSort={(key) => setBacklogSort((prev) => toggleSort(prev, key, "desc"))} />
+                          <SortableTh label="Today" sortKey="scheduledToday" sort={backlogSort} onSort={(key) => setBacklogSort((prev) => toggleSort(prev, key, "desc"))} />
+                          <SortableTh label="Sent" sortKey="sent" sort={backlogSort} onSort={(key) => setBacklogSort((prev) => toggleSort(prev, key, "desc"))} />
+                          <SortableTh label="Next send" sortKey="nextScheduledSend" sort={backlogSort} onSort={(key) => setBacklogSort((prev) => toggleSort(prev, key))} />
+                          {backlogDetails && <><SortableTh label="Found" sortKey="collected" sort={backlogSort} onSort={(key) => setBacklogSort((prev) => toggleSort(prev, key, "desc"))} /><SortableTh label="Ready" sortKey="highConfidence" sort={backlogSort} onSort={(key) => setBacklogSort((prev) => toggleSort(prev, key, "desc"))} /><SortableTh label="Review" sortKey="needsReview" sort={backlogSort} onSort={(key) => setBacklogSort((prev) => toggleSort(prev, key, "desc"))} /><SortableTh label="Rolled over" sortKey="rolledOver" sort={backlogSort} onSort={(key) => setBacklogSort((prev) => toggleSort(prev, key, "desc"))} /><SortableTh label="Failed" sortKey="failed" sort={backlogSort} onSort={(key) => setBacklogSort((prev) => toggleSort(prev, key, "desc"))} /><SortableTh label="Skipped" sortKey="suppressed" sort={backlogSort} onSort={(key) => setBacklogSort((prev) => toggleSort(prev, key, "desc"))} /></>}
+                        </tr></thead>
+                        <tbody>{sortedBacklog.map((job) => <tr key={job.jobId}>
+                          <td><strong>{job.companyName}</strong>{job.roleTitle ? <small>{job.roleTitle}</small> : null}</td>
+                          <td>{job.remaining}</td><td>{job.scheduledToday}</td><td>{job.sent}</td><td>{job.nextScheduledSend ? new Date(job.nextScheduledSend).toLocaleString() : "Not scheduled"}</td>
+                          {backlogDetails && <><td>{job.collected}</td><td>{job.highConfidence}</td><td>{job.needsReview}</td><td>{job.rolledOver}</td><td>{job.failed}</td><td>{job.suppressed}</td></>}
+                        </tr>)}</tbody>
+                      </table>
+                    </div>
+                  </>
                 ) : (
-                  <ol>
-                    <li>Capture recruiters from the Send tab.</li>
-                    <li>Let discovery find emails.</li>
-                    <li>They&apos;ll appear here as your contact directory.</li>
-                  </ol>
+                  <div className="empty-state compact history-empty"><h2>Your queue is clear</h2><p className="hint">Ready emails will appear here after you add people from Send.</p></div>
                 )}
               </div>
             )}
@@ -6104,12 +6274,12 @@ function App() {
                     <div className="setup-section-head">
                       <div>
                         <p className="eyebrow">Climb</p>
-                        <h2>Cumulative companies</h2>
-                        <p className="hint">Distinct companies you&apos;ve emailed over time (same as companies reached).</p>
+                        <h2>Cumulative emails sent</h2>
+                        <p className="hint">Every sent email, added up day by day.</p>
                       </div>
                     </div>
                     <div className="analytics-chart-plot">
-                      <CumulativeSendsChart points={analytics.cumulativeSends} />
+                      <CumulativeEmailsChart points={analytics.cumulativeSends} />
                     </div>
                   </section>
 
@@ -6199,12 +6369,17 @@ function App() {
                     <div>
                       <p className="eyebrow">Map</p>
                       <h2>Companies you&apos;ve reached</h2>
-                      <p className="hint">Bubble size = emails actually sent. Click one to open it in History.</p>
+                      <p className="hint">Bubble size reflects emails sent. Select a company to open it in History.</p>
                     </div>
                   </div>
                   {analytics.companies.filter((row) => row.sent > 0).length > 0 ? (
-                    <CompanyBubbles
+                    <CompanyReachBubbles
                       companies={analytics.companies}
+                      logoDomains={new Map(
+                        history
+                          .map((company) => [normalizeCompanyToken(company.companyName), companyLogoDomain(company)] as const)
+                          .filter((entry): entry is readonly [string, string] => Boolean(entry[1])),
+                      )}
                       onOpen={(companyName) => {
                         setTab("history");
                         setHistoryQuery("");
@@ -6397,7 +6572,15 @@ function App() {
   );
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+type RootWindow = Window & { __recruiterReachoutRoot?: Root };
+const rootElement = document.getElementById("root");
+if (!rootElement) {
+  throw new Error("Could not find the app root.");
+}
+const rootWindow = window as RootWindow;
+const appRoot = rootWindow.__recruiterReachoutRoot ?? createRoot(rootElement);
+rootWindow.__recruiterReachoutRoot = appRoot;
+appRoot.render(<App />);
 
 function formatModelLabel(model?: string): string {
   const value = model?.trim();

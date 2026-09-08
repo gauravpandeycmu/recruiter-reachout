@@ -118,6 +118,14 @@ export async function probeJobrightSession(page: Page): Promise<{ ready: boolean
   if (/sign.?in|login|auth/i.test(url)) {
     return { ready: false, message: "Not logged in — sign in to Jobright in the automation browser." };
   }
+  const signedOut = await page
+    .getByRole("button", { name: /^(sign in|join now)$/i })
+    .first()
+    .isVisible({ timeout: 1200 })
+    .catch(() => false);
+  if (signedOut) {
+    return { ready: false, message: "Jobright session expired — open login and sign in again." };
+  }
   const loggedIn = await page
     .locator("text=/Find Any Email|Dashboard|Sign out|Log out/i")
     .first()
@@ -200,11 +208,13 @@ export async function probeAllSessionsFast(): Promise<SetupSessionStatus> {
  * If the worker already holds the profile, treat Gmail as ready. Otherwise read cookies headlessly.
  */
 async function probeGmailProfileReady(): Promise<{ ready: boolean; message: string }> {
-  // Never launch against a live worker-owned Chromium — that closes/races the send browser.
+  // Never launch against a live Chromium — that closes/races the send browser.
+  // A lock only proves that a browser is open; it does not prove Gmail is signed
+  // in (the setup login window may itself be sitting on "Choose an account").
   if (isChromiumProfileLocked(GMAIL_USER_DATA_DIR)) {
     return {
-      ready: true,
-      message: "Gmail session is held by the worker — signed in. Use Open login only if sends fail.",
+      ready: false,
+      message: "Gmail is open in its sending window. Make sure the inbox is visible there, close that window, then refresh status.",
     };
   }
 
@@ -221,8 +231,8 @@ async function probeGmailProfileReady(): Promise<{ ready: boolean; message: stri
     const message = error instanceof Error ? error.message : String(error);
     if (/SingletonLock|ProcessSingleton|user data directory is already in use/i.test(message)) {
       return {
-        ready: true,
-        message: "Gmail session is held by the worker — signed in. Use Open login only if sends fail.",
+        ready: false,
+        message: "Gmail is open in its sending window. Make sure the inbox is visible there, close that window, then refresh status.",
       };
     }
     return { ready: false, message };

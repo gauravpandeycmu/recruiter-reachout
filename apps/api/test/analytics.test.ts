@@ -392,7 +392,7 @@ describe("analytics", () => {
     expect(summary.hourly.reduce((sum, bucket) => sum + bucket.sent, 0)).toBe(1);
   });
 
-  it("cumulative companies tracks unique companies reached from send events", async () => {
+  it("cumulative sends tracks every sent email and carries in the all-time baseline", async () => {
     const store = await freshStore();
     const acme = store.upsertCandidate(
       createCandidate({
@@ -413,6 +413,11 @@ describe("analytics", () => {
     store.addEvent({
       ...createEvent(acme.id, "send"),
       company: "Acme",
+      createdAt: "2025-12-01T18:00:00.000Z",
+    });
+    store.addEvent({
+      ...createEvent(acme.id, "send"),
+      company: "Acme",
       createdAt: "2026-07-10T18:00:00.000Z",
     });
     store.addEvent({
@@ -429,9 +434,10 @@ describe("analytics", () => {
     const summary = buildAnalyticsSummary(store, "2026-07-11", { tzOffsetMinutes: 0 });
     const day10 = summary.cumulativeSends.find((row) => row.date === "2026-07-10");
     const day11 = summary.cumulativeSends.find((row) => row.date === "2026-07-11");
-    expect(day10?.total).toBe(1);
-    expect(day11?.total).toBe(2);
-    expect(summary.cumulativeSends.at(-1)?.total).toBe(2);
+    expect(day10?.total).toBe(2);
+    expect(day11?.total).toBe(4);
+    expect(summary.cumulativeSends.at(-1)?.total).toBe(4);
+    expect(summary.allTime.sent).toBe(4);
     expect(summary.allTime.companiesTouched).toBe(2);
     expect(summary.week.companiesReached).toBe(2);
     expect(summary.today.companiesReached).toBe(2);

@@ -217,8 +217,8 @@ describe("rescheduleQueuedSend integration", () => {
       .sort((a, b) => a.scheduledFor.localeCompare(b.scheduledFor));
     expect(notionAfter.map((item) => item.scheduledFor)).toEqual([
       morningBlock.toISOString(),
-      new Date(morningBlock.getTime() + 4 * 60_000).toISOString(),
-      new Date(morningBlock.getTime() + 8 * 60_000).toISOString(),
+      new Date(morningBlock.getTime() + 60_000).toISOString(),
+      new Date(morningBlock.getTime() + 2 * 60_000).toISOString(),
     ]);
 
     const jobs = store
@@ -237,7 +237,7 @@ describe("rescheduleQueuedSend integration", () => {
     expect(new Date(seatgeekAfter[0]!).getTime()).toBeLessThan(morningBlock.getTime());
   });
 
-  it("rescheduleCompanyBatch lands a company on a new start with intact spacing", async () => {
+  it("rescheduleCompanyBatch lands a company on a new start with fixed one-minute spacing", async () => {
     // Use a stable far-future evening so local clock hour cannot collapse the window.
     const evening = new Date();
     evening.setDate(evening.getDate() + 2);
@@ -262,7 +262,7 @@ describe("rescheduleQueuedSend integration", () => {
     tomorrow8.setHours(8, 0, 0, 0);
 
     // Old UI applied person-by-person deltas from a stale snapshot (rebalance mid-loop).
-    // Batch API is the supported path — lock correct start + 4m spacing.
+    // Batch API is the supported path — lock the start and normalize legacy spacing to 1m.
     const delta = tomorrow8.getTime() - new Date(notionQueue[0]!.scheduledFor).getTime();
     for (const item of notionQueue) {
       const nextAt = new Date(new Date(item.scheduledFor).getTime() + delta).toISOString();
@@ -280,8 +280,8 @@ describe("rescheduleQueuedSend integration", () => {
       .filter((item) => [n1.id, n2.id, n3.id].includes(item.candidateId))
       .sort((a, b) => a.scheduledFor.localeCompare(b.scheduledFor));
     expect(fixed[0]!.scheduledFor).toBe(tomorrow8.toISOString());
-    expect(fixed[1]!.scheduledFor).toBe(new Date(tomorrow8.getTime() + 4 * 60_000).toISOString());
-    expect(fixed[2]!.scheduledFor).toBe(new Date(tomorrow8.getTime() + 8 * 60_000).toISOString());
+    expect(fixed[1]!.scheduledFor).toBe(new Date(tomorrow8.getTime() + 60_000).toISOString());
+    expect(fixed[2]!.scheduledFor).toBe(new Date(tomorrow8.getTime() + 2 * 60_000).toISOString());
   });
 
   it("rescheduleCompanyBatch clamps a past startAt to now instead of failing", async () => {
