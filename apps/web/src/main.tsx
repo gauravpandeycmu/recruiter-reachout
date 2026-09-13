@@ -791,6 +791,40 @@ function CumulativeEmailsChart({ points }: { points: Array<{ date: string; total
   );
 }
 
+function ProviderLookupChart({ rows }: { rows: AnalyticsSummary["providerLookups"] }) {
+  const rawMax = Math.max(1, ...rows.flatMap((row) => [row.attempted, row.found]));
+  const magnitude = 10 ** Math.floor(Math.log10(rawMax));
+  const step = Math.max(1, Math.ceil(rawMax / (4 * magnitude)) * magnitude);
+  const scaleMax = Math.ceil(rawMax / step) * step;
+  const ticks = Array.from({ length: 5 }, (_, index) => Math.round(scaleMax * (1 - index / 4)));
+  return (
+    <div className="provider-lookup-chart" role="img" aria-label="Email lookup attempts and emails found by provider">
+      <div className="provider-lookup-axis" aria-hidden="true">
+        {ticks.map((tick) => <span key={tick}>{formatCompact(tick)}</span>)}
+      </div>
+      <div className="provider-lookup-scroll">
+        <div className="provider-lookup-plot">
+          {rows.map((row) => (
+            <div className="provider-lookup-group" key={row.provider} title={`${row.label}: ${row.attempted} attempted, ${row.found} found`}>
+              <div className="provider-lookup-bars">
+                <div className="provider-lookup-bar-wrap">
+                  <strong>{row.attempted}</strong>
+                  <div className="provider-lookup-bar attempted" style={{ height: `${(row.attempted / scaleMax) * 100}%` }} />
+                </div>
+                <div className="provider-lookup-bar-wrap">
+                  <strong>{row.found}</strong>
+                  <div className="provider-lookup-bar found" style={{ height: `${(row.found / scaleMax) * 100}%` }} />
+                </div>
+              </div>
+              <span>{row.label}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function HourlySendsChart({ hourly }: { hourly: Array<{ hour: number; sent: number }> }) {
   const max = Math.max(1, ...hourly.map((bucket) => bucket.sent));
   return (
@@ -1229,6 +1263,9 @@ function App() {
     }
   });
   const [recipientPage, setRecipientPage] = useState(0);
+  const [editingEmailId, setEditingEmailId] = useState<string>();
+  const [emailDraft, setEmailDraft] = useState("");
+  const [emailEditBusy, setEmailEditBusy] = useState(false);
   const [historyPeoplePage, setHistoryPeoplePage] = useState<Record<string, number>>({});
   const [companyFact, setCompanyFact] = useState("");
   const [roleTitle, setRoleTitle] = useState("");
@@ -1236,6 +1273,7 @@ function App() {
   const [jobUrl, setJobUrl] = useState("");
   const [linkedinPost, setLinkedinPost] = useState("");
   const [passionate, setPassionate] = useState(false);
+  const [customise, setCustomise] = useState(false);
   const [workerStatus, setWorkerStatus] = useState<WorkerStatusView>();
   const [salesqlAutoFallback, setSalesqlAutoFallback] = useState(false);
   const [setupSessions, setSetupSessions] = useState<SetupSessionStatus | undefined>(() => readStoredSessionStatus());
@@ -1567,6 +1605,25 @@ function App() {
     return (state?.companyContent ?? []).find((content) => content.company === key);
   }, [batchCompany, state?.companyContent]);
 
+  // Start availability discovery while the user adds job context, but only for a
+  // one-person batch. Larger batches must never create a long background queue.
+  const availabilityRequests = useRef(new Set<string>());
+  useEffect(() => {
+    if (displayCandidates.length !== 1) return;
+    const person = displayCandidates[0];
+    if (!person?.linkedinUrl || person.linkedinMessageSentAt || person.linkedinMessageTask || person.linkedinMessageAvailability || availabilityRequests.current.has(person.id)) return;
+    availabilityRequests.current.add(person.id);
+    void (async () => {
+      try {
+        await checkLinkedInMessaging(person.id);
+        await refresh().catch(() => undefined);
+      } catch {
+        // Permit the next state snapshot to retry a failed queue request.
+        availabilityRequests.current.delete(person.id);
+      }
+    })();
+  }, [displayCandidates]);
+
   // Generation / manual apply bumps this so the recipient-change effect does not
   // treat a fresh preview as "missing" and flash the loading skeleton.
   const previewSkipFetchRef = useRef(false);
@@ -1653,6 +1710,7 @@ function App() {
   // Never clear it from generation/refresh — that was turning it off after generate.
   useEffect(() => {
     setPassionate(false);
+    setCustomise(false);
   }, [batchCompany]);
 
   useEffect(() => {
@@ -1660,6 +1718,10 @@ function App() {
       setPassionate(true);
     }
   }, [batchContent?.id, batchContent?.updatedAt, batchContent?.generationContext?.passionate]);
+
+  useEffect(() => {
+    if (batchContent?.generationContext?.customise === true) setCustomise(true);
+  }, [batchContent?.id, batchContent?.updatedAt, batchContent?.generationContext?.customise]);
 
   useEffect(() => {
     const ctx = batchContent?.generationContext;
@@ -1886,8 +1948,9 @@ function App() {
     [upcomingSends, trackedSendQueueIds],
   );
 
+  const hasActiveLinkedInMessageWork = displayCandidates.some((candidate) => Boolean(candidate.linkedinMessageTask));
   const hasActiveSendOrDiscoveryWork =
-    pendingCount > 0 || isSendingPhase || (Boolean(sendSession) && trackedSendMode === "now");
+    pendingCount > 0 || hasActiveLinkedInMessageWork || isSendingPhase || (Boolean(sendSession) && trackedSendMode === "now");
   const hasScheduledWorkToWatch =
     scheduledSendCount > 0 || upcomingSends.length > 0 || trackedSendQueueIds.length > 0;
   const shouldPollSendTab = tab === "send" && (hasActiveSendOrDiscoveryWork || hasScheduledWorkToWatch);
@@ -2482,9 +2545,34 @@ function App() {
   }
 
   async function chooseEmail(candidate: RecruiterCandidate, email: string) {
-    await updateCandidate(candidate.id, { email });
-    await refresh();
-    await runPreview(candidate).catch(() => undefined);
+    const trimmed = email.trim().toLowerCase();
+    if (!trimmed.includes("@")) {
+      setMessage("Enter a valid email address.");
+      return;
+    }
+    setEmailEditBusy(true);
+    try {
+      await updateCandidate(candidate.id, { email: trimmed });
+      setEditingEmailId(undefined);
+      setEmailDraft("");
+      setMessage(`Updated email for ${candidate.fullName}.`);
+      await refresh();
+      await runPreview(candidate).catch(() => undefined);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to update email.");
+    } finally {
+      setEmailEditBusy(false);
+    }
+  }
+
+  function startEmailEdit(candidate: RecruiterCandidate) {
+    setEditingEmailId(candidate.id);
+    setEmailDraft(candidate.email ?? "");
+  }
+
+  function cancelEmailEdit() {
+    setEditingEmailId(undefined);
+    setEmailDraft("");
   }
 
   async function removeFromSendList(candidate: RecruiterCandidate) {
@@ -2537,8 +2625,8 @@ function App() {
       setSalesqlAutoFallback(settings.salesqlAutoFallback);
       setMessage(
         settings.salesqlAutoFallback
-          ? "SalesQL auto-fallback ON — Jobright misses will spend a SalesQL credit, then try Apollo if SalesQL has no email."
-          : "SalesQL auto-fallback OFF — Jobright only, unless you click Check via SalesQL.",
+          ? "Automatic Finder fallback is on. After a Jobright miss, available email providers are tried in order."
+          : "Automatic Finder fallback is off. Jobright will run alone unless you start a manual Finder check.",
       );
     } catch (error) {
       setSalesqlAutoFallback(!enabled);
@@ -2552,7 +2640,7 @@ function App() {
       const result = await requestSalesqlSweep();
       setMessage(
         result.queued > 0
-          ? `Queued ${result.queued} candidate(s) for a one-time SalesQL check (Apollo next if SalesQL misses).`
+          ? `Queued ${result.queued} candidate(s) for a one-time check through all available email providers.`
           : "Nothing to check — every active candidate already has an email.",
       );
       await refresh();
@@ -3061,6 +3149,10 @@ function App() {
       setMessage("No ready recipients to schedule.");
       return;
     }
+    if (!batchContent) {
+      setMessage("Generate outreach for this company before sending.");
+      return;
+    }
     if (selected && !(await ensurePreviewSaved(selected))) {
       setMessage("Save your email edits before scheduling, or reset the preview.");
       return;
@@ -3302,6 +3394,7 @@ function App() {
     const hasJdContext = Boolean(jobDescription.trim()) || willFetchFromLink;
     // Capture before any async work — never let refresh/effects clear the user's choice.
     const wantPassionate = passionate;
+    const wantCustomise = customise;
     const steps: Array<{ id: string; label: string }> = [];
     if (willFetchFromLink) {
       steps.push({ id: "fetch", label: "Downloading job posting" });
@@ -3437,6 +3530,7 @@ function App() {
           jobUrl: jobUrl || undefined,
           linkedinPost: linkedinPost || undefined,
           passionate: wantPassionate,
+          customise: wantCustomise,
           recipientTitles: companyCandidates
             .map((candidate) => candidate.title?.trim())
             .filter((title): title is string => Boolean(title)),
@@ -3491,9 +3585,11 @@ function App() {
         return { ...prev, companyContent: [content, ...others] };
       });
       setMessage(
-        willFetchFromLink
-          ? `Fetched the job posting and generated email + LinkedIn copy for ${content.companyDisplayName}.`
-          : `Generated personalized email + LinkedIn copy for ${content.companyDisplayName}.`,
+        willFetchFromLink && !content.generationContext?.jobDescription
+          ? `Generated email + LinkedIn copy for ${content.companyDisplayName}. The job link could not be read (it may require login), so outreach used the role/title only.`
+          : willFetchFromLink
+            ? `Fetched the job posting and generated email + LinkedIn copy for ${content.companyDisplayName}.`
+            : `Generated personalized email + LinkedIn copy for ${content.companyDisplayName}.`,
       );
 
       // Paint preview once with a reveal — later syncs must stay silent (no second refresh animation).
@@ -3533,9 +3629,6 @@ function App() {
             );
           })
           .catch(() => undefined);
-        if (previewPerson.linkedinUrl) {
-          await checkLinkedInMessaging(paintId).catch(() => undefined);
-        }
       }
 
       // Brief success beat, then dismiss — no multi-second pad after the mail exists.
@@ -3575,6 +3668,26 @@ function App() {
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not queue the LinkedIn message.");
     } finally {
+      setLinkedinSendBusy(false);
+    }
+  }
+
+  async function sendAllFreeLinkedInMessages() {
+    const recipients = companyCandidates.filter(person => person.linkedinUrl && person.linkedinMessageAvailability === "free" && !person.linkedinMessageSentAt && !person.linkedinMessageTask);
+    setLinkedinSendBusy(true);
+    let queued = 0;
+    try {
+      for (const person of recipients) {
+        const firstName = person.firstName?.trim() || person.fullName.trim().split(/\s+/)[0] || "there";
+        const message = linkedinMessage.trim().replace(/^Hi [^,\n]+,/, `Hi ${firstName},`).replaceAll("{firstName}", firstName);
+        await sendLinkedInMessage({ candidateId: person.id, subject: linkedinSubject.trim() || undefined, message, resumeId: selectedResumeId || undefined, freeOnly: true });
+        queued++;
+      }
+      setMessage(`Queued ${queued} free LinkedIn messages.`);
+    } catch (error) {
+      setMessage(`Queued ${queued} messages. ${error instanceof Error ? error.message : "Could not queue the remaining messages."}`);
+    } finally {
+      await refresh();
       setLinkedinSendBusy(false);
     }
   }
@@ -4204,6 +4317,50 @@ function App() {
                                   Look up now
                                 </button>
                               )}
+                              {candidate.email && editingEmailId !== candidate.id && (
+                                <button
+                                  type="button"
+                                  className="link-button"
+                                  onClick={() => startEmailEdit(candidate)}
+                                >
+                                  Edit
+                                </button>
+                              )}
+                              {editingEmailId === candidate.id && (
+                                <form
+                                  className="candidate-email-edit"
+                                  onSubmit={(event) => {
+                                    event.preventDefault();
+                                    void chooseEmail(candidate, emailDraft);
+                                  }}
+                                >
+                                  <input
+                                    type="email"
+                                    value={emailDraft}
+                                    onChange={(event) => setEmailDraft(event.target.value)}
+                                    onKeyDown={(event) => {
+                                      if (event.key === "Escape") {
+                                        event.preventDefault();
+                                        cancelEmailEdit();
+                                      }
+                                    }}
+                                    disabled={emailEditBusy}
+                                    aria-label={`Edit email for ${candidate.fullName}`}
+                                    autoFocus
+                                  />
+                                  <button type="submit" className="link-button" disabled={emailEditBusy}>
+                                    {emailEditBusy ? "Saving…" : "Save"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="link-button"
+                                    disabled={emailEditBusy}
+                                    onClick={cancelEmailEdit}
+                                  >
+                                    Cancel
+                                  </button>
+                                </form>
+                              )}
                             </span>
                             <button
                               className="icon-button danger"
@@ -4279,16 +4436,16 @@ function App() {
                           onChange={(event) => void toggleSalesqlAutoFallback(event.target.checked)}
                         />
                         <span>
-                          Auto-fallback to SalesQL when Jobright misses
-                          <small>Off by default — SalesQL only has ~50 lookups/month. Apollo runs next only if SalesQL has no email.</small>
+                          Automatically try other email providers when Jobright misses
+                          <small>Off by default to protect limited lookup credits. When enabled, the app tries SalesQL, Apollo, Hunter, and the remaining providers in order.</small>
                         </span>
                       </label>
                     </div>
                     {discoveredCount < displayCandidates.length && (
                       <button disabled={salesqlSweepBusy} onClick={() => void runSalesqlSweep()}>
                         {salesqlSweepBusy
-                          ? "Queueing SalesQL…"
-                          : `Check all ${displayCandidates.length - discoveredCount} remaining via SalesQL`}
+                          ? "Queueing checks…"
+                          : `Check all ${displayCandidates.length - discoveredCount} remaining`}
                       </button>
                     )}
                   </div>
@@ -4333,6 +4490,7 @@ function App() {
                         placeholder="Paste the post text"
                       />
                     </label>
+                    <div className="generation-mode-options">
                     <button
                       type="button"
                       className={`passion-toggle${passionate ? " on" : ""}`}
@@ -4347,6 +4505,12 @@ function App() {
                         <small>Warmer, slightly longer — genuine fondness for what they build.</small>
                       </span>
                     </button>
+                    <button type="button" className={`passion-toggle${customise ? " on" : ""}`}
+                      aria-pressed={customise} onClick={() => setCustomise(on => !on)}>
+                      <span className="passion-toggle-switch" aria-hidden="true"><span className="passion-toggle-knob" /></span>
+                      <span>Customise<small>Frame your experience around the job.</small></span>
+                    </button>
+                    </div>
                   </div>
                   <details className="advanced">
                     <summary>More context (optional)</summary>
@@ -4487,7 +4651,8 @@ function App() {
                       className="primary-cta"
                       disabled={
                         busy ||
-                        (batchPausedQueueIds.length === 0 && readyCandidates.length === 0)
+                        (batchPausedQueueIds.length === 0 &&
+                          (!batchContent || readyCandidates.length === 0))
                       }
                       onClick={() => void runScheduleSends()}
                     >
@@ -4515,9 +4680,12 @@ function App() {
                       </button>
                     )}
                   </div>
+                  {!batchContent && readyCandidates.length > 0 && batchPausedQueueIds.length === 0 && (
+                    <p className="warning">Generate outreach first — Send stays off until this company has email copy.</p>
+                  )}
                   {showSendProgress && sendProgress && (
                     <div
-                      className={`send-progress-panel ${
+                      className={`send-progress-panel send-progress-inline-legacy ${
                         sendProgress.active ? "" : sendProgress.paused ? "paused" : "done"
                       }`}
                     >
@@ -4844,7 +5012,10 @@ function App() {
                                 </small>
                                 {selected?.linkedinUrl && (
                                   <div className="linkedin-send-row">
-                                    <div className="linkedin-availability">
+                                    <div className="linkedin-availability" role="status" aria-live="polite">
+                                      {(linkedinSendBusy || selected.linkedinMessageAvailability === "checking") && !selected.linkedinMessageSentAt && (
+                                        <span className="linkedin-activity" aria-hidden="true"><span /><span /><span /></span>
+                                      )}
                                       <span
                                         className={`chip ${
                                           selected.linkedinMessageSentAt || selected.linkedinMessageAvailability === "free"
@@ -4859,17 +5030,21 @@ function App() {
                                           : selected.linkedinMessageAvailability === "inmail"
                                             ? `${selected.linkedinInmailCredits ?? "?"} InMails`
                                             : selected.linkedinMessageAvailability === "checking"
-                                              ? "Checking…"
+                                              ? selected.linkedinMessageTask?.action === "send" ? "Sending your message…" : "Finding message options…"
                                               : selected.linkedinMessageAvailability === "unavailable"
                                                 ? "Unavailable"
                                                 : selected.linkedinMessageAvailability === "error"
-                                                  ? "Check failed"
+                                                  ? selected.linkedinSendStatus === "unconfirmed" ? "Confirm in LinkedIn" : selected.linkedinSendStatus === "failed" ? "Send failed" : "Check failed"
                                                   : "Not checked"}
                                       </span>
                                       <small>
                                         {selected.linkedinMessageSentAt
                                           ? `Sent on LinkedIn ${formatShortWhen(selected.linkedinMessageSentAt)}`
-                                          : selected.linkedinMessageStatusText ??
+                                          : selected.linkedinMessageAvailability === "checking"
+                                            ? selected.linkedinMessageTask?.action === "send"
+                                              ? "We'll confirm here once it's sent."
+                                              : "Checking free messaging and InMail availability."
+                                            : selected.linkedinMessageStatusText ??
                                             "LinkedIn availability is checked after generation."}
                                       </small>
                                     </div>
@@ -4900,11 +5075,32 @@ function App() {
                                           }
                                           onClick={() => void sendSelectedLinkedInMessage(selected)}
                                         >
-                                          {linkedinSendBusy ? "Queuing…" : "Send on LinkedIn"}
+                                          {linkedinSendBusy || selected.linkedinMessageTask?.action === "send" ? "Sending…" : "Send on LinkedIn"}
                                         </button>
                                       </div>
                                     )}
                                   </div>
+                                )}
+                                {companyCandidates.length > 1 && (
+                                  <div className="linkedin-batch-progress" aria-label="LinkedIn progress">
+                                    <strong>{companyCandidates.filter(p => p.linkedinMessageSentAt).length} sent · {companyCandidates.filter(p => p.linkedinMessageTask).length} pending · {companyCandidates.filter(p => p.linkedinSendStatus === "failed").length} failed · {companyCandidates.filter(p => p.linkedinSendStatus === "unconfirmed").length} need confirmation</strong>
+                                    {companyCandidates.map(person => (
+                                      <div className="linkedin-progress-person" key={person.id}>
+                                        <span>{person.fullName}</span>
+                                        <span role="status">
+                                          {person.linkedinMessageTask && <span className="linkedin-activity" aria-hidden="true"><span /><span /><span /></span>}
+                                          {person.linkedinMessageSentAt ? "✓ Sent" : person.linkedinSendStatus === "unconfirmed" ? "Confirm in LinkedIn" : person.linkedinMessageTask ? person.linkedinMessageTask.action === "send" ? "Sending / queued" : "Checking availability" : person.linkedinSendStatus === "failed" ? "Send failed" : person.linkedinMessageAvailability === "free" ? "Free · Ready" : person.linkedinMessageAvailability === "inmail" ? "InMail · Skipped" : person.linkedinMessageAvailability === "error" ? "Check failed" : "Not ready"}
+                                        </span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                                {companyCandidates.length > 1 && (
+                                  <button type="button" className="secondary compact"
+                                    disabled={linkedinSendBusy || !/^Hi [^,\n]+,/.test(linkedinMessage.trim()) || !companyCandidates.some(person => person.linkedinMessageAvailability === "free" && !person.linkedinMessageSentAt && !person.linkedinMessageTask)}
+                                    onClick={() => void sendAllFreeLinkedInMessages()}>
+                                    Send to all free ({companyCandidates.filter(person => person.linkedinMessageAvailability === "free" && !person.linkedinMessageSentAt && !person.linkedinMessageTask).length})
+                                  </button>
                                 )}
                               </div>
                             </div>
@@ -4947,6 +5143,90 @@ function App() {
             )}
           </section>
         </section>
+        {showSendProgress && sendProgress && (
+          <section className="panel delivery-queue-panel" aria-live="polite" aria-label="Email delivery progress">
+            <div className="delivery-queue-head">
+              <div>
+                <p className="eyebrow">Delivery progress</p>
+                <h2>
+                  {sendProgress.active
+                    ? isSendingPhase
+                      ? `Sending to ${sendProgress.current.name}`
+                      : `Next: ${sendProgress.current.name}`
+                    : sendProgress.paused
+                      ? "Sending paused"
+                      : sendProgress.failedCount > 0
+                        ? "Finished with errors"
+                        : "All emails sent"}
+                </h2>
+                <p className="hint">
+                  {sendProgress.sentCount} sent · {sendProgress.remainingCount} remaining
+                  {sendProgress.failedCount > 0 ? ` · ${sendProgress.failedCount} failed` : ""}
+                </p>
+              </div>
+              <strong className="delivery-queue-count">{sendProgress.doneCount}/{sendProgress.total}</strong>
+            </div>
+            <div
+              className="progress-track delivery-queue-track"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={sendProgress.percent}
+            >
+              <div className="progress-fill" style={{ width: `${sendProgress.percent}%` }} />
+            </div>
+            <div className="delivery-queue-summary" aria-hidden="true">
+              <span className="sent">✓ Sent</span>
+              <span className="sending">● Sending</span>
+              <span className="pending">○ Pending</span>
+            </div>
+            <ol className="delivery-queue-list">
+              {sendProgressRows.map((row) => (
+                <li key={row.id} className={`delivery-queue-person ${row.status}`}>
+                  <span className="delivery-person-state" aria-hidden="true">
+                    {row.status === "sent"
+                      ? "✓"
+                      : row.status === "failed"
+                        ? "!"
+                        : row.status === "paused"
+                          ? "❚❚"
+                          : row.status === "sending"
+                            ? "●"
+                            : "○"}
+                  </span>
+                  <span className="delivery-person-copy">
+                    <strong>{row.name}</strong>
+                  </span>
+                  <span className="delivery-person-status">
+                    {row.status === "sent"
+                      ? "Sent"
+                      : row.status === "failed"
+                        ? "Failed"
+                        : row.status === "paused"
+                          ? "Paused"
+                          : row.status === "sending"
+                            ? "Sending now…"
+                            : `Pending · ${formatShortWhen(row.scheduledFor)}`}
+                  </span>
+                </li>
+              ))}
+            </ol>
+            {(showSessionStop || sendProgress.failedCount > 0) && (
+              <div className="delivery-queue-actions">
+                {showSessionStop && (
+                  <button className="secondary subtle-danger" disabled={busy} onClick={() => void runPausePendingSends()}>
+                    Pause remaining
+                  </button>
+                )}
+                {sendProgress.failedCount > 0 && (
+                  <button className="secondary" disabled={busy} onClick={() => void retryFailedInBatch()}>
+                    Retry failed ({sendProgress.failedCount})
+                  </button>
+                )}
+              </div>
+            )}
+          </section>
+        )}
         </section>
       )}
 
@@ -6346,6 +6626,22 @@ function App() {
                     </div>
                   </section>
                 </div>
+
+                <section className="panel analytics-card provider-lookup-card">
+                  <div className="setup-section-head">
+                    <div>
+                      <p className="eyebrow">Discovery</p>
+                      <h2>Email lookups by provider</h2>
+                      <p className="hint">How many profiles each provider checked, and how many usable emails it found.</p>
+                    </div>
+                    <div className="provider-lookup-legend" aria-label="Chart legend">
+                      <span><i className="attempted" /> Lookups</span>
+                      <span><i className="found" /> Emails found</span>
+                    </div>
+                  </div>
+                  <ProviderLookupChart rows={analytics.providerLookups ?? []} />
+                  <p className="provider-lookup-note">Older totals use the lookup history available before exact per-provider tracking began.</p>
+                </section>
 
                 <section className="panel analytics-card garden-card">
                   <div className="setup-section-head">

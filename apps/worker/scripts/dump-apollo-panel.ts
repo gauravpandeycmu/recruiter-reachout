@@ -33,6 +33,7 @@ async function main(): Promise<void> {
   const context = await launchPersistentBrowserContext({
     userDataDir: PROFILE,
     headless: (process.env.SALESQL_HEADLESS ?? "false").toLowerCase() === "true",
+    allowHeadlessExtensions: true,
     extensionPaths,
   });
   try {

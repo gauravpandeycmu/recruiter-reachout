@@ -13,11 +13,14 @@ export function queueLinkedInMessageTask(
 ): LinkedInMessageTask {
   const candidate = store.listCandidates().find((row) => row.id === input.candidateId) as PendingLinkedInMessage | undefined;
   if (!candidate?.linkedinUrl && !input.linkedinUrl) throw new Error("This person does not have a LinkedIn profile URL.");
+  if (candidate?.linkedinMessageTask) throw new Error("LinkedIn is already processing this person. Please wait for it to finish.");
+  if (candidate?.linkedinSendStatus === "unconfirmed") throw new Error("Check the LinkedIn conversation first: the previous message may already have been sent.");
   if (input.action === "send" && !input.message?.trim()) throw new Error("Generate a LinkedIn message before sending.");
   if (input.action === "send" && candidate?.linkedinMessageSentAt) {
     throw new Error("A LinkedIn message has already been sent to this person.");
   }
   const task: LinkedInMessageTask = {
+    freeOnly: input.freeOnly,
     id: randomUUID(),
     candidateId: candidate!.id,
     linkedinUrl: input.linkedinUrl?.trim() || candidate!.linkedinUrl!,
@@ -30,6 +33,7 @@ export function queueLinkedInMessageTask(
   };
   store.updateCandidate(candidate!.id, {
     linkedinMessageAvailability: "checking",
+    linkedinSendStatus: input.action === "send" ? "sending" : candidate?.linkedinSendStatus,
     linkedinMessageStatusText: input.action === "send" ? "Preparing LinkedIn message…" : "Checking LinkedIn messaging…",
     linkedinMessageTask: task,
     linkedinMessageClaimedAt: undefined,
@@ -77,6 +81,10 @@ export function completeLinkedInMessageTask(
     linkedinMessageStatusText: result.failureReason || result.statusText,
     linkedinMessageCheckedAt: now,
     linkedinMessageSentAt: result.sent ? now : candidate.linkedinMessageSentAt,
+    linkedinSendStatus: result.sent || candidate.linkedinMessageSentAt ? "sent"
+      : candidate.linkedinMessageTask?.action === "send"
+        ? /did not confirm/i.test(result.failureReason ?? "") ? "unconfirmed" : "failed"
+        : candidate.linkedinSendStatus,
     linkedinMessageTask: undefined,
     linkedinMessageClaimedAt: undefined,
   } as Partial<PendingLinkedInMessage>);

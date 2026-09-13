@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { FINDER_PROVIDERS, discoveryProviderLabel, isFinderForce, isFinderProvider } from "../src/finder.js";
 
 describe("finder helpers", () => {
-  it("tries SalesQL before Apollo", () => {
-    expect(FINDER_PROVIDERS).toEqual(["salesql", "apollo"]);
+  it("keeps the configured fallback order", () => {
+    expect(FINDER_PROVIDERS).toEqual(["salesql", "apollo", "hunter", "prospeo", "getprospect", "kwinbi"]);
   });
 
   it("treats salesql and finder as the same force flag", () => {

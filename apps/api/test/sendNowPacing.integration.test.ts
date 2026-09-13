@@ -48,6 +48,17 @@ describe("send_now pacing vs schedule bypass", () => {
       mimeType: "application/pdf",
       dataBase64: Buffer.from("%PDF-1.4\nfake").toString("base64"),
     });
+    const now = new Date().toISOString();
+    store.upsertCompanyContent({
+      id: "acme",
+      company: "acme",
+      companyDisplayName: "Acme",
+      subject: "Hi {firstName}",
+      body: "Hello {firstName}",
+      source: "generated",
+      createdAt: now,
+      updatedAt: now,
+    });
   });
 
   afterEach(async () => {

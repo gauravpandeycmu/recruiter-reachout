@@ -28,8 +28,8 @@ const WORKER_AUTO_SEND = (process.env.WORKER_AUTO_SEND ?? "false").toLowerCase()
 const JOBRIGHT_JOB_URL = process.env.JOBRIGHT_JOB_URL;
 const JOBRIGHT_USER_DATA_DIR = resolveWorkerDataDir(process.env.JOBRIGHT_USER_DATA_DIR, "apps/worker/data/jobright-profile");
 const SALESQL_USER_DATA_DIR = resolveWorkerDataDir(process.env.SALESQL_USER_DATA_DIR, "apps/worker/data/salesql-profile");
-const APOLLO_OVERLAY_TIMEOUT_MS = Number(process.env.APOLLO_OVERLAY_TIMEOUT_MS ?? 45000);
-const APOLLO_REVEAL_TIMEOUT_MS = Number(process.env.APOLLO_REVEAL_TIMEOUT_MS ?? 15000);
+const APOLLO_OVERLAY_TIMEOUT_MS = Number(process.env.APOLLO_OVERLAY_TIMEOUT_MS ?? 4_000);
+const APOLLO_REVEAL_TIMEOUT_MS = Number(process.env.APOLLO_REVEAL_TIMEOUT_MS ?? 5_000);
 const DISCOVERY_DELAY_MS = Number(process.env.WORKER_DISCOVERY_DELAY_MS ?? 1500);
 const SEND_DELAY_MS = Number(process.env.WORKER_SEND_DELAY_MS ?? 3000);
 const IDLE_DELAY_MS = Number(process.env.WORKER_IDLE_DELAY_MS ?? 30000);
@@ -38,8 +38,8 @@ const SALESQL_LINKEDIN_DELAY_MS = Number(process.env.SALESQL_LINKEDIN_DELAY_MS ?
  * Users normally review the generated message and click Send shortly after;
  * avoiding a second Chromium cold start saves several seconds. */
 const LINKEDIN_MESSAGE_WARM_MS = Number(process.env.LINKEDIN_MESSAGE_WARM_MS ?? 2 * 60_000);
-const SALESQL_OVERLAY_TIMEOUT_MS = Number(process.env.SALESQL_OVERLAY_TIMEOUT_MS ?? 45000);
-const SALESQL_REVEAL_TIMEOUT_MS = Number(process.env.SALESQL_REVEAL_TIMEOUT_MS ?? 15000);
+const SALESQL_OVERLAY_TIMEOUT_MS = Number(process.env.SALESQL_OVERLAY_TIMEOUT_MS ?? 4000);
+const SALESQL_REVEAL_TIMEOUT_MS = Number(process.env.SALESQL_REVEAL_TIMEOUT_MS ?? 3500);
 /** How early to wake headed Gmail before the next claimable send.
  * Keep this *below* the global send gap (~4m) so Chromium hibernates between emails.
  * Cold start ~20–40s; 90s is enough headroom without all-day GPU drain. */
@@ -195,6 +195,7 @@ async function main(): Promise<void> {
   let jobrightPage: Page | undefined;
   let salesqlContext: Awaited<ReturnType<typeof launchPersistentBrowserContext>> | undefined;
   let salesqlPage: Page | undefined;
+  let salesqlContextHeadless: boolean | undefined;
   let gmailContext: Awaited<ReturnType<typeof launchPersistentBrowserContext>> | undefined;
   let gmailPage: Page | undefined;
   let linkedinOnlyContext: Awaited<ReturnType<typeof launchPersistentBrowserContext>> | undefined;
@@ -250,28 +251,42 @@ async function main(): Promise<void> {
       await closePersistentBrowserContext(salesqlContext, SALESQL_USER_DATA_DIR).catch(() => {});
       salesqlContext = undefined;
       salesqlPage = undefined;
+      salesqlContextHeadless = undefined;
     }
   }
 
-  async function ensureSalesqlPage(): Promise<Page | undefined> {
+  async function ensureSalesqlPage(requiredMode?: "salesql" | "apollo"): Promise<Page | undefined> {
     if (!finderEnabled) return undefined;
-    if (!pageLooksDead(salesqlPage, salesqlContext)) {
+    // Live verification showed Apollo's MV3 panel works in new headless Chromium,
+    // while SalesQL's content UI does not inject there. Keep SalesQL on its proven
+    // headed path; use headless for Apollo unless the user explicitly requests headed.
+    const configuredHeadless = (process.env.SALESQL_HEADLESS ?? "true").toLowerCase() !== "false";
+    const desiredHeadless = requiredMode === "salesql" ? false : configuredHeadless;
+    if (!pageLooksDead(salesqlPage, salesqlContext) && salesqlContextHeadless === desiredHeadless) {
       return salesqlPage;
     }
     try {
+      if (salesqlContext) {
+        await closePersistentBrowserContext(salesqlContext, SALESQL_USER_DATA_DIR).catch(() => {});
+        salesqlContext = undefined;
+        salesqlPage = undefined;
+        salesqlContextHeadless = undefined;
+      }
       await closeSiblingSalesqlDirContext("salesql");
-      log("Waking LinkedIn fallback browser (SalesQL, then Apollo) for discovery…");
+      log(`Waking ${requiredMode === "salesql" ? "SalesQL" : "Apollo/LinkedIn"} finder browser (${desiredHeadless ? "headless" : "headed"})…`);
       salesqlContext = await launchPersistentBrowserContext({
         userDataDir: SALESQL_USER_DATA_DIR,
-        headless: (process.env.SALESQL_HEADLESS ?? "true").toLowerCase() !== "false",
+        headless: desiredHeadless,
+        allowHeadlessExtensions: true,
         extensionPaths: overlayExtensions.paths,
       });
-      if (salesqlEnabled) {
+      salesqlContextHeadless = desiredHeadless;
+      if (salesqlEnabled && requiredMode !== "apollo") {
         await waitForSalesqlServiceWorker(salesqlContext).catch(() => {
           log("SalesQL service worker slow to start; content script may be delayed.");
         });
       }
-      if (apolloEnabled) {
+      if (apolloEnabled && requiredMode !== "salesql") {
         await waitForApolloServiceWorker(salesqlContext).catch(() => {
           log("Apollo service worker slow to start; content script may be delayed.");
         });
@@ -288,6 +303,7 @@ async function main(): Promise<void> {
       await closePersistentBrowserContext(salesqlContext, SALESQL_USER_DATA_DIR).catch(() => {});
       salesqlContext = undefined;
       salesqlPage = undefined;
+      salesqlContextHeadless = undefined;
       return undefined;
     }
   }
@@ -378,6 +394,7 @@ async function main(): Promise<void> {
     jobrightPage = undefined;
     salesqlContext = undefined;
     salesqlPage = undefined;
+    salesqlContextHeadless = undefined;
     linkedinOnlyContext = undefined;
     linkedinCapturePage = undefined;
   }
@@ -402,6 +419,7 @@ async function main(): Promise<void> {
   let shuttingDown = false;
   let sendPassInFlight = false;
   let linkedinMessagePassInFlight = false;
+  let discoveryPassesInFlight = 0;
   let linkedinMessageWarmUntil = 0;
 
   /** Single source of truth for turning a pending-work snapshot into a hibernation
@@ -428,7 +446,7 @@ async function main(): Promise<void> {
    *  dir (SingletonLock). Bounded so a genuinely stuck pass can't block shutdown forever. */
   async function waitForCriticalBrowserPassesToSettle(maxMs: number): Promise<void> {
     const deadline = Date.now() + maxMs;
-    while ((sendPassInFlight || linkedinMessagePassInFlight) && Date.now() < deadline) {
+    while ((sendPassInFlight || linkedinMessagePassInFlight || discoveryPassesInFlight > 0) && Date.now() < deadline) {
       await delay(250);
     }
   }
@@ -452,6 +470,17 @@ async function main(): Promise<void> {
       return await runLinkedInMessagingPass(args);
     } finally {
       linkedinMessagePassInFlight = false;
+    }
+  }
+
+  async function runDiscoveryPassTracked(
+    args: Parameters<typeof runDiscoveryPass>[0],
+  ): ReturnType<typeof runDiscoveryPass> {
+    discoveryPassesInFlight += 1;
+    try {
+      return await runDiscoveryPass(args);
+    } finally {
+      discoveryPassesInFlight -= 1;
     }
   }
 
@@ -607,54 +636,105 @@ async function main(): Promise<void> {
         }
 
         if (pending?.hasDiscovery) {
-          const jrPage = await ensureJobrightPage();
-          const pass = await runDiscoveryPass({
-            apiClient,
-            createJobrightAdapter: () => createJobrightPlaywrightAdapter(jrPage, { jobUrl: JOBRIGHT_JOB_URL }),
-            // Lazy: only launch SalesQL Chromium when fallback/force actually needs it.
-            createSalesqlAdapter: salesqlEnabled
-              ? async () => {
-                  const sqPage = await ensureSalesqlPage();
-                  if (!sqPage) {
-                    throw new Error("SalesQL browser failed to start.");
+          // Two isolated durable queues run concurrently. Jobright only claims
+          // Jobright-stage rows; Finder only claims rows Jobright already handed
+          // off. Both reports remain keyed by candidate id, so completion order
+          // cannot attach one recruiter's email to another recruiter.
+          const hasJobright = pending.hasJobrightDiscovery ?? true;
+          const hasFinder = pending.hasFinderDiscovery ?? false;
+          const passes: Array<Promise<unknown>> = [];
+          let jobrightProducerDone = !hasJobright;
+
+          if (hasJobright) {
+            passes.push(
+              (async () => {
+                try {
+                  const jrPage = await ensureJobrightPage();
+                  const count = Math.max(1, pending.jobrightDiscoveryCount ?? 1);
+                  for (let index = 0; index < count; index += 1) {
+                    await runDiscoveryPassTracked({
+                      apiClient,
+                      discoveryStage: "jobright",
+                      createJobrightAdapter: () => createJobrightPlaywrightAdapter(jrPage, { jobUrl: JOBRIGHT_JOB_URL }),
+                      jobrightDryRun: JOBRIGHT_DRY_RUN,
+                      salesqlDryRun: SALESQL_DRY_RUN,
+                      autoSendAfterDiscovery: WORKER_AUTO_SEND,
+                      recoverJobrightPage: async () => {
+                        if (!jobrightPage || !JOBRIGHT_JOB_URL) return;
+                        await jobrightPage.goto(JOBRIGHT_JOB_URL, { waitUntil: "domcontentloaded", timeout: 45_000 }).catch(() => {});
+                      },
+                      log,
+                    });
                   }
-                  return createSalesqlPlaywrightAdapter(sqPage);
+                } finally {
+                  jobrightProducerDone = true;
                 }
-              : undefined,
-            createApolloAdapter: apolloEnabled
-              ? async () => {
-                  const finderPage = await ensureSalesqlPage();
-                  if (!finderPage) {
-                    throw new Error("Apollo browser failed to start.");
+              })(),
+            );
+          }
+
+          // Start the consumer even when Finder is initially empty. It waits
+          // for Jobright handoffs instead of delaying every fallback until the
+          // next outer worker cycle.
+          if (hasFinder || hasJobright) {
+            passes.push(
+              (async () => {
+                const maximumClaims = Math.max(
+                  1,
+                  (pending.finderDiscoveryCount ?? (hasFinder ? 1 : 0)) +
+                    (pending.jobrightDiscoveryCount ?? (hasJobright ? 1 : 0)),
+                );
+                let claims = 0;
+                while (claims < maximumClaims) {
+                  const outcome = await runDiscoveryPassTracked({
+                    apiClient,
+                    discoveryStage: "finder",
+                    reportIdleWhenEmpty: false,
+                    createSalesqlAdapter: salesqlEnabled
+                      ? async () => {
+                          const sqPage = await ensureSalesqlPage("salesql");
+                          if (!sqPage) throw new Error("SalesQL browser failed to start.");
+                          return createSalesqlPlaywrightAdapter(sqPage);
+                        }
+                      : undefined,
+                    createApolloAdapter: apolloEnabled
+                      ? async () => {
+                          const finderPage = await ensureSalesqlPage("apollo");
+                          if (!finderPage) throw new Error("Apollo browser failed to start.");
+                          return createApolloPlaywrightAdapter(finderPage);
+                        }
+                      : undefined,
+                    jobrightDryRun: JOBRIGHT_DRY_RUN,
+                    salesqlDryRun: SALESQL_DRY_RUN,
+                    apolloDryRun: APOLLO_DRY_RUN,
+                    hunterApiKey: process.env.HUNTER_API_KEY?.trim(),
+                    prospeoApiKey: process.env.PROSPEO_API_KEY?.trim(),
+                    getProspectApiKey: process.env.GETPROSPECT_API_KEY?.trim(),
+                    kwinbiApiKey: process.env.KWINBI_API_KEY?.trim(),
+                    autoSendAfterDiscovery: WORKER_AUTO_SEND,
+                    salesqlOptions: { overlayTimeoutMs: SALESQL_OVERLAY_TIMEOUT_MS, revealTimeoutMs: SALESQL_REVEAL_TIMEOUT_MS },
+                    apolloOptions: { overlayTimeoutMs: APOLLO_OVERLAY_TIMEOUT_MS, revealTimeoutMs: APOLLO_REVEAL_TIMEOUT_MS },
+                    recoverSalesqlPage: async () => {
+                      if (!salesqlPage) return;
+                      await salesqlPage.goto("about:blank", { waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => {});
+                    },
+                    log,
+                  });
+                  if (outcome.claimedCandidate) {
+                    claims += 1;
+                    continue;
                   }
-                  return createApolloPlaywrightAdapter(finderPage);
+                  if (jobrightProducerDone) break;
+                  await delay(500);
                 }
-              : undefined,
-            jobrightDryRun: JOBRIGHT_DRY_RUN,
-            salesqlDryRun: SALESQL_DRY_RUN,
-            apolloDryRun: APOLLO_DRY_RUN,
-            autoSendAfterDiscovery: WORKER_AUTO_SEND,
-            salesqlOptions: {
-              overlayTimeoutMs: SALESQL_OVERLAY_TIMEOUT_MS,
-              revealTimeoutMs: SALESQL_REVEAL_TIMEOUT_MS,
-            },
-            apolloOptions: {
-              overlayTimeoutMs: APOLLO_OVERLAY_TIMEOUT_MS,
-              revealTimeoutMs: APOLLO_REVEAL_TIMEOUT_MS,
-            },
-            recoverSalesqlPage: async () => {
-              if (!salesqlPage) return;
-              await salesqlPage.goto("about:blank", { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
-            },
-            recoverJobrightPage: async () => {
-              if (!jobrightPage || !JOBRIGHT_JOB_URL) return;
-              await jobrightPage
-                .goto(JOBRIGHT_JOB_URL, { waitUntil: "domcontentloaded", timeout: 45_000 })
-                .catch(() => {});
-            },
-            log,
-          });
-          await delay(pass.result === "worked" ? DISCOVERY_DELAY_MS : IDLE_DELAY_MS);
+              })(),
+            );
+          }
+
+          await Promise.all(passes);
+          // Recheck pending work promptly after misses/errors as well as hits.
+          // New explicit actions can interrupt this inter-lookup pause.
+          await interruptibleIdleSleep(DISCOVERY_DELAY_MS);
           continue;
         }
       }
@@ -724,6 +804,7 @@ async function main(): Promise<void> {
           await closePersistentBrowserContext(salesqlContext, SALESQL_USER_DATA_DIR).catch(() => {});
           salesqlContext = undefined;
           salesqlPage = undefined;
+          salesqlContextHeadless = undefined;
         }
         if (pageLooksDead(jobrightPage, jobrightContext)) {
           await closePersistentBrowserContext(jobrightContext, JOBRIGHT_USER_DATA_DIR).catch(() => {});

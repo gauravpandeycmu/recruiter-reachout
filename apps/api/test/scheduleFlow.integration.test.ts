@@ -70,6 +70,18 @@ describe("schedule flow integration", () => {
   });
 
   async function seedReadyCandidate(name: string, company: string, email: string) {
+    const now = new Date().toISOString();
+    const companyKey = company.replace(/\s+/g, " ").trim().toLowerCase();
+    store.upsertCompanyContent({
+      id: `cc-${companyKey}`,
+      company: companyKey,
+      companyDisplayName: company,
+      subject: "Quick note, {firstName}",
+      body: "Hi {firstName},\n\nInterested in {company}.",
+      source: "generated",
+      createdAt: now,
+      updatedAt: now,
+    });
     return store.upsertCandidate(
       createCandidate({
         fullName: name,
@@ -115,13 +127,7 @@ describe("schedule flow integration", () => {
   });
 
   it("schedules candidates saved from the extension with email but no emailCandidates array", async () => {
-    const jane = store.upsertCandidate(
-      createCandidate({
-        fullName: "Extension Recruiter",
-        company: "Acme",
-        email: "jane@acme.com",
-      }),
-    );
+    const jane = await seedReadyCandidate("Extension Recruiter", "Acme", "jane@acme.com");
     store.updateCandidate(jane.id, { emailCandidates: [] });
     const startAt = new Date(Date.now() + 60 * 60_000).toISOString();
 

@@ -4,9 +4,10 @@ import { discoverEmailOnJobright, type JobrightDiscoveryOptions, type JobrightPa
 import { discoverEmailOnSalesql, type SalesqlDiscoveryOptions, type SalesqlPageAdapter } from "./salesql.js";
 import type { DiscoveryOutcome } from "./discoveryOutcome.js";
 import { runFinderChain, type FinderStep } from "./finderChain.js";
+import { discoverEmailViaGetProspectApi, discoverEmailViaHunterApi, discoverEmailViaKwinbiApi, discoverEmailViaProspeoApi } from "./apiEmailFinder.js";
 
 export interface DiscoveryChainDeps {
-  jobrightAdapter: JobrightPageAdapter;
+  jobrightAdapter?: JobrightPageAdapter;
   /** Lazy factory — only invoked when Jobright returns not_found and quota allows (or forceProvider is finder/salesql). */
   createSalesqlAdapter?: () => SalesqlPageAdapter | Promise<SalesqlPageAdapter>;
   createApolloAdapter?: () => ApolloPageAdapter | Promise<ApolloPageAdapter>;
@@ -16,25 +17,37 @@ export interface DiscoveryChainDeps {
   /** When false, Jobright not_found/error is final unless reason is previous_employer. */
   canUseSalesql: (reason?: "auto" | "previous_employer") => Promise<boolean> | boolean;
   canUseApollo?: (reason?: "auto" | "previous_employer") => Promise<boolean> | boolean;
+  canUseProspeo?: (reason?: "auto" | "previous_employer") => Promise<boolean> | boolean;
+  canUseHunter?: (reason?: "auto" | "previous_employer") => Promise<boolean> | boolean;
+  canUseGetProspect?: (reason?: "auto" | "previous_employer") => Promise<boolean> | boolean;
+  canUseKwinbi?: (reason?: "auto" | "previous_employer") => Promise<boolean> | boolean;
   jobrightOptions?: Partial<JobrightDiscoveryOptions>;
   salesqlOptions?: Partial<SalesqlDiscoveryOptions>;
   apolloOptions?: Partial<ApolloDiscoveryOptions>;
   log?: (message: string) => void;
   /** Tagged company from capture — skip previous-employer work addresses. */
   company?: string;
+  fullName?: string;
   /** When set, skip Jobright entirely — used for manual "check via Finder" retries. */
   forceProvider?: "salesql" | "finder";
+  reportProviderUnavailable?: (provider: import("@recruiter/shared").FinderProvider, reason: "quota_exhausted") => void | Promise<void>;
+  hunterApiKey?: string;
+  prospeoApiKey?: string;
+  getProspectApiKey?: string;
+  kwinbiApiKey?: string;
+  reportProviderLookup?: (provider: import("@recruiter/shared").DiscoveryProvider, status: "found" | "not_found" | "error") => void | Promise<void>;
 }
 
 function mapJobrightOutcome(outcome: Awaited<ReturnType<typeof discoverEmailOnJobright>>): DiscoveryOutcome {
   if (outcome.status === "found") {
-    return {
+    const found: DiscoveryOutcome = {
       status: "found",
       email: outcome.email,
       provider: "jobright",
-      name: outcome.name,
-      titleAndCompany: outcome.titleAndCompany,
     };
+    if (outcome.name) found.name = outcome.name;
+    if (outcome.titleAndCompany) found.titleAndCompany = outcome.titleAndCompany;
+    return found;
   }
   if (outcome.status === "dry_run") {
     return { status: "dry_run", provider: "jobright" };
@@ -53,7 +66,12 @@ function mapSalesqlOutcome(outcome: Awaited<ReturnType<typeof discoverEmailOnSal
     return { status: "dry_run", provider: "salesql" };
   }
   if (outcome.status === "not_found") {
-    return { status: "not_found", provider: "salesql", creditSpent: outcome.creditSpent };
+    return {
+      status: "not_found",
+      provider: "salesql",
+      creditSpent: outcome.creditSpent,
+      providerUnavailableReason: outcome.providerUnavailableReason,
+    };
   }
   return { status: "error", message: outcome.message, provider: "salesql", creditSpent: outcome.creditSpent };
 }
@@ -66,7 +84,12 @@ function mapApolloOutcome(outcome: Awaited<ReturnType<typeof discoverEmailOnApol
     return { status: "dry_run", provider: "apollo" };
   }
   if (outcome.status === "not_found") {
-    return { status: "not_found", provider: "apollo", creditSpent: outcome.creditSpent };
+    return {
+      status: "not_found",
+      provider: "apollo",
+      creditSpent: outcome.creditSpent,
+      providerUnavailableReason: outcome.providerUnavailableReason,
+    };
   }
   return { status: "error", message: outcome.message, provider: "apollo", creditSpent: outcome.creditSpent };
 }
@@ -76,6 +99,7 @@ function buildFinderSteps(
   deps: DiscoveryChainDeps,
   reason: "auto" | "previous_employer",
 ): FinderStep[] {
+  // Keep in sync with FINDER_PROVIDERS in @recruiter/shared.
   const steps: FinderStep[] = [];
   if (deps.createSalesqlAdapter) {
     steps.push({
@@ -105,13 +129,42 @@ function buildFinderSteps(
         ),
     });
   }
+  if (deps.hunterApiKey) {
+    steps.push({
+      id: "hunter",
+      canUse: () => deps.canUseHunter?.(reason) ?? true,
+      run: () => discoverEmailViaHunterApi(linkedinUrl, deps.hunterApiKey, deps.company, deps.fullName),
+    });
+  }
+  if (deps.prospeoApiKey) {
+    steps.push({
+      id: "prospeo",
+      canUse: () => deps.canUseProspeo?.(reason) ?? true,
+      run: () => discoverEmailViaProspeoApi(linkedinUrl, deps.prospeoApiKey, deps.company, deps.fullName),
+    });
+  }
+  if (deps.getProspectApiKey) {
+    steps.push({
+      id: "getprospect",
+      canUse: () => deps.canUseGetProspect?.(reason) ?? true,
+      run: () => discoverEmailViaGetProspectApi(linkedinUrl, deps.getProspectApiKey, deps.company, deps.fullName),
+    });
+  }
+  if (deps.kwinbiApiKey) {
+    steps.push({
+      id: "kwinbi",
+      canUse: () => deps.canUseKwinbi?.(reason) ?? true,
+      run: () => discoverEmailViaKwinbiApi(linkedinUrl, deps.kwinbiApiKey, deps.company),
+    });
+  }
   return steps;
 }
 
 /**
  * Tries Jobright first. Current-company work and personal mailboxes (Gmail, etc.)
- * are kept. Previous-employer work is treated as a miss so SalesQL, then Apollo,
- * can still run when quota remains, even if dashboard auto-fallback is off.
+ * are kept. Previous-employer work is treated as a miss so SalesQL → Apollo →
+ * Hunter → Prospeo → GetProspect → Kwinbi can still run when quota remains,
+ * even if dashboard auto-fallback is off.
  * Other Jobright not_found/error fallback only when canUse*("auto") is true.
  */
 export async function runDiscoveryChain(
@@ -128,6 +181,8 @@ export async function runDiscoveryChain(
       company: deps.company,
       log,
       required: true,
+      onProviderUnavailable: deps.reportProviderUnavailable,
+      onLookup: deps.reportProviderLookup,
     });
     return (
       forcedOutcome ?? {
@@ -139,6 +194,9 @@ export async function runDiscoveryChain(
     );
   }
 
+  if (!deps.jobrightAdapter) {
+    return { status: "error", message: "Jobright browser is not configured.", provider: "jobright" };
+  }
   const jobrightOutcome = await discoverEmailOnJobright(deps.jobrightAdapter, linkedinUrl, {
     dryRun: deps.jobrightDryRun,
     ...deps.jobrightOptions,
@@ -160,8 +218,10 @@ export async function runDiscoveryChain(
   // Current-company work or personal (Gmail, etc.) ends the chain.
   // Previous-employer work is treated as a miss so Finder can still try.
   if (jobrightResult.status === "found" || jobrightResult.status === "dry_run") {
+    if (jobrightResult.status === "found") await deps.reportProviderLookup?.("jobright", "found");
     return jobrightResult;
   }
+  await deps.reportProviderLookup?.("jobright", jobrightResult.status === "error" ? "error" : "not_found");
 
   const reason = skippedPreviousEmployer ? "previous_employer" : "auto";
   const finderOutcome = await runFinderChain({
@@ -182,10 +242,12 @@ export async function runDiscoveryChain(
       }
     },
     required: false,
+    onProviderUnavailable: deps.reportProviderUnavailable,
+    onLookup: deps.reportProviderLookup,
   });
 
   if (!finderOutcome) {
-    if (!deps.createSalesqlAdapter && !deps.createApolloAdapter) {
+    if (!deps.createSalesqlAdapter && !deps.hunterApiKey && !deps.createApolloAdapter && !deps.prospeoApiKey && !deps.getProspectApiKey && !deps.kwinbiApiKey) {
       return jobrightResult;
     }
     log(

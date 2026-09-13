@@ -3,18 +3,23 @@ import { recordLlmUsage } from "./llmUsage.js";
 
 /**
  * Fetch a public job posting URL and extract a concise job description.
- * Known boards (e.g. Apple) use their JSON APIs; others fall back to HTML + Gemini.
+ * Known boards (Apple, Paycom) use their JSON APIs; others fall back to HTML + Gemini.
  */
 
 const DEFAULT_MODEL = "gemma-4-31b-it";
-const FETCH_TIMEOUT_MS = 20_000;
+const FETCH_TIMEOUT_MS = 8_000;
 const MAX_HTML_BYTES = 1_500_000;
 /** Raw text assembled from HTML before compaction. */
 const MAX_RAW_PAGE_TEXT_CHARS = 200_000;
 /** Text budget sent to the extraction model (long postings are compacted, not dropped). */
 const MAX_LLM_INPUT_CHARS = 48_000;
 const MAX_EXTRACTED_JD_CHARS = 6_000;
-const READER_FALLBACK_TIMEOUT_MS = 30_000;
+const READER_FALLBACK_TIMEOUT_MS = 8_000;
+/** Leave enough of the generation budget for the email draft. */
+const EXTRACTION_RESERVE_FOR_EMAIL_MS = 22_000;
+const EXTRACTION_HARD_CAP_MS = 4_000;
+/** Default wall-clock budget when callers omit a deadline (matches personalization). */
+const DEFAULT_GENERATION_BUDGET_MS = 35_000;
 
 export interface ExtractedJobPosting {
   jobDescription: string;
@@ -400,7 +405,8 @@ export function buildPageTextForExtraction(html: string, jobUrl?: string, conten
   }
   const pageTitle =
     html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, " ").trim() ||
-    extractMetaContent(html, ["og:title", "twitter:title"])[0];
+    extractMetaContent(html, ["og:title", "twitter:title"])[0] ||
+    html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1]?.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
   const metas = extractMetaContent(html, ["og:description", "description", "twitter:description"]);
   const jsonLdHint = tryExtractJobPostingFromHtml(html, jobUrl)?.jobDescription;
   const body = htmlToPlainText(html);
@@ -465,6 +471,170 @@ export function appleJobIdFromUrl(jobUrl: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+export interface PaycomJobIds {
+  clientKey: string;
+  jobId: string;
+}
+
+/** Paycom career portals are SPAs; real JD text comes from the Mantle job-postings API. */
+export function parsePaycomJobUrl(jobUrl: string): PaycomJobIds | undefined {
+  try {
+    const url = new URL(normalizeJobPostingUrl(jobUrl) ?? jobUrl);
+    if (!/(^|\.)paycomonline\.net$/i.test(url.hostname)) {
+      return undefined;
+    }
+    const portalMatch = url.pathname.match(/\/portal\/([A-F0-9]{16,64})\/jobs\/(\d{3,12})(?:\/|$)/i);
+    if (portalMatch?.[1] && portalMatch[2]) {
+      return { clientKey: portalMatch[1], jobId: portalMatch[2] };
+    }
+    const clientKey =
+      url.searchParams.get("clientkey")?.trim() ||
+      url.searchParams.get("clientKey")?.trim() ||
+      undefined;
+    const jobId =
+      url.searchParams.get("job")?.trim() ||
+      url.searchParams.get("jobid")?.trim() ||
+      url.searchParams.get("jobId")?.trim() ||
+      undefined;
+    if (clientKey && jobId && /^\d{3,12}$/.test(jobId)) {
+      return { clientKey, jobId };
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function parsePaycomConfigsFromHtml(html: string): { sessionJWT: string; mantleBaseUrl: string } | undefined {
+  const startMarker = "var configsFromHost";
+  const start = html.indexOf(startMarker);
+  if (start < 0) {
+    return undefined;
+  }
+  const braceStart = html.indexOf("{", start);
+  if (braceStart < 0) {
+    return undefined;
+  }
+  let depth = 0;
+  let end = -1;
+  for (let i = braceStart; i < html.length; i += 1) {
+    const ch = html[i];
+    if (ch === "{") {
+      depth += 1;
+    } else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        end = i;
+        break;
+      }
+    }
+  }
+  if (end < 0) {
+    return undefined;
+  }
+  try {
+    const configs = JSON.parse(html.slice(braceStart, end + 1)) as {
+      sessionJWT?: unknown;
+      libConfig?: unknown;
+    };
+    const sessionJWT = typeof configs.sessionJWT === "string" ? configs.sessionJWT.trim() : "";
+    const libConfig =
+      typeof configs.libConfig === "string"
+        ? (JSON.parse(configs.libConfig) as { atsPortalMantleServiceUrl?: unknown })
+        : configs.libConfig && typeof configs.libConfig === "object"
+          ? (configs.libConfig as { atsPortalMantleServiceUrl?: unknown })
+          : undefined;
+    const mantle =
+      typeof libConfig?.atsPortalMantleServiceUrl === "string"
+        ? libConfig.atsPortalMantleServiceUrl.trim()
+        : "";
+    if (!sessionJWT || !mantle) {
+      return undefined;
+    }
+    return {
+      sessionJWT,
+      mantleBaseUrl: mantle.endsWith("/") ? mantle : `${mantle}/`,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+export interface PaycomJobPostingPayload {
+  jobPosting?: {
+    jobId?: string | number;
+    jobTitle?: string;
+    location?: string;
+    city?: string;
+    salaryRange?: string;
+    positionType?: string;
+    description?: string;
+    qualifications?: string;
+    googleJobJson?: string;
+  };
+}
+
+export function formatPaycomJobPosting(
+  payload: PaycomJobPostingPayload,
+  jobUrl?: string,
+): ExtractedJobPosting {
+  const job = payload.jobPosting;
+  if (!job) {
+    throw new Error("Paycom job API returned no posting details.");
+  }
+
+  if (typeof job.googleJobJson === "string" && job.googleJobJson.trim()) {
+    try {
+      const schema = JSON.parse(job.googleJobJson) as Record<string, unknown>;
+      // Prefer richer HTML fields when present; schema.org is a solid fallback.
+      if (!job.description && !job.qualifications) {
+        const fromSchema = formatSchemaOrgJobPosting(schema, jobUrl);
+        if (fromSchema) {
+          return fromSchema;
+        }
+      }
+    } catch {
+      // Fall through to structured fields.
+    }
+  }
+
+  const roleTitle = job.jobTitle?.trim() || "";
+  const jobId = String(job.jobId ?? "").trim() || jobIdFromJobUrl(jobUrl);
+  const location = (job.location || job.city || "").trim();
+  const sections = [
+    roleTitle ? `Title: ${roleTitle}` : "",
+    jobId ? `Job ID: ${jobId}` : "",
+    location ? `Location: ${location}` : "",
+    job.salaryRange?.trim() ? `Salary: ${htmlToPlainText(job.salaryRange)}` : "",
+    job.positionType?.trim() ? `Employment type: ${htmlToPlainText(job.positionType)}` : "",
+    job.description?.trim() ? `Description:\n${htmlToPlainText(job.description)}` : "",
+    job.qualifications?.trim() ? `Qualifications:\n${htmlToPlainText(job.qualifications)}` : "",
+  ].filter(Boolean);
+
+  const jobDescription = sections.join("\n\n").trim().slice(0, MAX_EXTRACTED_JD_CHARS);
+  if (jobDescription.length < 40) {
+    if (typeof job.googleJobJson === "string" && job.googleJobJson.trim()) {
+      try {
+        const fromSchema = formatSchemaOrgJobPosting(JSON.parse(job.googleJobJson) as Record<string, unknown>, jobUrl);
+        if (fromSchema) {
+          return fromSchema;
+        }
+      } catch {
+        // Ignore and throw below.
+      }
+    }
+    throw new Error(
+      "Could not extract a usable job description from that Paycom posting. Paste the description manually.",
+    );
+  }
+
+  return {
+    jobDescription,
+    roleTitle: roleTitle || undefined,
+    jobIds: jobId ? [jobId] : undefined,
+  };
 }
 
 interface AppleJobDetailsPayload {
@@ -607,6 +777,43 @@ export async function fetchAppleJobPosting(jobUrl: string): Promise<ExtractedJob
       `Could not load the Apple job posting (${detail}). Paste the description manually, or try again.`,
     );
   }
+}
+
+export async function fetchPaycomJobPosting(jobUrl: string): Promise<ExtractedJobPosting | undefined> {
+  const ids = parsePaycomJobUrl(jobUrl);
+  if (!ids) {
+    return undefined;
+  }
+
+  const portalUrl =
+    normalizeJobPostingUrl(jobUrl) ??
+    `https://www.paycomonline.net/v4/ats/web.php/portal/${ids.clientKey}/jobs/${ids.jobId}`;
+
+  const { html } = await fetchJobPostingHtml(portalUrl);
+  const configs = parsePaycomConfigsFromHtml(html);
+  if (!configs) {
+    throw new Error(
+      "Could not read Paycom session details from that careers page. Paste the description manually, or try again.",
+    );
+  }
+
+  const apiUrl = `${configs.mantleBaseUrl}api/ats/job-postings/${ids.jobId}`;
+  const response = await fetchWithTimeout(apiUrl, {
+    method: "GET",
+    headers: {
+      accept: "application/json",
+      "accept-language": "en-US,en;q=0.9",
+      "user-agent": BROWSER_HEADERS["user-agent"],
+      authorization: `Bearer ${configs.sessionJWT}`,
+      referer: portalUrl,
+      origin: "https://www.paycomonline.net",
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`Paycom job API returned ${response.status}`);
+  }
+  const payload = (await response.json()) as PaycomJobPostingPayload;
+  return formatPaycomJobPosting(payload, portalUrl);
 }
 
 export async function fetchJobPostingHtml(jobUrl: string): Promise<{ html: string; contentType: string }> {
@@ -785,7 +992,7 @@ export type GenerationProgressStep = "fetch" | "extract" | "voice" | "draft" | "
  *
  * Pipeline (site-agnostic):
  * 1. Fetch the page once
- * 2. Apple SPA/API when applicable
+ * 2. Apple / Paycom SPA/API when applicable
  * 3. schema.org JobPosting JSON-LD when embedded (many ATS boards)
  * 4. Build full page text (title, meta hints, body) and compact for the model
  * 5. LLM extraction with retries
@@ -794,7 +1001,7 @@ export type GenerationProgressStep = "fetch" | "extract" | "voice" | "draft" | "
 export async function resolveJobDescriptionFromUrl(
   jobUrl: string,
   onProgress?: (step: GenerationProgressStep) => void,
-  generationDeadlineAt = Date.now() + 58_000,
+  generationDeadlineAt = Date.now() + DEFAULT_GENERATION_BUDGET_MS,
 ): Promise<ExtractedJobPosting> {
   const url = normalizeJobPostingUrl(jobUrl);
   if (!url) {
@@ -805,6 +1012,14 @@ export async function resolveJobDescriptionFromUrl(
 
   if (appleJobIdFromUrl(url)) {
     const extracted = await fetchAppleJobPosting(url);
+    if (extracted) {
+      onProgress?.("extract");
+      return extracted;
+    }
+  }
+
+  if (parsePaycomJobUrl(url)) {
+    const extracted = await fetchPaycomJobPosting(url);
     if (extracted) {
       onProgress?.("extract");
       return extracted;
@@ -841,7 +1056,10 @@ export async function resolveJobDescriptionFromUrl(
     return { ...direct, jobDescription: pageText };
   }
   // Page understanding must not consume the time needed to write the email.
-  const extractionDeadlineAt = Math.min(generationDeadlineAt - 35_000, Date.now() + 15_000);
+  const extractionDeadlineAt = Math.min(
+    generationDeadlineAt - EXTRACTION_RESERVE_FOR_EMAIL_MS,
+    Date.now() + EXTRACTION_HARD_CAP_MS,
+  );
 
   if (apiKey) {
     try {

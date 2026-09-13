@@ -17,7 +17,7 @@ export function appDataPollKey(data: AppData): string {
     // email presence. Omitting them let a poll fetch the enriched data but then
     // discard it (unchanged key → setState keeps prev), so the directory kept
     // showing the placeholder name / blank avatar until an unrelated change.
-    cSig += `|${c.id}:${c.status}:${c.email ? "1" : "0"}:${c.fullName ?? ""}:${c.profilePhotoUrl ? "1" : "0"}:${c.lastError ?? ""}:${c.linkedinMessageAvailability ?? ""}:${c.linkedinInmailCredits ?? ""}:${c.linkedinMessageStatusText ?? ""}:${c.linkedinMessageSentAt ?? ""}`;
+    cSig += `|${c.id}:${c.status}:${c.email ? "1" : "0"}:${c.fullName ?? ""}:${c.profilePhotoUrl ? "1" : "0"}:${c.lastError ?? ""}:${c.linkedinMessageAvailability ?? ""}:${c.linkedinInmailCredits ?? ""}:${c.linkedinMessageStatusText ?? ""}:${c.linkedinMessageSentAt ?? ""}:${c.linkedinMessageTask?.id ?? ""}:${c.linkedinMessageTask?.action ?? ""}:${c.linkedinSendStatus ?? ""}`;
   }
   const upcoming = data.upcomingSends ?? [];
   let uSig = `${upcoming.length}`;

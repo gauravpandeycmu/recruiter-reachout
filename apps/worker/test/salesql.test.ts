@@ -46,6 +46,41 @@ describe("discoverEmailOnSalesql", () => {
     expect(adapter.closeOverlay).toHaveBeenCalled();
   });
 
+  it("still reveals when only personal mail is already visible for a tagged company", async () => {
+    // Regression: Michelle Roque / Cursor — Gmail showed as verified Direct before
+    // Reveal, and early-return skipped the @cursor.com work address.
+    const adapter = createFakeAdapter({
+      readRevealedEmail: vi
+        .fn()
+        .mockResolvedValueOnce("mroque1416@gmail.com")
+        .mockResolvedValueOnce("michelle@cursor.com"),
+    });
+    const outcome = await discoverEmailOnSalesql(adapter, "https://www.linkedin.com/in/ms-michelle-roque", {
+      dryRun: false,
+      company: "Cursor",
+    });
+
+    expect(outcome).toEqual({ status: "found", email: "michelle@cursor.com", creditSpent: true });
+    expect(adapter.clickRevealInfo).toHaveBeenCalled();
+  });
+
+  it("keeps personal mail when reveal finds nothing better for a tagged company", async () => {
+    const adapter = createFakeAdapter({
+      readRevealedEmail: vi
+        .fn()
+        .mockResolvedValueOnce("mroque1416@gmail.com")
+        .mockResolvedValueOnce("mroque1416@gmail.com"),
+      readPanelStatus: vi.fn().mockResolvedValue("unknown"),
+    });
+    const outcome = await discoverEmailOnSalesql(adapter, "https://www.linkedin.com/in/ms-michelle-roque", {
+      dryRun: false,
+      company: "Cursor",
+    });
+
+    expect(outcome).toEqual({ status: "found", email: "mroque1416@gmail.com", creditSpent: true });
+    expect(adapter.clickRevealInfo).toHaveBeenCalled();
+  });
+
   it("passes the tagged company into the panel email picker", async () => {
     const adapter = createFakeAdapter({
       readRevealedEmail: vi.fn().mockResolvedValue("atalnikov@apple.com"),
@@ -88,8 +123,25 @@ describe("discoverEmailOnSalesql", () => {
     });
     const outcome = await discoverEmailOnSalesql(adapter, "https://www.linkedin.com/in/jane-doe", { dryRun: false });
 
-    // A conclusive miss only ever follows a real Reveal Info click.
-    expect(outcome).toEqual({ status: "not_found", creditSpent: true });
+    // A panel that already shows a conclusive miss should not waste a click or
+    // increment the local credit counter.
+    expect(outcome).toEqual({ status: "not_found", creditSpent: false });
+  });
+
+  it("reports explicit credit exhaustion without clicking Reveal Info", async () => {
+    const adapter = createFakeAdapter({
+      readRevealedEmail: vi.fn().mockResolvedValue(undefined),
+      readPanelStatus: vi.fn().mockResolvedValue("quota_exhausted"),
+    });
+
+    const outcome = await discoverEmailOnSalesql(adapter, "https://www.linkedin.com/in/jane-doe", { dryRun: false });
+
+    expect(outcome).toEqual({
+      status: "not_found",
+      creditSpent: false,
+      providerUnavailableReason: "quota_exhausted",
+    });
+    expect(adapter.clickRevealInfo).not.toHaveBeenCalled();
   });
 
   it("returns error for an empty LinkedIn URL", async () => {

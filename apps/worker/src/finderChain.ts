@@ -1,4 +1,4 @@
-import { isFinderProvider, pickOutreachEmail, type FinderProvider } from "@recruiter/shared";
+import { discoveryProviderLabel, isFinderProvider, pickOutreachEmail, type FinderProvider } from "@recruiter/shared";
 import type { DiscoveryOutcome } from "./discoveryOutcome.js";
 
 export interface FinderStep {
@@ -8,20 +8,27 @@ export interface FinderStep {
 }
 
 export function finderQuotaMessage(id: FinderProvider): string {
-  return id === "apollo" ? "Apollo monthly quota exhausted." : "SalesQL monthly quota exhausted.";
+  return `${discoveryProviderLabel(id)} monthly quota exhausted.`;
+}
+
+function providerLabel(id: FinderProvider): string {
+  return discoveryProviderLabel(id);
 }
 
 /**
- * Tries Finder sources in order (SalesQL, then Apollo). A previous-employer
+ * Tries Finder sources in order (SalesQL → Apollo → Hunter → …). A previous-employer
  * address is treated as a miss so the next source can still run. Overlay
  * errors (panel didn't open) also fall through — only a usable current-company
- * or personal email stops the chain.
+ * or personal email stops the chain. Credits-out pauses that provider until
+ * local midnight, then continues the chain.
  */
 export async function runFinderChain(args: {
   steps: FinderStep[];
   company?: string;
   log?: (message: string) => void;
   required?: boolean;
+  onProviderUnavailable?: (provider: FinderProvider, reason: "quota_exhausted") => void | Promise<void>;
+  onLookup?: (provider: FinderProvider, status: "found" | "not_found" | "error") => void | Promise<void>;
 }): Promise<DiscoveryOutcome | undefined> {
   const log = args.log ?? (() => {});
   if (args.steps.length === 0) {
@@ -41,18 +48,26 @@ export async function runFinderChain(args: {
     const allowed = await step.canUse();
     if (!allowed) {
       denied ??= step.id;
-      log(`${step.id === "apollo" ? "Apollo" : "SalesQL"} skipped (quota or auto-fallback off).`);
+      log(`${providerLabel(step.id)} skipped (quota or auto-fallback off).`);
       continue;
     }
 
     ran += 1;
-    log(`Trying ${step.id === "apollo" ? "Apollo" : "SalesQL"}.`);
+    log(`Trying ${providerLabel(step.id)}.`);
+    const startedAt = Date.now();
     const outcome = await step.run();
+    log(`${providerLabel(step.id)} finished in ${((Date.now() - startedAt) / 1000).toFixed(1)}s (${outcome.status}).`);
+    if (outcome.status === "not_found" && outcome.providerUnavailableReason === "quota_exhausted") {
+      await args.onProviderUnavailable?.(step.id, "quota_exhausted");
+      log(`${providerLabel(step.id)} credits exhausted; skipping it until tomorrow.`);
+    }
     if (outcome.status === "found") {
       const usable = pickOutreachEmail([outcome.email], args.company);
       if (usable) {
+        await args.onLookup?.(step.id, "found");
         return { ...outcome, email: usable };
       }
+      await args.onLookup?.(step.id, "not_found");
       log(
         `${isFinderProvider(outcome.provider) ? outcome.provider : step.id} email ${outcome.email} is a previous-employer address for ${args.company?.trim() || "the tagged company"} — trying next Finder source.`,
       );
@@ -60,6 +75,7 @@ export async function runFinderChain(args: {
       continue;
     }
     if (outcome.status === "not_found") {
+      await args.onLookup?.(step.id, "not_found");
       lastMiss = outcome;
       continue;
     }
@@ -67,6 +83,7 @@ export async function runFinderChain(args: {
       lastDryRun = outcome;
       continue;
     }
+    await args.onLookup?.(step.id, "error");
     lastError = outcome;
   }
 

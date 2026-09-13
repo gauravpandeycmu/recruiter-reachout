@@ -1,4 +1,6 @@
 import type { Page } from "playwright";
+import { readFile } from "node:fs/promises";
+import { basename } from "node:path";
 import type { LinkedInMessageTask } from "@recruiter/shared";
 import type { WorkerApiClient } from "./apiClient.js";
 
@@ -12,10 +14,19 @@ const COMPOSE_ROOT_SELECTOR = [
   '.msg-overlay-list-bubble:has([contenteditable="true"])',
   '[role="dialog"].msg-overlay-conversation-bubble',
   '[role="dialog"][aria-label="Messaging" i]',
+  '.msg-overlay-conversation-bubble',
+  '[aria-label="Messaging"]',
+  // Full messaging/compose page (Message click with interop=msgOverlay often fails in
+  // headless; navigating to the compose href lands here instead of an overlay).
+  'form.msg-form:has([contenteditable="true"])',
+  '.msg-form:has([contenteditable="true"])',
+  'main:has(.msg-form__contenteditable)',
 ].join(", ");
 
-const COMPOSE_EDITOR_SELECTOR = '[contenteditable="true"][role="textbox"], textarea[placeholder*="message" i]';
+const COMPOSE_EDITOR_SELECTOR = '[contenteditable="true"][role="textbox"], .msg-form__contenteditable, textarea[placeholder*="message" i]';
 const COMPOSE_SUBJECT_SELECTOR = 'input[placeholder*="Subject" i], input[name="subject"]';
+const PROFILE_MESSAGE_LINK_SELECTOR = 'main a[href*="/messaging/compose/"]';
+const PROFILE_MESSAGE_CONTROL_SELECTOR = 'main button, main a[role="button"], main a';
 
 /**
  * LinkedIn's regular composer exposes an accessible "Send" name, but the
@@ -134,7 +145,12 @@ async function findVisibleCompose(page: Page, linkedinUrl: string, profileName: 
     for (let index = (await roots.count()) - 1; index >= 0; index -= 1) {
       const root = roots.nth(index);
       const editor = root.locator(COMPOSE_EDITOR_SELECTOR).first();
-      if (!(await root.isVisible().catch(() => false)) || !(await editor.isVisible().catch(() => false))) continue;
+      if (!(await root.isVisible().catch(() => false))) continue;
+      if (!(await editor.isVisible().catch(() => false))) {
+        if (await matchesProfile(root, linkedinUrl, profileName) &&
+          /you haven['’]t received a response yet/i.test(await root.innerText().catch(() => ""))) return root;
+        continue;
+      }
       if (await matchesProfile(root, linkedinUrl, profileName)) return root;
       visibleWithEditor.push(root);
     }
@@ -156,29 +172,74 @@ async function findVisibleCompose(page: Page, linkedinUrl: string, profileName: 
   throw new Error("LinkedIn opened Message, but the new compose window did not become available. The app already cleared empty old windows and preserved any unsent drafts; try Check again.");
 }
 
-async function openCompose(page: Page, linkedinUrl: string): Promise<{ dialog: PageLocator; availability: LinkedInComposeAvailability }> {
+async function openCompose(page: Page, linkedinUrl: string): Promise<{ dialog: PageLocator; availability: LinkedInComposeAvailability; profileName: string }> {
   await page.goto(linkedinUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
   if (/login|checkpoint|authwall/i.test(page.url())) throw new Error("LinkedIn is signed out. Open Setup and sign in to LinkedIn.");
   const main = page.locator("main").first();
   await main.waitFor({ state: "visible", timeout: 8_000 });
   const profileText = await main.innerText().catch(() => "");
-  const profileName = await main.locator("h1").first().innerText({ timeout: 1_200 }).catch(() => "");
+  const profileName = await main.locator("h1").first().innerText({ timeout: 1_200 }).catch(async () => (await page.title()).replace(/\s*\|\s*LinkedIn.*$/, "").replace(/^\(\d+\)\s*/, "").trim());
   await recoverStaleComposers(page);
-  const messageButton = page
-    .locator("main")
-    .locator('button, a[role="button"], a')
+
+  // Prefer the profile's own Message compose link over recommendation-card Message links.
+  const profileComposeLink = page
+    .locator(PROFILE_MESSAGE_LINK_SELECTOR)
     .filter({ hasText: /^\s*Message\s*$/i })
     .first();
-  if (!(await messageButton.isVisible({ timeout: 8_000 }).catch(() => false))) {
+  const composeHref =
+    (await profileComposeLink.getAttribute("href").catch(() => null)) ||
+    (await page.locator(PROFILE_MESSAGE_LINK_SELECTOR).first().getAttribute("href").catch(() => null));
+
+  const messageButton = page
+    .locator(PROFILE_MESSAGE_CONTROL_SELECTOR)
+    .filter({ hasText: /^\s*Message\s*$/i })
+    .first();
+  const messageVisible = await messageButton.isVisible({ timeout: 8_000 }).catch(() => false);
+  if (!messageVisible && !composeHref) {
     return {
       dialog: page.locator('[role="dialog"]').last(),
+      profileName,
       availability: parseLinkedInComposeAvailability({ profileText, composeText: "", hasCompose: false }),
     };
   }
-  await messageButton.click({ timeout: 8_000 });
-  const dialog = await findVisibleCompose(page, linkedinUrl, profileName);
-  const composeText = await dialog.innerText().catch(() => "");
-  return { dialog, availability: parseLinkedInComposeAvailability({ profileText, composeText, hasCompose: true }) };
+
+  // Overlay click is fastest when LinkedIn honors interop=msgOverlay. In headless /
+  // automation it often no-ops; fall back to the compose href after a short wait.
+  if (messageVisible) {
+    await messageButton.click({ timeout: 8_000 });
+    try {
+      const dialog = await findVisibleCompose(page, linkedinUrl, profileName, 3_000);
+      const composeText = await dialog.innerText().catch(() => "");
+      return {
+        dialog,
+        profileName,
+        availability: parseLinkedInComposeAvailability({ profileText, composeText, hasCompose: true }),
+      };
+    } catch {
+      // continue to compose-URL fallback
+    }
+  }
+
+  if (composeHref) {
+    await page.goto(new URL(composeHref, page.url()).toString(), {
+      waitUntil: "domcontentloaded",
+      timeout: 60_000,
+    });
+    if (/login|checkpoint|authwall/i.test(page.url())) {
+      throw new Error("LinkedIn is signed out. Open Setup and sign in to LinkedIn.");
+    }
+    const dialog = await findVisibleCompose(page, linkedinUrl, profileName, 8_000);
+    const composeText = await dialog.innerText().catch(() => "");
+    return {
+      dialog,
+      profileName,
+      availability: parseLinkedInComposeAvailability({ profileText, composeText, hasCompose: true }),
+    };
+  }
+
+  throw new Error(
+    "LinkedIn opened Message, but the new compose window did not become available. The app already cleared empty old windows and preserved any unsent drafts; try Check again.",
+  );
 }
 
 async function closeCompose(dialog: PageLocator): Promise<void> {
@@ -213,14 +274,31 @@ async function findEnabledSendButton(page: Page, dialog: PageLocator, timeoutMs 
   );
 }
 
-async function waitForSendConfirmation(page: Page, dialog: PageLocator, editor: PageLocator): Promise<boolean> {
+export async function waitForSendConfirmation(page: Page, dialog: PageLocator, editor: PageLocator, message?: string, linkedinUrl?: string, profileName = ""): Promise<boolean> {
   const deadline = Date.now() + 7_000;
   while (Date.now() < deadline) {
     if (!(await dialog.isVisible().catch(() => false))) return true;
-    const remaining = (await editor.textContent().catch(() => ""))?.trim() ?? "";
-    if (!remaining) return true;
     const sentNotice = page.getByText(/message sent|inmail sent/i).last();
     if (await sentNotice.isVisible().catch(() => false)) return true;
+    if (message && linkedinUrl) {
+      const conversations = page.locator(COMPOSE_ROOT_SELECTOR);
+      for (let i = 0; i < await conversations.count(); i++) {
+        const conversation = conversations.nth(i);
+        if (!await conversation.isVisible().catch(() => false) || !await matchesProfile(conversation, linkedinUrl, profileName)) continue;
+        const text = await conversation.innerText({ timeout: 300 }).catch(() => "");
+        if (/you haven['’]t received a response yet/i.test(text) &&
+          text.replace(/\s+/g, " ").includes(message.replace(/\s+/g, " ").trim())) return true;
+      }
+    }
+    // The editor can disappear after send while the conversation stays open.
+    // A locator read would then wait Playwright's default 30s. Read the current
+    // DOM without waiting; absence alone is not a successful-send signal.
+    const remaining = await editor.evaluateAll((elements) => {
+      const element = elements[0];
+      if (!element) return null;
+      return (element instanceof HTMLTextAreaElement ? element.value : element.textContent ?? "").trim();
+    }).catch(() => null);
+    if (remaining === "") return true;
     await page.waitForTimeout(250);
   }
   return false;
@@ -230,8 +308,12 @@ type LinkedInTaskTiming = { composeMs: number; prepareMs?: number; confirmationM
 
 export async function processLinkedInMessageTask(page: Page, task: LinkedInMessageTask): Promise<LinkedInComposeAvailability & { prepared?: boolean; sent?: boolean; timingMs?: LinkedInTaskTiming }> {
   const startedAt = Date.now();
-  const { dialog, availability } = await openCompose(page, task.linkedinUrl);
+  const { dialog, availability, profileName } = await openCompose(page, task.linkedinUrl);
   const composeMs = Date.now() - startedAt;
+  if (task.freeOnly && availability.availability !== "free") {
+    await closeCompose(dialog);
+    return { ...availability, sent: false, statusText: "Skipped: this profile is not currently free to message.", timingMs: { composeMs } };
+  }
   if (task.action === "check" || availability.availability === "unavailable") {
     if (await dialog.isVisible().catch(() => false)) await closeCompose(dialog);
     return { ...availability, timingMs: { composeMs } };
@@ -244,16 +326,23 @@ export async function processLinkedInMessageTask(page: Page, task: LinkedInMessa
   await editor.fill(task.message ?? "");
 
   if (task.resumePath) {
+    // The stored path contains an internal ID; LinkedIn should display the
+    // user-facing filename saved with the selected resume.
+    const attachment = {
+      name: task.resumeFileName || basename(task.resumePath),
+      mimeType: "application/pdf",
+      buffer: await readFile(task.resumePath),
+    };
     const fileInput = dialog.locator('input[type="file"]').first();
     if (await fileInput.count()) {
-      await fileInput.setInputFiles(task.resumePath);
+      await fileInput.setInputFiles(attachment);
     } else {
       const attach = dialog.getByRole("button", { name: /attach/i }).first();
       if (await attach.isVisible({ timeout: 1_000 }).catch(() => false)) {
         const chooserPromise = page.waitForEvent("filechooser", { timeout: 5_000 });
         await attach.click();
         const chooser = await chooserPromise;
-        await chooser.setFiles(task.resumePath);
+        await chooser.setFiles(attachment);
       }
     }
   }
@@ -265,7 +354,7 @@ export async function processLinkedInMessageTask(page: Page, task: LinkedInMessa
   const sendButton = await findEnabledSendButton(page, dialog);
   const preparedAt = Date.now();
   await sendButton.click();
-  if (!(await waitForSendConfirmation(page, dialog, editor))) {
+  if (!(await waitForSendConfirmation(page, dialog, editor, task.message, task.linkedinUrl, profileName))) {
     throw new Error(
       "LinkedIn did not confirm that the message was sent. The app will not mark it as sent; check the open conversation before trying again.",
     );

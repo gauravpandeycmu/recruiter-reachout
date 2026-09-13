@@ -39,11 +39,13 @@ import {
   nextDiscoveryCandidate,
   previewEmail,
   recordDiscoveryResult,
+  recordProviderLookup,
   rerenderPendingSendJobsForCandidate,
   requestDiscovery,
   requestSalesqlSweep,
   patchCandidateFromClient,
   canUseDiscoveryProvider,
+  markDiscoveryProviderUnavailable,
   currentMonthKey,
   updateWorkerStatus,
   getDiscoverySettings,
@@ -439,7 +441,9 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
     // Mutating GET: claims the candidate (discoveryClaimedAt). Worker-only — the
     // dashboard must never poll this or lookups stall until the claim goes stale.
     if (req.method === "GET" && url.pathname === "/api/automation/next-discovery") {
-      const candidate = nextDiscoveryCandidate(store);
+      const requestedStage = url.searchParams.get("stage");
+      const stage = requestedStage === "jobright" || requestedStage === "finder" ? requestedStage : undefined;
+      const candidate = nextDiscoveryCandidate(store, new Date(), stage);
       if (!candidate) {
         sendJson(res, 404, { error: "No candidates need discovery." });
         return;
@@ -467,7 +471,7 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
         message?: string;
         candidateId?: string;
         candidateName?: string;
-        provider?: "jobright" | "salesql";
+        provider?: import("@recruiter/shared").DiscoveryProvider;
         workerStartedAt?: string;
       };
       if (!body.phase || !body.message?.trim()) {
@@ -650,6 +654,7 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
 
     if (req.method === "POST" && url.pathname === "/api/linkedin-message/send") {
       const body = (await readJsonAudited(req, "http.body", { method: req.method, path: url.pathname })) as {
+        freeOnly?: boolean;
         candidateId?: string;
         subject?: string;
         message?: string;
@@ -667,7 +672,7 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
       const canSendFree = candidate.linkedinMessageAvailability === "free";
       const canSendInmail =
         candidate.linkedinMessageAvailability === "inmail" && (candidate.linkedinInmailCredits ?? 0) > 0;
-      if (!canSendFree && !canSendInmail) {
+      if ((!canSendFree && !canSendInmail) || (body.freeOnly && !canSendFree)) {
         sendJson(res, 409, { error: "Check LinkedIn messaging first. Sending is available only for a free message or when an InMail credit is available." });
         return;
       }
@@ -675,6 +680,7 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
       const task = queueLinkedInMessageTask(store, {
         candidateId: candidate.id,
         action: "send",
+        freeOnly: body.freeOnly === true,
         subject: body.subject,
         message: body.message,
         resumePath: resume?.path,
@@ -1003,8 +1009,8 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
     }
 
     if (req.method === "GET" && url.pathname.match(/^\/api\/automation\/can-use-provider\/[^/]+$/)) {
-      const provider = url.pathname.split("/")[4] as "jobright" | "salesql" | "apollo";
-      if (provider !== "jobright" && provider !== "salesql" && provider !== "apollo") {
+      const provider = url.pathname.split("/")[4] as import("@recruiter/shared").DiscoveryProvider;
+      if (!["jobright", "salesql", "hunter", "apollo", "prospeo", "getprospect", "kwinbi"].includes(provider)) {
         sendJson(res, 400, { error: "Unknown provider." });
         return;
       }
@@ -1023,7 +1029,44 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
           monthKey: currentMonthKey(),
           ...canUseDiscoveryProvider(store, "apollo"),
         },
+        prospeo: {
+          monthKey: currentMonthKey(),
+          ...canUseDiscoveryProvider(store, "prospeo"),
+        },
+        hunter: { monthKey: currentMonthKey(), ...canUseDiscoveryProvider(store, "hunter") },
+        getprospect: { monthKey: currentMonthKey(), ...canUseDiscoveryProvider(store, "getprospect") },
+        kwinbi: { monthKey: currentMonthKey(), ...canUseDiscoveryProvider(store, "kwinbi") },
       });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/automation/provider-unavailable") {
+      const body = (await readJsonAudited(req, "http.body", { method: req.method, path: url.pathname })) as {
+        provider?: import("@recruiter/shared").FinderProvider;
+        reason?: "quota_exhausted";
+      };
+      if (!body.provider || !["salesql", "hunter", "apollo", "prospeo", "getprospect", "kwinbi"].includes(body.provider) || body.reason !== "quota_exhausted") {
+        sendJson(res, 400, { error: "A supported provider and reason are required." });
+        return;
+      }
+      const unavailableUntil = await markDiscoveryProviderUnavailable(store, body.provider, body.reason);
+      sendJson(res, 200, { provider: body.provider, reason: body.reason, unavailableUntil });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/automation/provider-lookup") {
+      const body = (await readJsonAudited(req, "http.body", { method: req.method, path: url.pathname })) as {
+        eventId?: string;
+        provider?: import("@recruiter/shared").DiscoveryProvider;
+        status?: "found" | "not_found" | "error";
+      };
+      const providers = ["jobright", "salesql", "apollo", "hunter", "prospeo", "getprospect", "kwinbi"];
+      if (!body.eventId || !body.provider || !providers.includes(body.provider) || !body.status || !["found", "not_found", "error"].includes(body.status)) {
+        sendJson(res, 400, { error: "A valid lookup event is required." });
+        return;
+      }
+      await recordProviderLookup(store, body as Required<typeof body>);
+      sendJson(res, 200, { recorded: true });
       return;
     }
 
@@ -1081,10 +1124,12 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
         linkedinPost?: string;
         recipientTitles?: string[];
         passionate?: boolean | string;
+        customise?: boolean | string;
       };
       const options = {
         ...body,
         passionate: body.passionate === true || body.passionate === "true",
+        customise: body.customise === true || body.customise === "true",
       };
       const wantsStream = /ndjson/i.test(req.headers.accept ?? "") || url.searchParams.get("stream") === "1";
       if (!wantsStream) {

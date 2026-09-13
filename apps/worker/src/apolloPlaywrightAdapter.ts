@@ -7,6 +7,7 @@ import {
   linkedInProfileSlug,
   shouldWarmLinkedInFeed,
 } from "./salesqlPlaywrightAdapter.js";
+import { APOLLO_EXTENSION_ID, readApolloSurfacePaths } from "./apolloExtension.js";
 
 /** Live Apollo 16.4 docks a fixed right-edge launcher (`data-cy="apollo-opener-icon-new"`). */
 export const APOLLO_OPENER_SELECTORS = [
@@ -31,15 +32,34 @@ export const APOLLO_PANEL_SELECTORS = [
   ".sidebar-expanded",
 ].join(", ");
 
-export const APOLLO_ACCESS_EMAIL_TEXT = /Access email/i;
-export const APOLLO_NO_EMAIL_TEXT = /No email found/i;
+export const APOLLO_ACCESS_EMAIL_TEXT = /^Access email(?: only)?$/i;
+export const APOLLO_NO_EMAIL_TEXT = /\bNo emails?\b|email unavailable|couldn't find an email/i;
+export const APOLLO_QUOTA_EXHAUSTED_TEXT =
+  /out of credits|no credits(?: remaining| left)?|insufficient credits|credit limit|credits? exhausted|you(?:'ve| have) used all your credits|buy (?:more )?credits|upgrade to (?:access|unlock).{0,40}email/i;
 export const APOLLO_LOGIN_TEXT = /Continue with Apollo|Sign in to Apollo|Log in to Apollo/i;
 export const APOLLO_PERSON_TAB = /^Person$/i;
 
-const FEED_WARMUP_MS = Number(process.env.APOLLO_FEED_WARMUP_MS ?? 2500);
-const PROFILE_SETTLE_MS = Number(process.env.APOLLO_PROFILE_SETTLE_MS ?? 6000);
-const SAME_PROFILE_SETTLE_MS = Number(process.env.APOLLO_SAME_PROFILE_SETTLE_MS ?? 800);
-const POST_CLICK_SETTLE_MS = Number(process.env.APOLLO_POST_CLICK_SETTLE_MS ?? 2000);
+export function classifyApolloPanelStatus(
+  text: string,
+): "no_emails" | "not_found" | "quota_exhausted" | "unknown" {
+  if (APOLLO_QUOTA_EXHAUSTED_TEXT.test(text)) {
+    return "quota_exhausted";
+  }
+  if (
+    APOLLO_NO_EMAIL_TEXT.test(text) ||
+    /Emails?\s+(?:Unavailable|Not available|None)\b/i.test(text) ||
+    /Contact information[\s\S]{0,300}Emails?[\s\S]{0,120}(?:Unavailable|Not available|None)\b/i.test(text)
+  ) {
+    return "no_emails";
+  }
+  return "unknown";
+}
+
+const FEED_WARMUP_MS = Number(process.env.APOLLO_FEED_WARMUP_MS ?? 500);
+const PROFILE_SETTLE_MS = Number(process.env.APOLLO_PROFILE_SETTLE_MS ?? 500);
+const SAME_PROFILE_SETTLE_MS = Number(process.env.APOLLO_SAME_PROFILE_SETTLE_MS ?? 250);
+const POST_CLICK_SETTLE_MS = Number(process.env.APOLLO_POST_CLICK_SETTLE_MS ?? 500);
+const ACCESS_EMAIL_WAIT_MS = Number(process.env.APOLLO_ACCESS_EMAIL_WAIT_MS ?? 2500);
 
 type UiRoot = Page | Frame;
 
@@ -47,10 +67,6 @@ function roots(page: Page): UiRoot[] {
   const frames = page.frames().filter((frame) => frame !== page.mainFrame());
   return [page, ...frames];
 }
-
-const APOLLO_EXTENSION_ID = "alhgpfoeiimagjlnfekdhkjlkiomcapa";
-const APOLLO_SIDE_PANEL_PATH = "/rlsgu_rNdM_side-panel9sal5.html";
-const APOLLO_LINKEDIN_SIDEBAR_PATH = "/m4atv_rNdM_linkedin-sidebaroa5lf.html";
 
 function isApolloSurfaceUrl(url: string): boolean {
   return /alhgpfoeiimagjlnfekdhkjlkiomcapa/i.test(url) && /side-panel|linkedin-sidebar|sidebar-main/i.test(url);
@@ -60,7 +76,22 @@ async function apolloSurfacePages(page: Page): Promise<Page[]> {
   return page.context().pages().filter((item) => isApolloSurfaceUrl(item.url()));
 }
 
+/** Apollo 16.5 renders actionable controls inside a remote iframe nested in
+ * its extension side-panel page. Page.locator() does not cross that boundary. */
+async function apolloUiRoots(page: Page): Promise<UiRoot[]> {
+  const result: UiRoot[] = [...roots(page)];
+  for (const surface of await apolloSurfacePages(page)) {
+    result.push(surface);
+    result.push(...surface.frames().filter((frame) => frame !== surface.mainFrame()));
+  }
+  return result;
+}
+
 async function openApolloSidePanelFromWorker(page: Page): Promise<boolean> {
+  const { sidePanelPath } = readApolloSurfacePaths();
+  if (!sidePanelPath) {
+    return false;
+  }
   const worker = page
     .context()
     .serviceWorkers()
@@ -78,7 +109,7 @@ async function openApolloSidePanelFromWorker(page: Page): Promise<boolean> {
         await chrome.sidePanel.setOptions({
           tabId: tab.id,
           enabled: true,
-          path: "${APOLLO_SIDE_PANEL_PATH}",
+          path: ${JSON.stringify(sidePanelPath)},
         });
         await chrome.sidePanel.open({ tabId: tab.id });
         return { ok: true, tabId: tab.id };
@@ -122,7 +153,8 @@ async function pushLinkedInUrlToSurface(page: Page): Promise<void> {
 
 async function openSidePanelWithExtensionGesture(page: Page): Promise<void> {
   const surface = (await apolloSurfacePages(page))[0];
-  if (!surface) {
+  const { sidePanelPath } = readApolloSurfacePaths();
+  if (!surface || !sidePanelPath) {
     return;
   }
   await surface.evaluate(`(() => {
@@ -141,7 +173,7 @@ async function openSidePanelWithExtensionGesture(page: Page): Promise<void> {
       await chrome.sidePanel.setOptions({
         tabId: tab.id,
         enabled: true,
-        path: "/rlsgu_rNdM_side-panel9sal5.html",
+        path: ${JSON.stringify(sidePanelPath)},
       });
       await chrome.sidePanel.open({ tabId: tab.id });
     });
@@ -157,14 +189,24 @@ async function openApolloSurfacePage(page: Page): Promise<Page | undefined> {
     return existing;
   }
   const linkedinUrl = page.url();
+  const { sidePanelPath } = readApolloSurfacePaths();
+  if (!sidePanelPath) {
+    return undefined;
+  }
   const surface = await page.context().newPage();
-  const target = `chrome-extension://${APOLLO_EXTENSION_ID}${APOLLO_LINKEDIN_SIDEBAR_PATH}?url=${encodeURIComponent(linkedinUrl)}&side-panel=true`;
+  // Apollo 16.5 moved the LinkedIn UI behind its outer side-panel shell. The
+  // shell supplies Chrome API messages to the inner iframe; opening the inner
+  // LinkedIn page directly leaves it on a permanent loading spinner.
+  const target = `chrome-extension://${APOLLO_EXTENSION_ID}${sidePanelPath}`;
   try {
-    await surface.goto(target, { waitUntil: "domcontentloaded", timeout: 20_000 });
-    await surface.waitForTimeout(2500);
+    // The shell discovers its parent from Chrome's active normal tab.
+    await page.bringToFront();
+    await surface.goto(target, { waitUntil: "domcontentloaded", timeout: 5_000 });
+    await page.bringToFront();
+    await surface.waitForTimeout(500);
     await dismissApolloPaywall(page);
     await pushLinkedInUrlToSurface(page);
-    await surface.waitForTimeout(1500);
+    await surface.waitForTimeout(500);
     return surface;
   } catch {
     await surface.close().catch(() => {});
@@ -473,8 +515,7 @@ async function clickApolloClosedShadow(page: Page): Promise<boolean> {
 }
 
 async function ensurePersonTab(page: Page): Promise<void> {
-  const surfaces = [...roots(page), ...(await apolloSurfacePages(page))];
-  for (const root of surfaces) {
+  for (const root of await apolloUiRoots(page)) {
     const person = root.getByRole("button", { name: APOLLO_PERSON_TAB }).first();
     if (await person.isVisible().catch(() => false)) {
       const pressed = await person.getAttribute("aria-pressed").catch(() => null);
@@ -549,8 +590,10 @@ export async function ensureApolloPanelOpen(page: Page): Promise<boolean> {
     return true;
   }
 
-  await clickApolloLauncher(page);
-  await openApolloSidePanelFromWorker(page);
+  // Chromium side panels are not always exposed as Playwright pages, even
+  // after chrome.sidePanel.open succeeds. Load Apollo's manifest-declared
+  // LinkedIn surface directly as a durable fallback.
+  await openApolloSurfacePage(page);
   await page.waitForTimeout(POST_CLICK_SETTLE_MS);
   if (await panelLooksOpen(page)) {
     await ensurePersonTab(page);
@@ -627,13 +670,13 @@ export function createApolloPlaywrightAdapter(page: Page): ApolloPageAdapter {
       }
 
       if (shouldWarmLinkedInFeed(current)) {
-        await page.goto("https://www.linkedin.com/feed/", { waitUntil: "domcontentloaded", timeout: 60_000 });
+        await page.goto("https://www.linkedin.com/feed/", { waitUntil: "domcontentloaded", timeout: 10_000 });
         await page.waitForTimeout(FEED_WARMUP_MS);
       }
 
-      await page.goto(linkedinUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
+      await page.goto(linkedinUrl, { waitUntil: "domcontentloaded", timeout: 10_000 });
       const early = (await countApolloHosts(page)) > 0;
-      await page.waitForTimeout(early ? 1500 : PROFILE_SETTLE_MS);
+      await page.waitForTimeout(early ? 300 : PROFILE_SETTLE_MS);
     },
 
     async waitForOverlay(timeoutMs: number): Promise<{ visible: boolean }> {
@@ -657,18 +700,44 @@ export function createApolloPlaywrightAdapter(page: Page): ApolloPageAdapter {
     async clickAccessEmail(): Promise<void> {
       await ensureApolloPanelOpen(page);
       await ensurePersonTab(page);
-      const surfaces = [...roots(page), ...(await apolloSurfacePages(page))];
-      for (const root of surfaces) {
-        const button = root.getByRole("button", { name: APOLLO_ACCESS_EMAIL_TEXT }).first();
-        const text = root.getByText(APOLLO_ACCESS_EMAIL_TEXT).first();
-        for (const locator of [button, text]) {
-          if (await locator.isVisible().catch(() => false)) {
-            await locator.click({ force: true, timeout: 8000 }).catch(() => {});
-            await page.waitForTimeout(POST_CLICK_SETTLE_MS);
-            return;
+      const deadline = Date.now() + ACCESS_EMAIL_WAIT_MS;
+      let lastClickError: unknown;
+      while (Date.now() < deadline) {
+        const panelStatus = classifyApolloPanelStatus(await readApolloPanelText(page));
+        if (panelStatus === "no_emails" || panelStatus === "not_found" || panelStatus === "quota_exhausted") {
+          throw new Error(`Apollo reported ${panelStatus} before Access email became available.`);
+        }
+        for (const root of await apolloUiRoots(page)) {
+          // Apollo has rendered this as both a real button and a clickable text
+          // node across recent versions. Exact matching avoids the separate
+          // locked "Access email & phone" upsell.
+          const candidates = [
+            root.getByRole("button", { name: APOLLO_ACCESS_EMAIL_TEXT }),
+            root.getByText(APOLLO_ACCESS_EMAIL_TEXT),
+          ];
+          for (const candidateSet of candidates) {
+            const count = Math.min(await candidateSet.count().catch(() => 0), 8);
+            for (let index = 0; index < count; index += 1) {
+              const locator = candidateSet.nth(index);
+              if (!(await locator.isVisible().catch(() => false))) {
+                continue;
+              }
+              try {
+                await locator.click({ force: true, timeout: 1500 });
+                await page.waitForTimeout(POST_CLICK_SETTLE_MS);
+                return;
+              } catch (error) {
+                lastClickError = error;
+              }
+            }
           }
         }
+        await page.waitForTimeout(250);
       }
+      if (lastClickError instanceof Error) {
+        throw new Error(`Apollo Access email was visible but could not be clicked: ${lastClickError.message}`);
+      }
+      throw new Error("Apollo panel opened, but Access email was not available.");
     },
 
     async readRevealedEmail(timeoutMs: number, company?: string): Promise<string | undefined> {
@@ -676,11 +745,14 @@ export function createApolloPlaywrightAdapter(page: Page): ApolloPageAdapter {
       while (Date.now() < deadline) {
         const panelText = await readApolloPanelText(page);
         if (panelText) {
-          const email = pickBestEmail(panelText, company);
+          // Apollo's current contact card can legitimately show a parent-company
+          // or alternate current-company domain. Keep that visible address when
+          // literal matching against the batch company label cannot classify it.
+          const email = pickBestEmail(panelText, company) ?? pickBestEmail(panelText);
           if (email) {
             return email;
           }
-          if (APOLLO_NO_EMAIL_TEXT.test(panelText)) {
+          if (classifyApolloPanelStatus(panelText) === "no_emails") {
             return undefined;
           }
         }
@@ -689,25 +761,33 @@ export function createApolloPlaywrightAdapter(page: Page): ApolloPageAdapter {
       return undefined;
     },
 
-    async readPanelStatus(): Promise<"no_emails" | "not_found" | "unknown"> {
+    async readPanelStatus(): Promise<"no_emails" | "not_found" | "quota_exhausted" | "unknown"> {
       const panelText = await readApolloPanelText(page);
-      if (APOLLO_NO_EMAIL_TEXT.test(panelText)) {
-        return "no_emails";
-      }
-      return "unknown";
+      return classifyApolloPanelStatus(panelText);
     },
 
     async closeOverlay(): Promise<void> {
+      // The fallback Apollo surface is a normal extension tab. Close it as soon
+      // as the result is known instead of leaving it visible until the next
+      // profile, and never wait on absent Close buttons in every nested frame.
+      for (const surface of await apolloSurfacePages(page)) {
+        await Promise.race([
+          surface.close({ runBeforeUnload: false }).catch(() => {}),
+          new Promise<void>((resolve) => setTimeout(resolve, 500)),
+        ]);
+      }
       for (const root of roots(page)) {
         const close = root.locator(".close-button, .collapse-button").first();
         if (await close.isVisible().catch(() => false)) {
           await close.click({ force: true, timeout: 2000 }).catch(() => {});
         }
         const named = root.getByRole("button", { name: /^Close$|×|Dismiss/i }).first();
-        await named.click({ timeout: 1500 }).catch(() => {});
+        if (await named.isVisible().catch(() => false)) {
+          await named.click({ timeout: 1000 }).catch(() => {});
+        }
       }
       await clickFirstVisible(page, ".apollo-button").catch(() => false);
-      await page.waitForTimeout(400);
+      await page.waitForTimeout(150);
     },
   };
 }

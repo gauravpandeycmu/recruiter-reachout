@@ -65,12 +65,28 @@ describe("scheduled Send now integration", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  function ensureCompanyCopy(company: string) {
+    const now = new Date().toISOString();
+    const companyKey = company.replace(/\s+/g, " ").trim().toLowerCase();
+    store.upsertCompanyContent({
+      id: `cc-${companyKey}`,
+      company: companyKey,
+      companyDisplayName: company,
+      subject: "Quick note, {firstName}",
+      body: "Hi {firstName},\n\nInterested in {company}.",
+      source: "generated",
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
   async function seedScheduled(input: {
     name: string;
     email: string;
     company: string;
     startAt: string;
   }) {
+    ensureCompanyCopy(input.company);
     const person = store.upsertCandidate(
       createCandidate({
         fullName: input.name,

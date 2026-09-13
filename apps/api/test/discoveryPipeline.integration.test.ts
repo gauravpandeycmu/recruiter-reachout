@@ -22,6 +22,7 @@ const {
   canUseDiscoveryProvider,
   incrementProviderUsage,
   getProviderUsageCount,
+  markDiscoveryProviderUnavailable,
 } = await import("../src/services.js");
 const { claimNextSendJob } = await import("../src/sendJobs.js");
 const { Store } = await import("../src/store.js");
@@ -168,6 +169,92 @@ describe("discovery -> send pipeline (TEST_MODE integration)", () => {
     expect(second).toBeUndefined();
   });
 
+  it("claims Jobright and Finder stages independently without mixing candidates", async () => {
+    const jobright = store.upsertCandidate(
+      createCandidate({ fullName: "Job Right", company: "Acme", linkedinUrl: "https://linkedin.com/in/job-right" }),
+    );
+    const finder = store.upsertCandidate({
+      ...createCandidate({ fullName: "Find Er", company: "Beta", linkedinUrl: "https://linkedin.com/in/find-er" }),
+      discoveryStage: "finder",
+    });
+
+    const [jobrightClaim, finderClaim] = [
+      nextDiscoveryCandidate(store, new Date(), "jobright"),
+      nextDiscoveryCandidate(store, new Date(), "finder"),
+    ];
+
+    expect(jobrightClaim?.id).toBe(jobright.id);
+    expect(finderClaim?.id).toBe(finder.id);
+    expect(jobrightClaim?.id).not.toBe(finderClaim?.id);
+  });
+
+  it("hands a Jobright miss to Finder and only spends an attempt after Finder misses", async () => {
+    store.setDiscoverySettings({ salesqlAutoFallback: true, updatedAt: new Date().toISOString() });
+    const candidate = store.upsertCandidate(
+      createCandidate({ fullName: "Jane Recruiter", company: "Acme", linkedinUrl: "https://linkedin.com/in/jane" }),
+    );
+    nextDiscoveryCandidate(store, new Date(), "jobright");
+
+    const handedOff = await recordDiscoveryResult(store, candidate.id, {
+      status: "not_found",
+      provider: "jobright",
+      discoveryStage: "jobright",
+    });
+    expect(handedOff.discoveryStage).toBe("finder");
+    expect(handedOff.discoveryAttempts ?? 0).toBe(0);
+    expect(nextDiscoveryCandidate(store, new Date(), "finder")?.id).toBe(candidate.id);
+    expect(nextDiscoveryCandidate(store, new Date(), "jobright")).toBeUndefined();
+
+    const completed = await recordDiscoveryResult(store, candidate.id, {
+      status: "not_found",
+      provider: "salesql",
+      discoveryStage: "finder",
+    });
+    expect(completed.discoveryAttempts).toBe(1);
+    expect(completed.discoveryStage).toBe("jobright");
+  });
+
+  it("keeps Jobright misses out of Finder when automatic fallback is off", async () => {
+    const candidate = store.upsertCandidate(
+      createCandidate({ fullName: "Jobright Only", company: "Acme", linkedinUrl: "https://linkedin.com/in/jobright-only" }),
+    );
+    nextDiscoveryCandidate(store, new Date(), "jobright");
+
+    const completed = await recordDiscoveryResult(store, candidate.id, {
+      status: "not_found",
+      provider: "jobright",
+      discoveryStage: "jobright",
+    });
+
+    expect(completed.discoveryStage).not.toBe("finder");
+    expect(completed.discoveryAttempts).toBe(1);
+    expect(nextDiscoveryCandidate(store, new Date(), "finder")).toBeUndefined();
+  });
+
+  it("saves a Finder result on the exact claimed candidate and clears its stage", async () => {
+    const first = store.upsertCandidate({
+      ...createCandidate({ fullName: "First Person", company: "Acme", linkedinUrl: "https://linkedin.com/in/first" }),
+      discoveryStage: "finder",
+    });
+    const second = store.upsertCandidate({
+      ...createCandidate({ fullName: "Second Person", company: "Beta", linkedinUrl: "https://linkedin.com/in/second" }),
+      discoveryStage: "finder",
+    });
+    const claimed = nextDiscoveryCandidate(store, new Date(), "finder");
+    expect([first.id, second.id]).toContain(claimed?.id);
+    const untouchedId = claimed?.id === first.id ? second.id : first.id;
+
+    const saved = await recordDiscoveryResult(store, claimed!.id, {
+      status: "found",
+      email: "claimed@gmail.com",
+      provider: "salesql",
+      discoveryStage: "finder",
+    });
+    expect(saved.email).toBe("claimed@gmail.com");
+    expect(saved.discoveryStage).toBeUndefined();
+    expect(store.listCandidates().find((item) => item.id === untouchedId)?.email).toBeUndefined();
+  });
+
   it("releases the discovery claim once a result is reported, whatever the outcome", async () => {
     const candidate = store.upsertCandidate(
       createCandidate({ fullName: "Jane Recruiter", company: "Acme", linkedinUrl: "https://linkedin.com/in/jane" }),
@@ -251,6 +338,21 @@ describe("discovery -> send pipeline (TEST_MODE integration)", () => {
     }
 
     expect(canUseDiscoveryProvider(store, "salesql").allowed).toBe(false);
+  });
+
+  it("skips an exhausted provider for the rest of the local day and retries tomorrow", async () => {
+    const now = new Date(2026, 8, 12, 10, 30, 0);
+    const unavailableUntil = await markDiscoveryProviderUnavailable(store, "salesql", "quota_exhausted", now);
+
+    const blocked = canUseDiscoveryProvider(store, "salesql", "2026-09", new Date(2026, 8, 12, 18, 0, 0));
+    expect(blocked).toMatchObject({
+      allowed: false,
+      unavailableReason: "quota_exhausted",
+      unavailableUntil,
+    });
+
+    const tomorrow = canUseDiscoveryProvider(store, "salesql", "2026-09", new Date(2026, 8, 13, 0, 0, 1));
+    expect(tomorrow.allowed).toBe(true);
   });
 
   it("blocks Apollo usage once monthly quota is exhausted", async () => {

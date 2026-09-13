@@ -1,0 +1,12 @@
+{
+  "jobPosting": {
+    "jobId": 520488,
+    "jobTitle": "Software Engineer",
+    "location": "34 Buffalo Office - Buffalo, NY 14211",
+    "city": "Buffalo",
+    "salaryRange": "37 $110,000.00 - $135,000.00 Salary/year",
+    "positionType": "Full Time",
+    "description": "<p>Buffalo Manufacturing Works, operated by EWI, is hiring a Software Engineer to build manufacturing software.</p><p>You will own APIs, dashboards, and integrations with shop-floor systems.</p>",
+    "qualifications": "<p><b>REQUIRED QUALIFICATIONS:</b></p><ul><li>Bachelor's in CS or related field</li><li>3+ years software engineering experience</li><li>Strong TypeScript or Python</li></ul>"
+  }
+}

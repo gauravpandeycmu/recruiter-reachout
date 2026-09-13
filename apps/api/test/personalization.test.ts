@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildPersonalizationPrompt,
+  buildRepairPrompt,
   classifyRecipientAudience,
+  clampLinkedInMessage,
+  clampLinkedInSubject,
   generateCompanyEmailContent,
   parseGeneratedContent,
   validateGeneratedEmail,
@@ -242,6 +245,21 @@ describe("buildPersonalizationPrompt", () => {
     expect(prompt).not.toContain("Include this exact URL once");
   });
 
+  it("only adds experience customisation when selected and supports passionate together", () => {
+    const base = { company: "Acme", samples: [sample], jobDescription: "Build reliable release automation." };
+    expect(buildPersonalizationPrompt(base)).not.toContain("== CUSTOMISE EXPERIENCE");
+    const prompt = buildPersonalizationPrompt({ ...base, customise: true });
+    expect(prompt).toContain("== CUSTOMISE EXPERIENCE");
+    expect(prompt).toContain("three years at Epsilon");
+    expect(prompt).toContain("not permission to claim evidence that is absent");
+    expect(prompt).toContain("Build reliable release automation.");
+    expect(prompt).toContain("== STRUCTURE (three short moves");
+    const combined = buildPersonalizationPrompt({ ...base, customise: true, passionate: true });
+    expect(combined).toContain("== CUSTOMISE EXPERIENCE");
+    expect(combined).toContain("== PASSIONATE MODE");
+    expect(buildRepairPrompt({ subject: "", body: "", linkedinSubject: "", linkedinMessage: "" }, [], "Acme", false, true)).toContain("Preserve the role-specific framing");
+  });
+
   it("uses a warmer longer structure when passionate mode is on", () => {
     const prompt = buildPersonalizationPrompt({
       company: "Gemini",
@@ -251,8 +269,8 @@ describe("buildPersonalizationPrompt", () => {
       passionate: true,
     });
     expect(prompt).toContain("== PASSIONATE MODE (ON");
-    expect(prompt).toContain("COMPANY FONDNESS");
-    expect(prompt).toContain("GOOD (human)");
+    expect(prompt).toContain("distinct personal-interest paragraph");
+    expect(prompt).toContain("never pad a complete note");
     expect(prompt).toContain("400 billion");
     expect(prompt).toContain("Never use em dashes");
     expect(prompt).toContain("Passionate mode is ON");
@@ -277,7 +295,7 @@ describe("buildPersonalizationPrompt", () => {
     expect(prompt).toContain("ignore each sample's target-company industry");
   });
 
-  it("prefers recently sent emails over setup samples for voice and structure", () => {
+  it("does not recycle generated sent emails as preferred voice examples", () => {
     const prompt = buildPersonalizationPrompt({
       company: "Whatnot",
       samples: [sample],
@@ -290,9 +308,9 @@ describe("buildPersonalizationPrompt", () => {
         },
       ],
     });
-    expect(prompt).toContain("Recent sent emails are the strongest signal");
-    expect(prompt).toContain("RECENT SENT EMAILS (preferred voice + structure");
-    expect(prompt).toContain("AI Engineering - CMU Graduate Student");
+    expect(prompt).toContain("Setup examples at the bottom guide voice");
+    expect(prompt).not.toContain("RECENT SENT EMAILS");
+    expect(prompt).not.toContain("AI Engineering - CMU Graduate Student");
     expect(prompt).toContain("at most two technical specifics");
   });
 
@@ -330,12 +348,12 @@ describe("buildPersonalizationPrompt", () => {
     expect(prompt).toContain("2. WHO + PROOF");
     expect(prompt).toContain("3. ASK");
     expect(prompt).toContain("aim for 60-100 words (hard cap 110)");
-    expect(prompt).toContain("wanted to reach out");
+    expect(prompt).toContain("I came across the ... opening at ...");
     expect(prompt).toContain("Do not reduce this to school alone");
     expect(prompt).toContain("exactly one concrete PROFESSIONAL accomplishment");
     expect(prompt).toContain("consider my application");
     expect(prompt).toContain("Do not add a generic sales sentence");
-    expect(prompt).toContain("Naming the exact company and role in the hook is already valid personalization");
+    expect(prompt).toContain("Personalize through one specific responsibility or priority");
   });
 
   it("ends with one low-effort action and bans ceremonial or self-serving asks", () => {
@@ -971,6 +989,36 @@ describe("parseGeneratedContent", () => {
 
   it("throws when subject or body is missing", () => {
     expect(() => parseGeneratedContent('{"subject": "Hi"}')).toThrow("missing a usable subject/body");
+  });
+});
+
+describe("clampLinkedInMessage", () => {
+  it("drops trailing sentences to fit the LinkedIn word and character caps", () => {
+    const long =
+      "Hi {firstName},\n\n" +
+      "I am reaching out about software roles at EWI and wanted to share a brief note about my background. ".repeat(3) +
+      "I recently completed an Agentic AI internship at T-Mobile building validation frameworks. " +
+      "I attached my resume and would appreciate consideration for open roles. Thank you for your time.";
+    const clamped = clampLinkedInMessage(long);
+    expect(clamped.startsWith("Hi {firstName},\n\n")).toBe(true);
+    expect(clamped.split(/\s+/).length).toBeLessThanOrEqual(60);
+    expect(clamped.length).toBeLessThanOrEqual(400);
+    expect(
+      validateGeneratedEmail(
+        {
+          subject: "EWI roles",
+          body: "Hi {firstName},\n\nShort body about EWI.",
+          linkedinSubject: clampLinkedInSubject("Software roles at EWI"),
+          linkedinMessage: clamped,
+        },
+        [sample],
+        { company: "EWI" },
+      ).filter((issue) => /LinkedIn message is \d+ (words|characters)/i.test(issue)),
+    ).toEqual([]);
+  });
+
+  it("shortens long LinkedIn subjects without a second model call", () => {
+    expect(clampLinkedInSubject("A".repeat(80)).length).toBeLessThanOrEqual(60);
   });
 });
 

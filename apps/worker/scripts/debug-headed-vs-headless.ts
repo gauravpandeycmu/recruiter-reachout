@@ -22,6 +22,7 @@ async function main(): Promise<void> {
   const context = await launchPersistentBrowserContext({
     userDataDir: SALESQL_USER_DATA_DIR,
     headless,
+    allowHeadlessExtensions: true,
     extensionPaths: [extensionPath],
   });
 

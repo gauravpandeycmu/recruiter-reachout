@@ -215,7 +215,7 @@ describe("core discovery park + spacing HTTP integration", () => {
     expect(spawns).toBeGreaterThan(0);
 
     for (const id of [a, b]) {
-      expect(app.store.listCandidates().find((row) => row.id === id)?.forceProvider).toBe("salesql");
+      expect(app.store.listCandidates().find((row) => row.id === id)?.forceProvider).toBe("finder");
     }
   });
 

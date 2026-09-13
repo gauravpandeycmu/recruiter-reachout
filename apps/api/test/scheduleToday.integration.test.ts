@@ -38,6 +38,20 @@ describe("scheduleToday legacy autopilot integration", () => {
     confidence: "high" | "medium" | "low" = "high",
     company = "Acme",
   ) {
+    const now = new Date().toISOString();
+    const companyKey = company.replace(/\s+/g, " ").trim().toLowerCase();
+    if (!store.getCompanyContent(companyKey)) {
+      store.upsertCompanyContent({
+        id: `cc-${companyKey}`,
+        company: companyKey,
+        companyDisplayName: company,
+        subject: "Quick note, {firstName}",
+        body: "Hi {firstName},\n\nInterested in {company}.",
+        source: "generated",
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
     return store.upsertCandidate(
       createCandidate({
         fullName: name,

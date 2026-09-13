@@ -333,6 +333,7 @@ export function checkLinkedInMessaging(candidateId: string): Promise<unknown> {
 }
 
 export function sendLinkedInMessage(input: {
+  freeOnly?: boolean;
   candidateId: string;
   subject?: string;
   message: string;
@@ -581,6 +582,7 @@ export interface GenerateContentOptions {
   linkedinPost?: string;
   recipientTitles?: string[];
   passionate?: boolean;
+  customise?: boolean;
 }
 
 export type GenerationProgressStep = "fetch" | "extract" | "voice" | "draft" | "review" | "polish";

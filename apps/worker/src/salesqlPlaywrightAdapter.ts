@@ -35,14 +35,14 @@ export const SALESQL_TERMS_CHECKBOX_SELECTOR =
 // was found. Since the consent modal itself re-appears every fresh browser
 // launch (session-scoped, not persisted), so does this tour.
 export const SALESQL_SKIP_TOUR_TEXT = /skip tour/i;
+export const SALESQL_QUOTA_EXHAUSTED_TEXT =
+  /out of credits|no credits(?: remaining| left)?|monthly (?:credit )?limit|credits? reset|you(?:'ve| have) used all your credits|insufficient credits/i;
+export const SALESQL_NO_EMAIL_TEXT = /no emails? found|no email available/i;
 
-const FEED_WARMUP_MS = Number(process.env.SALESQL_FEED_WARMUP_MS ?? 2500);
-const PROFILE_SETTLE_MS = Number(process.env.SALESQL_PROFILE_SETTLE_MS ?? 6000);
-const SAME_PROFILE_SETTLE_MS = Number(process.env.SALESQL_SAME_PROFILE_SETTLE_MS ?? 800);
-const BADGE_EARLY_SETTLE_MS = Number(process.env.SALESQL_BADGE_EARLY_SETTLE_MS ?? 1500);
-const POST_CLICK_SETTLE_MS = Number(process.env.SALESQL_POST_CLICK_SETTLE_MS ?? 2500);
-const PANEL_WAIT_MS = 20000;
-const LOGIN_WAIT_MS = 25000;
+const FEED_WARMUP_MS = Number(process.env.SALESQL_FEED_WARMUP_MS ?? 500);
+const POST_CLICK_SETTLE_MS = Number(process.env.SALESQL_POST_CLICK_SETTLE_MS ?? 400);
+const PANEL_WAIT_MS = 1500;
+const LOGIN_WAIT_MS = 1500;
 
 export function linkedInProfileSlug(url: string): string {
   const match = url.match(/\/in\/([^/?#]+)/i);
@@ -73,9 +73,17 @@ export async function focusPageExclusively(page: Page): Promise<void> {
   const context = page.context();
   const others = context.pages().filter((candidate) => candidate !== page);
   for (const other of others) {
-    await other.close().catch(() => {});
+    // Extension onboarding/side-panel pages can hang indefinitely in beforeunload.
+    // Cleanup is best-effort and must never hold the lookup queue hostage.
+    await Promise.race([
+      other.close({ runBeforeUnload: false }).catch(() => {}),
+      new Promise<void>((resolve) => setTimeout(resolve, 750)),
+    ]);
   }
-  await page.bringToFront();
+  await Promise.race([
+    page.bringToFront().catch(() => {}),
+    new Promise<void>((resolve) => setTimeout(resolve, 750)),
+  ]);
 }
 
 interface WidgetState {
@@ -365,18 +373,17 @@ export function createSalesqlPlaywrightAdapter(page: Page): SalesqlPageAdapter {
       const currentSlug = linkedInProfileSlug(current);
 
       if (targetSlug && targetSlug === currentSlug && (await countSalesqlBadges(page)) > 0) {
-        await page.waitForTimeout(SAME_PROFILE_SETTLE_MS);
         return;
       }
 
       if (shouldWarmLinkedInFeed(current)) {
-        await page.goto("https://www.linkedin.com/feed/", { waitUntil: "domcontentloaded", timeout: 60000 });
+        await page.goto("https://www.linkedin.com/feed/", { waitUntil: "domcontentloaded", timeout: 10000 });
         await page.waitForTimeout(FEED_WARMUP_MS);
       }
 
-      await page.goto(linkedinUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
-      const badgeEarly = await waitForSalesqlBadge(page, 4000);
-      await page.waitForTimeout(badgeEarly ? BADGE_EARLY_SETTLE_MS : PROFILE_SETTLE_MS);
+      await page.goto(linkedinUrl, { waitUntil: "domcontentloaded", timeout: 10000 });
+      // waitForOverlay owns extension readiness and panel polling. Do not
+      // duplicate its wait or sleep after the badge has already appeared.
     },
 
     async waitForOverlay(timeoutMs: number): Promise<{ visible: boolean }> {
@@ -424,9 +431,13 @@ export function createSalesqlPlaywrightAdapter(page: Page): SalesqlPageAdapter {
             // force:true — this Vue-rendered <div> button briefly reports as
             // "not enabled" to Playwright's actionability check during its own
             // transition animation (confirmed live); a real click still works.
-            await locator.click({ force: true, timeout: 10000 }).catch(() => {});
-            clicked = true;
-            break;
+            try {
+              await locator.click({ force: true, timeout: 1500 });
+              clicked = true;
+              break;
+            } catch {
+              // Try the other semantic representation/root before failing.
+            }
           }
         }
         if (clicked) {
@@ -434,7 +445,7 @@ export function createSalesqlPlaywrightAdapter(page: Page): SalesqlPageAdapter {
         }
       }
       if (!clicked) {
-        return;
+        throw new Error("SalesQL panel opened, but Reveal Info was not available.");
       }
 
       await page.waitForTimeout(POST_CLICK_SETTLE_MS);
@@ -446,7 +457,7 @@ export function createSalesqlPlaywrightAdapter(page: Page): SalesqlPageAdapter {
       for (const root of roots(page)) {
         for (const locator of revealInfoLocators(root)) {
           if (await locator.isVisible().catch(() => false)) {
-            await locator.click({ force: true, timeout: 5000 }).catch(() => {});
+            await locator.click({ force: true, timeout: 1500 }).catch(() => {});
             await page.waitForTimeout(POST_CLICK_SETTLE_MS);
           }
         }
@@ -467,7 +478,7 @@ export function createSalesqlPlaywrightAdapter(page: Page): SalesqlPageAdapter {
           if (email) {
             return email;
           }
-          if (/no emails? found/i.test(panelText)) {
+          if (SALESQL_NO_EMAIL_TEXT.test(panelText) || SALESQL_QUOTA_EXHAUSTED_TEXT.test(panelText)) {
             return undefined;
           }
         }
@@ -476,9 +487,12 @@ export function createSalesqlPlaywrightAdapter(page: Page): SalesqlPageAdapter {
       return undefined;
     },
 
-    async readPanelStatus(): Promise<"no_emails" | "not_found" | "unknown"> {
+    async readPanelStatus(): Promise<"no_emails" | "not_found" | "quota_exhausted" | "unknown"> {
       const panelText = await readOpenPanelText(page);
-      if (/no emails? found/i.test(panelText)) {
+      if (SALESQL_QUOTA_EXHAUSTED_TEXT.test(panelText)) {
+        return "quota_exhausted";
+      }
+      if (SALESQL_NO_EMAIL_TEXT.test(panelText)) {
         return "no_emails";
       }
       return "unknown";
@@ -490,11 +504,13 @@ export function createSalesqlPlaywrightAdapter(page: Page): SalesqlPageAdapter {
       const state = await readWidgetState(page);
       if (state.panelOpen) {
         await clickSalesqlBadge(page).catch(() => {});
-        await page.waitForTimeout(800);
+        await page.waitForTimeout(250);
       }
       for (const root of roots(page)) {
         const close = root.getByRole("button", { name: /^Close$|×|Dismiss|remove$/i }).first();
-        await close.click({ timeout: 2000 }).catch(() => {});
+        if (await close.isVisible().catch(() => false)) {
+          await close.click({ timeout: 1000 }).catch(() => {});
+        }
       }
     },
   };
@@ -532,4 +548,3 @@ async function readOpenPanelText(page: Page): Promise<string> {
   }
   return "";
 }
-

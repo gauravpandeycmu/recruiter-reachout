@@ -41,6 +41,8 @@ export interface RecruiterCandidate {
   /** When an email was first discovered for this person (ISO). Used by Analytics daily buckets. */
   emailDiscoveredAt?: string;
   discoveryAttempts?: number;
+  /** Durable email-lookup pipeline stage. Missing on legacy rows means Jobright. */
+  discoveryStage?: "jobright" | "finder";
   /**
    * One-shot override: skip Jobright and run the Finder chain (Apollo → SalesQL).
    * `"salesql"` is the legacy alias kept so existing queues and tests keep working.
@@ -52,6 +54,8 @@ export interface RecruiterCandidate {
   customBody?: string;
   /** Latest LinkedIn compose availability discovered for this profile. */
   linkedinMessageAvailability?: "checking" | "free" | "inmail" | "unavailable" | "error";
+  linkedinMessageTask?: LinkedInMessageTask;
+  linkedinSendStatus?: "sending" | "sent" | "failed" | "unconfirmed";
   linkedinInmailCredits?: number;
   linkedinConnectionDegree?: "1st" | "2nd" | "3rd" | "unknown";
   linkedinMessageStatusText?: string;
@@ -76,14 +80,23 @@ export type EmailPattern =
   | "first_last_initial"
   | "api_verified";
 
-/** Email-discovery backends the worker can chain (Jobright first, then Finder: Apollo → SalesQL). */
-export type DiscoveryProvider = "jobright" | "salesql" | "apollo";
+/** Email-discovery backends the worker can chain (Jobright first, then configured finders). */
+export type DiscoveryProvider = "jobright" | "salesql" | "hunter" | "apollo" | "prospeo" | "getprospect" | "kwinbi";
 
 export interface ProviderUsage {
   provider: DiscoveryProvider;
   /** YYYY-MM, e.g. 2026-07 */
   monthKey: string;
   count: number;
+  /** Exact provider executions tracked independently from credit usage. */
+  attemptedCount?: number;
+  /** Executions that returned a usable email. */
+  foundCount?: number;
+  /** Idempotency keys for worker reports. */
+  lookupEventIds?: string[];
+  /** Temporary provider circuit breaker. ISO timestamp; ignored after expiry. */
+  unavailableUntil?: string;
+  unavailableReason?: "quota_exhausted";
   updatedAt: string;
 }
 
@@ -359,6 +372,7 @@ export interface CompanyContentGenerationContext {
   recipientTitles?: string[];
   /** Warmer, slightly longer email that shows fondness for the company. */
   passionate?: boolean;
+  customise?: boolean;
 }
 
 export interface CompanyContent {
@@ -533,6 +547,12 @@ export interface AnalyticsSummary {
     notFound: number;
   };
   providerUsage: Array<{ provider: string; monthKey: string; count: number }>;
+  providerLookups: Array<{
+    provider: DiscoveryProvider;
+    label: string;
+    attempted: number;
+    found: number;
+  }>;
   daily: AnalyticsDayBucket[];
   /** Running sent-email total by day; includes the pre-window all-time baseline. */
   cumulativeSends: Array<{ date: string; total: number }>;
@@ -641,6 +661,7 @@ export type LinkedInMessageTaskAction = "check" | "prepare" | "send";
 
 /** Ephemeral worker task used to inspect or send through LinkedIn's compose UI. */
 export interface LinkedInMessageTask {
+  freeOnly?: boolean;
   id: string;
   candidateId: string;
   linkedinUrl: string;

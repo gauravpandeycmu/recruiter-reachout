@@ -38,7 +38,7 @@ import { applyBounce, parseBounceMessage, parseGmailMessageText } from "./bounce
 import { assertCanSend } from "./sendGate.js";
 import { withKeyLock } from "./asyncLock.js";
 import type { Store } from "./store.js";
-import { generateCompanyEmailContent, type GenerationProgressStep } from "./personalization.js";
+import { generateCompanyEmailContent, GENERATION_BUDGET_MS, type GenerationProgressStep } from "./personalization.js";
 import { normalizeJobPostingUrl, resolveJobDescriptionFromUrl } from "./jobPosting.js";
 import { createLinkedInProfileEnrichJob } from "./linkedinProfileEnrichJobs.js";
 import { hasPendingLinkedInMessageTask } from "./linkedinMessaging.js";
@@ -248,7 +248,15 @@ function saveOneBulkCandidate(store: Store, candidate: Partial<RecruiterCandidat
         // Preserve the sent/contact history and known address, but let this
         // person participate in a fresh Send batch when explicitly re-added.
         status: existing.email ? existing.status : "new",
-        ...(!existing.email ? { discoveryAttempts: 0, lastError: undefined } : {}),
+        ...(!existing.email
+          ? {
+              discoveryAttempts: 0,
+              discoveryStage: "jobright" as const,
+              discoveryClaimedAt: undefined,
+              lastDiscoveryAttemptAt: undefined,
+              lastError: undefined,
+            }
+          : {}),
       });
       return {
         key: candidateKey(candidate),
@@ -275,7 +283,15 @@ function saveOneBulkCandidate(store: Store, candidate: Partial<RecruiterCandidat
       isActive: true,
       archivedAt: undefined,
       status: existing.email ? existing.status : "new",
-      ...(startsFresh ? { discoveryAttempts: 0, lastError: undefined } : {}),
+      ...(startsFresh
+        ? {
+            discoveryAttempts: 0,
+            discoveryStage: "jobright" as const,
+            discoveryClaimedAt: undefined,
+            lastDiscoveryAttemptAt: undefined,
+            lastError: undefined,
+          }
+        : {}),
     });
     return {
       key: candidateKey(candidate),
@@ -326,6 +342,15 @@ export async function reactivateCandidates(
     const updated = store.updateCandidate(id, {
       isActive: true,
       archivedAt: undefined,
+      ...(!existing.email
+        ? {
+            discoveryAttempts: 0,
+            discoveryStage: "jobright" as const,
+            discoveryClaimedAt: undefined,
+            lastDiscoveryAttemptAt: undefined,
+            lastError: undefined,
+          }
+        : {}),
     });
     if (updated) {
       reactivated.push(updated);
@@ -399,6 +424,10 @@ export async function replaceActiveFromHistory(
       customBody: undefined,
       lastError: undefined,
       forceProvider: undefined,
+      discoveryStage: email ? undefined : "jobright",
+      discoveryClaimedAt: undefined,
+      lastDiscoveryAttemptAt: email ? existing.lastDiscoveryAttemptAt : undefined,
+      discoveryAttempts: email ? existing.discoveryAttempts : 0,
       // Ready to schedule when we already know the address; otherwise discovery can run.
       status: email ? "email_guessed" : "new",
       updatedAt: new Date().toISOString(),
@@ -483,6 +512,7 @@ export interface GenerateContentOptions {
   linkedinPost?: string;
   recipientTitles?: string[];
   passionate?: boolean;
+  customise?: boolean;
 }
 
 function sentBodyWithoutFooter(value: string): string {
@@ -523,7 +553,7 @@ export async function generateContentForCompany(
   onProgress?: (step: GenerationProgressStep) => void,
 ): Promise<CompanyContent> {
   // Leave a small margin for serializing and streaming the result to the UI.
-  const generationDeadlineAt = Date.now() + 58_000;
+  const generationDeadlineAt = Date.now() + GENERATION_BUDGET_MS;
   const companyKey = normalizeCompanyKey(company);
   if (!companyKey) {
     throw new Error("Company name is required.");
@@ -554,17 +584,41 @@ export async function generateContentForCompany(
     }
   }
   // Link-only: download the posting and extract a JD before the email LLM call.
+  // Unreadable / slow links must not eat the draft budget — soft-fail and write
+  // from role/title context so customise + LinkedIn post still finish.
+  let jobLinkWarning: string | undefined;
   if (!jobDescription && jobUrl) {
     const startedAt = Date.now();
-    const cached = store.getJobPostingCache(jobUrl);
-    const extracted = cached ?? await resolveJobDescriptionFromUrl(jobUrl, onProgress, generationDeadlineAt);
-    store.setJobPostingCache(jobUrl, extracted);
-    audit("generation.extraction", { company, durationMs: Date.now() - startedAt, cached: Boolean(cached) });
-    jobDescription = extracted.jobDescription;
-    // The fetched posting is authoritative. The UI can still hold the prior
-    // company's role title while a user replaces only the job link.
-    if (extracted.roleTitle) {
-      roleTitle = extracted.roleTitle;
+    // Always leave ~22s for the Gemini draft; abort extraction before that.
+    const extractionDeadlineAt = Math.min(generationDeadlineAt - 22_000, Date.now() + 4_000);
+    try {
+      const cached = store.getJobPostingCache(jobUrl);
+      const extracted =
+        cached ??
+        (await Promise.race([
+          resolveJobDescriptionFromUrl(jobUrl, onProgress, extractionDeadlineAt),
+          new Promise<never>((_, reject) => {
+            const waitMs = Math.max(0, extractionDeadlineAt - Date.now());
+            setTimeout(() => reject(new Error("Timed out loading the job posting link.")), waitMs);
+          }),
+        ]));
+      store.setJobPostingCache(jobUrl, extracted);
+      audit("generation.extraction", { company, durationMs: Date.now() - startedAt, cached: Boolean(cached) });
+      jobDescription = extracted.jobDescription;
+      // The fetched posting is authoritative. The UI can still hold the prior
+      // company's role title while a user replaces only the job link.
+      if (extracted.roleTitle) {
+        roleTitle = extracted.roleTitle;
+      }
+    } catch (error) {
+      jobLinkWarning = error instanceof Error ? error.message : "Could not read the job posting link.";
+      audit("generation.extraction_failed", {
+        company,
+        jobUrl,
+        durationMs: Date.now() - startedAt,
+        error: jobLinkWarning,
+      });
+      console.warn(`Job link extraction failed for ${company}; generating without posting text: ${jobLinkWarning}`);
     }
   }
 
@@ -580,6 +634,7 @@ export async function generateContentForCompany(
       linkedinPost: options.linkedinPost,
       recipientTitles,
       passionate: Boolean(options.passionate),
+      customise: Boolean(options.customise),
     },
     onProgress,
     generationDeadlineAt,
@@ -606,6 +661,7 @@ export async function generateContentForCompany(
       linkedinPost: options.linkedinPost?.trim() || undefined,
       recipientTitles: recipientTitles.length > 0 ? recipientTitles : undefined,
       passionate: Boolean(options.passionate),
+      customise: Boolean(options.customise),
     },
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
@@ -671,6 +727,27 @@ export function resolveContentForCandidate(store: Store, candidate: RecruiterCan
   return base;
 }
 
+/**
+ * Real Gmail sends must use company outreach (Generate) or a full custom
+ * subject+body. Without that, resolveContentForCandidate falls through to the
+ * Setup stub ("Quick note" / "Hi {firstName},") — which looks like a blank
+ * template and must never go to recruiters.
+ */
+export function assertCandidateHasSendableCopy(store: Store, candidate: RecruiterCandidate): void {
+  const customSubject = candidate.customSubject?.trim();
+  const customBody = candidate.customBody?.trim();
+  if (customSubject && customBody) {
+    return;
+  }
+  const companyKey = normalizeCompanyKey(candidate.company);
+  if (companyKey && store.getCompanyContent(companyKey)) {
+    return;
+  }
+  throw new Error(
+    "Generate outreach for this company before sending (or save a custom subject and body for this recipient).",
+  );
+}
+
 /** Normalize legacy single-resume fields into the resumes library. */
 export function listResumeAssets(content?: OutreachContent | null): ResumeAsset[] {
   if (!content) {
@@ -730,11 +807,14 @@ export interface DiscoveryReport {
   status: "dry_run" | "found" | "not_found" | "error";
   email?: string;
   message?: string;
-  provider?: "jobright" | "salesql" | "apollo";
+  provider?: import("@recruiter/shared").DiscoveryProvider;
   /** True only when a real overlay Access/Reveal credit was actually spent —
    *  lets recordDiscoveryResult count usage against real spend instead of
    *  outcome status alone. */
   creditSpent?: boolean;
+  providerUnavailableReason?: "quota_exhausted";
+  /** Stage that produced this result; omitted by legacy/full-chain workers. */
+  discoveryStage?: "jobright" | "finder";
 }
 
 export type WorkerStatusInput = {
@@ -742,7 +822,7 @@ export type WorkerStatusInput = {
   message: string;
   candidateId?: string;
   candidateName?: string;
-  provider?: "jobright" | "salesql" | "apollo";
+  provider?: import("@recruiter/shared").DiscoveryProvider;
   /** ISO boot time of the reporting worker process (session identity). */
   workerStartedAt?: string;
 };
@@ -826,7 +906,7 @@ export function currentMonthKey(date: Date = new Date()): string {
   return date.toISOString().slice(0, 7);
 }
 
-export function getProviderMonthlyLimit(provider: "jobright" | "salesql" | "apollo"): number | undefined {
+export function getProviderMonthlyLimit(provider: import("@recruiter/shared").DiscoveryProvider): number | undefined {
   if (provider === "salesql") {
     const raw = process.env.SALESQL_MONTHLY_LIMIT ?? "50";
     const limit = Number(raw);
@@ -837,38 +917,117 @@ export function getProviderMonthlyLimit(provider: "jobright" | "salesql" | "apol
     const limit = Number(raw);
     return Number.isFinite(limit) ? limit : 50;
   }
+  if (provider === "prospeo") {
+    const raw = process.env.PROSPEO_MONTHLY_LIMIT ?? "100";
+    const limit = Number(raw);
+    return Number.isFinite(limit) ? limit : 100;
+  }
+  if (provider === "hunter") return Number(process.env.HUNTER_MONTHLY_LIMIT ?? 50);
+  if (provider === "getprospect") return Number(process.env.GETPROSPECT_MONTHLY_LIMIT ?? 50);
+  if (provider === "kwinbi") return Number(process.env.KWINBI_MONTHLY_LIMIT ?? 100);
   return undefined;
 }
 
-export function getProviderUsageCount(store: Store, provider: "jobright" | "salesql" | "apollo", monthKey = currentMonthKey()): number {
+export function getProviderUsageCount(store: Store, provider: import("@recruiter/shared").DiscoveryProvider, monthKey = currentMonthKey()): number {
   return store.getProviderUsage(provider, monthKey)?.count ?? 0;
 }
 
 export function canUseDiscoveryProvider(
   store: Store,
-  provider: "jobright" | "salesql" | "apollo",
+  provider: import("@recruiter/shared").DiscoveryProvider,
   monthKey = currentMonthKey(),
-): { allowed: boolean; used: number; limit?: number } {
+  now = new Date(),
+): { allowed: boolean; used: number; limit?: number; unavailableUntil?: string; unavailableReason?: "quota_exhausted" } {
   const limit = getProviderMonthlyLimit(provider);
-  const used = getProviderUsageCount(store, provider, monthKey);
+  const usage = store.getProviderUsage(provider, monthKey);
+  const used = usage?.count ?? 0;
+  const unavailableUntilMs = usage?.unavailableUntil ? new Date(usage.unavailableUntil).getTime() : Number.NaN;
+  if (Number.isFinite(unavailableUntilMs) && unavailableUntilMs > now.getTime()) {
+    return {
+      allowed: false,
+      used,
+      limit,
+      unavailableUntil: usage?.unavailableUntil,
+      unavailableReason: usage?.unavailableReason,
+    };
+  }
   if (limit === undefined) {
     return { allowed: true, used };
   }
   return { allowed: used < limit, used, limit };
 }
 
+export function nextLocalDayStart(now = new Date()): Date {
+  const next = new Date(now);
+  next.setHours(24, 0, 0, 0);
+  return next;
+}
+
+export async function markDiscoveryProviderUnavailable(
+  store: Store,
+  provider: import("@recruiter/shared").FinderProvider,
+  reason: "quota_exhausted",
+  now = new Date(),
+): Promise<string> {
+  const monthKey = currentMonthKey(now);
+  const existing = store.getProviderUsage(provider, monthKey);
+  const unavailableUntil = nextLocalDayStart(now).toISOString();
+  store.upsertProviderUsage({
+    ...existing,
+    provider,
+    monthKey,
+    count: existing?.count ?? 0,
+    unavailableUntil,
+    unavailableReason: reason,
+    updatedAt: now.toISOString(),
+  });
+  await store.save();
+  return unavailableUntil;
+}
+
 export async function incrementProviderUsage(
   store: Store,
-  provider: "jobright" | "salesql" | "apollo",
+  provider: import("@recruiter/shared").DiscoveryProvider,
   monthKey = currentMonthKey(),
 ): Promise<void> {
   const existing = store.getProviderUsage(provider, monthKey);
   const now = new Date().toISOString();
   store.upsertProviderUsage({
+    ...existing,
     provider,
     monthKey,
     count: (existing?.count ?? 0) + 1,
+    unavailableUntil: existing?.unavailableUntil,
+    unavailableReason: existing?.unavailableReason,
     updatedAt: now,
+  });
+  await store.save();
+}
+
+export async function recordProviderLookup(
+  store: Store,
+  input: {
+    eventId: string;
+    provider: import("@recruiter/shared").DiscoveryProvider;
+    status: "found" | "not_found" | "error";
+  },
+  now = new Date(),
+): Promise<void> {
+  const monthKey = currentMonthKey(now);
+  const existing = store.getProviderUsage(input.provider, monthKey);
+  const eventIds = existing?.lookupEventIds ?? [];
+  if (eventIds.includes(input.eventId)) return;
+  store.upsertProviderUsage({
+    ...existing,
+    provider: input.provider,
+    monthKey,
+    count: existing?.count ?? 0,
+    // Seed from the legacy credit/attempt counter the first time exact event
+    // tracking runs, so historical usage is not lost.
+    attemptedCount: (existing?.attemptedCount ?? existing?.count ?? 0) + 1,
+    foundCount: (existing?.foundCount ?? 0) + (input.status === "found" ? 1 : 0),
+    lookupEventIds: [...eventIds, input.eventId],
+    updatedAt: now.toISOString(),
   });
   await store.save();
 }
@@ -885,10 +1044,11 @@ export const MAX_DISCOVERY_ATTEMPTS = 3;
  *  for abandoned. */
 const DISCOVERY_CLAIM_STALE_MS = 6 * 60 * 1000;
 
-function isEligibleForDiscovery(candidate: RecruiterCandidate, cutoffMs: number): boolean {
+function isEligibleForDiscovery(candidate: RecruiterCandidate, cutoffMs: number, stage?: "jobright" | "finder"): boolean {
   if (candidate.email || candidate.status === "email_not_found" || !candidate.linkedinUrl?.trim()) {
     return false;
   }
+  if (stage && (candidate.discoveryStage ?? "jobright") !== stage) return false;
   if (!candidate.discoveryClaimedAt) return true;
   const claimedAt = new Date(candidate.discoveryClaimedAt).getTime();
   return !Number.isFinite(claimedAt) || claimedAt <= cutoffMs;
@@ -918,9 +1078,9 @@ export function hasEligibleDiscoveryCandidate(store: Store, _now = new Date()): 
  * within one Node process: two "simultaneous" calls can never both claim the
  * same candidate.
  */
-export function nextDiscoveryCandidate(store: Store, now = new Date()): RecruiterCandidate | undefined {
+export function nextDiscoveryCandidate(store: Store, now = new Date(), stage?: "jobright" | "finder"): RecruiterCandidate | undefined {
   const cutoff = now.getTime() - DISCOVERY_CLAIM_STALE_MS;
-  const eligible = store.listActiveCandidates().filter((candidate) => isEligibleForDiscovery(candidate, cutoff));
+  const eligible = store.listActiveCandidates().filter((candidate) => isEligibleForDiscovery(candidate, cutoff, stage));
   const next = [...eligible].sort((a, b) => (a.lastDiscoveryAttemptAt ?? "").localeCompare(b.lastDiscoveryAttemptAt ?? ""))[0];
   if (!next) {
     return undefined;
@@ -934,12 +1094,27 @@ export async function recordDiscoveryResult(store: Store, candidateId: string, i
     throw new Error("Candidate not found.");
   }
   let report = incoming;
+  // The worker normally reports quota exhaustion immediately so the rest of
+  // the current chain can continue with the next provider. Keep this fallback
+  // here as well in case a result is delivered by an older worker or retried
+  // after the immediate notification failed.
+  if (
+    report.providerUnavailableReason === "quota_exhausted" &&
+    isFinderProvider(report.provider)
+  ) {
+    await markDiscoveryProviderUnavailable(store, report.provider, report.providerUnavailableReason);
+  }
   if (report.status === "found") {
     const foundEmail = report.email?.trim().toLowerCase();
     const alreadyHasEmail = Boolean(candidate.email?.includes("@"));
     // Only refuse a previous-employer address when we would have saved it.
     // A late lookup must not turn a user-pasted current email into a not_found miss.
-    if (!alreadyHasEmail && foundEmail?.includes("@") && !pickOutreachEmail([foundEmail], candidate.company)) {
+    if (
+      !alreadyHasEmail &&
+      report.provider !== "apollo" &&
+      foundEmail?.includes("@") &&
+      !pickOutreachEmail([foundEmail], candidate.company)
+    ) {
       report = {
         ...report,
         status: "not_found",
@@ -951,6 +1126,26 @@ export async function recordDiscoveryResult(store: Store, candidateId: string, i
     lastDiscoveryAttemptAt: new Date().toISOString(),
     discoveryClaimedAt: undefined,
   };
+  // In staged mode a Jobright miss/error is not a completed attempt: hand the
+  // same immutable candidate row to the Finder queue. A Finder miss completes
+  // one whole pipeline attempt and cycles back to Jobright only when retryable.
+  // The Finder queue is an automatic continuation only when the user enabled
+  // auto-fallback. A manual bulk Finder sweep explicitly starts rows in the
+  // Finder stage and is unaffected by this gate.
+  const stagedJobrightFallback =
+    report.discoveryStage === "jobright" &&
+    report.status !== "found" &&
+    report.status !== "dry_run" &&
+    store.getDiscoverySettings().salesqlAutoFallback;
+  if (stagedJobrightFallback) {
+    await incrementProviderUsage(store, "jobright");
+    patch.discoveryStage = "finder";
+    patch.lastError = report.message;
+    const updated = store.updateCandidate(candidateId, patch);
+    if (!updated) throw new Error("Candidate not found.");
+    await store.save();
+    return updated;
+  }
   // A forced SalesQL check is consumed by a conclusive attempt (found or not_found).
   // On a transient error, leave it set so the worker retries via SalesQL again
   // instead of silently falling back to the normal Jobright-first chain.
@@ -982,7 +1177,11 @@ export async function recordDiscoveryResult(store: Store, candidateId: string, i
         patch.emailDiscoveredAt = new Date().toISOString();
       }
       const inferredCompany = inferCompanyFromEmail(email);
-      if (inferredCompany && shouldRewriteCompanyFromEmail({ ...candidate, email, company: candidate.company })) {
+      if (
+        provider !== "apollo" &&
+        inferredCompany &&
+        shouldRewriteCompanyFromEmail({ ...candidate, email, company: candidate.company })
+      ) {
         patch.company = inferredCompany;
       } else if (inferredCompany && !candidate.company?.trim()) {
         patch.company = inferredCompany;
@@ -990,6 +1189,7 @@ export async function recordDiscoveryResult(store: Store, candidateId: string, i
     }
     patch.lastError = undefined;
     patch.discoveryAttempts = 0;
+    patch.discoveryStage = undefined;
     if (isFinderProvider(provider)) {
       if (report.creditSpent) {
         await incrementProviderUsage(store, provider);
@@ -1004,6 +1204,8 @@ export async function recordDiscoveryResult(store: Store, candidateId: string, i
     const defaultMessage =
       provider === "apollo"
         ? "Apollo: No email found for this LinkedIn profile."
+        : provider === "prospeo"
+          ? "Prospeo: No verified email found for this LinkedIn profile."
         : provider === "salesql"
           ? "SalesQL: No Emails Found for this LinkedIn profile."
           : "Jobright: no contact info found for this LinkedIn profile.";
@@ -1029,6 +1231,7 @@ export async function recordDiscoveryResult(store: Store, candidateId: string, i
           : `${report.message ?? defaultMessage} (gave up after ${attempts} attempts; clear the error to retry.)`;
     } else {
       patch.lastError = report.message ?? defaultMessage;
+      if (report.discoveryStage === "finder") patch.discoveryStage = "jobright";
     }
   } else if (report.status === "error") {
     // Transient/infra failures (a logged-out session, timeout, UI change) are
@@ -1037,6 +1240,7 @@ export async function recordDiscoveryResult(store: Store, candidateId: string, i
     // the worker keeps retrying next pass instead of eventually giving up on
     // a candidate that may never have actually been hard to find.
     patch.lastError = report.message ?? "Jobright automation error.";
+    if (report.discoveryStage === "finder") patch.discoveryStage = "finder";
     // A real overlay credit can still be spent on a path that ends in
     // "error" (e.g. Access/Reveal was clicked but the result failed to parse
     // before the hard timeout fired) — count it, or the local usage counter
@@ -1082,6 +1286,7 @@ export async function requestDiscovery(
     lastDiscoveryAttemptAt: undefined,
     lastError: undefined,
     discoveryClaimedAt: undefined,
+    discoveryStage: options.forceSalesql ? "finder" : "jobright",
     forceProvider: options.forceSalesql ? "salesql" : undefined,
   });
   if (!updated) {
@@ -1091,7 +1296,7 @@ export async function requestDiscovery(
   return updated;
 }
 
-/** Bulk version of requestDiscovery(forceSalesql: true) for every active candidate still missing an email. */
+/** Explicitly queues every active candidate still missing an email through the full Finder chain. */
 export async function requestSalesqlSweep(store: Store): Promise<{ queued: number; candidateIds: string[] }> {
   const targets = store
     .listActiveCandidates()
@@ -1104,7 +1309,8 @@ export async function requestSalesqlSweep(store: Store): Promise<{ queued: numbe
       lastDiscoveryAttemptAt: undefined,
       lastError: undefined,
       discoveryClaimedAt: undefined,
-      forceProvider: "salesql",
+      discoveryStage: "finder",
+      forceProvider: "finder",
     });
     candidateIds.push(candidate.id);
   }
@@ -1549,11 +1755,12 @@ export interface SendJobPayloadInput {
 }
 
 export function buildSendJobPayload(store: Store, input: SendJobPayloadInput): Omit<SendJob, "id" | "status" | "createdAt" | "updatedAt"> {
-  const rendered = applyTestModeRecipientOverride(previewEmail(store, input.candidateId), store);
   const candidate = store.listCandidates().find((item) => item.id === input.candidateId);
   if (!candidate) {
     throw new Error("Candidate not found.");
   }
+  assertCandidateHasSendableCopy(store, candidate);
+  const rendered = applyTestModeRecipientOverride(previewEmail(store, input.candidateId), store);
   const content = resolveContentForCandidate(store, candidate);
   const library = listResumeAssets(store.getContent());
   let resume = input.resumeId
@@ -2374,6 +2581,10 @@ export function getPendingWorkerWork(store: Store, now = new Date()): {
   nextClaimAllowedAt?: string;
   hasInProgressSend: boolean;
   hasDiscovery: boolean;
+  hasJobrightDiscovery: boolean;
+  hasFinderDiscovery: boolean;
+  jobrightDiscoveryCount: number;
+  finderDiscoveryCount: number;
   hasCapture: boolean;
   hasEnrich: boolean;
   hasLinkedInMessage: boolean;
@@ -2385,6 +2596,11 @@ export function getPendingWorkerWork(store: Store, now = new Date()): {
   const claimAt = nextClaimAllowedAt(store);
   const hasInProgressSend = store.listSendJobs().some((job) => job.status === "in_progress");
   const hasDiscovery = hasEligibleDiscoveryCandidate(store);
+  const discoveryCandidates = store.listActiveCandidates().filter(needsDiscoveryLookup);
+  const hasJobrightDiscovery = discoveryCandidates.some((candidate) => (candidate.discoveryStage ?? "jobright") === "jobright");
+  const hasFinderDiscovery = discoveryCandidates.some((candidate) => candidate.discoveryStage === "finder");
+  const jobrightDiscoveryCount = discoveryCandidates.filter((candidate) => (candidate.discoveryStage ?? "jobright") === "jobright").length;
+  const finderDiscoveryCount = discoveryCandidates.filter((candidate) => candidate.discoveryStage === "finder").length;
   const hasCapture = store.listLinkedInCaptureJobs().some((job) => job.status === "pending" || job.status === "in_progress");
   const hasEnrich = store
     .listLinkedInProfileEnrichJobs()
@@ -2395,6 +2611,10 @@ export function getPendingWorkerWork(store: Store, now = new Date()): {
     nextClaimAllowedAt: claimAt?.toISOString(),
     hasInProgressSend,
     hasDiscovery,
+    hasJobrightDiscovery,
+    hasFinderDiscovery,
+    jobrightDiscoveryCount,
+    finderDiscoveryCount,
     hasCapture,
     hasEnrich,
     hasLinkedInMessage,

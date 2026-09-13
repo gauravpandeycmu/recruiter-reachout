@@ -108,6 +108,16 @@ describe("send queue wiring", () => {
       }),
     );
     setOutreachContent(store, { subject: "Hi {firstName}", body: "Hello {firstName}" });
+    store.upsertCompanyContent({
+      id: "cc-race",
+      company: "acme",
+      companyDisplayName: "Acme",
+      subject: "Hi {firstName}",
+      body: "Hello {firstName}",
+      source: "generated",
+      createdAt: "now",
+      updatedAt: "now",
+    });
     await saveResume(store, {
       fileName: "resume.pdf",
       mimeType: "application/pdf",
@@ -419,6 +429,7 @@ describe("send queue wiring", () => {
     const candidate = store.upsertCandidate(
       createCandidate({
         fullName: "Jane Doe",
+        company: "Acme",
         email: "jane.doe@acme.com",
         emailCandidates: [{
           email: "jane.doe@acme.com",
@@ -429,6 +440,16 @@ describe("send queue wiring", () => {
       }),
     );
     setOutreachContent(store, { subject: "Hi {firstName}", body: "Hello" });
+    store.upsertCompanyContent({
+      id: "cc-test-mode",
+      company: "acme",
+      companyDisplayName: "Acme",
+      subject: "Hi {firstName}",
+      body: "Hello",
+      source: "generated",
+      createdAt: "now",
+      updatedAt: "now",
+    });
     await saveResume(store, {
       fileName: "resume.pdf",
       mimeType: "application/pdf",

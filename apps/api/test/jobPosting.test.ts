@@ -8,11 +8,14 @@ import {
   buildPageTextForExtraction,
   compactPageTextForExtraction,
   formatAppleJobDetails,
+  formatPaycomJobPosting,
   formatSchemaOrgJobPosting,
   htmlToPlainText,
   jobIdFromJobUrl,
   normalizeJobPostingUrl,
   parseExtractedJobPosting,
+  parsePaycomConfigsFromHtml,
+  parsePaycomJobUrl,
   resolveJobDescriptionFromUrl,
   tryExtractAppleJobFromHtml,
   tryExtractJobPostingFromHtml,
@@ -332,6 +335,74 @@ describe("schema.org JobPosting JSON-LD", () => {
     expect(extracted.jobIds).toEqual(["154242"]);
     expect(extracted.jobDescription).toMatch(/Spark|Python/i);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Paycom ATS job postings", () => {
+  const paycomUrl =
+    "https://www.paycomonline.net/v4/ats/web.php/portal/F96D35AF09F8603CFE20EE86A84DE50D/jobs/520488";
+
+  it("parsePaycomJobUrl reads portal and ViewJobDetails links", () => {
+    expect(parsePaycomJobUrl(paycomUrl)).toEqual({
+      clientKey: "F96D35AF09F8603CFE20EE86A84DE50D",
+      jobId: "520488",
+    });
+    expect(
+      parsePaycomJobUrl(
+        "https://www.paycomonline.net/v4/ats/web.php/application/ViewJobDetails?job=520488&clientkey=F96D35AF09F8603CFE20EE86A84DE50D",
+      ),
+    ).toEqual({
+      clientKey: "F96D35AF09F8603CFE20EE86A84DE50D",
+      jobId: "520488",
+    });
+    expect(parsePaycomJobUrl("https://jobs.apple.com/en-us/details/200123456")).toBeUndefined();
+  });
+
+  it("parsePaycomConfigsFromHtml extracts session JWT and Mantle base URL", () => {
+    const html = readFileSync(join(fixturesDir, "paycom-portal-shell.html"), "utf8");
+    expect(parsePaycomConfigsFromHtml(html)).toEqual({
+      sessionJWT: "test-paycom-jwt",
+      mantleBaseUrl: "https://portal-applicant-tracking.us-cent.paycomonline.net/",
+    });
+  });
+
+  it("formatPaycomJobPosting builds a readable JD from Mantle fields", () => {
+    const payload = JSON.parse(readFileSync(join(fixturesDir, "paycom-job-posting.json"), "utf8"));
+    const extracted = formatPaycomJobPosting(payload, paycomUrl);
+    expect(extracted.roleTitle).toBe("Software Engineer");
+    expect(extracted.jobIds).toEqual(["520488"]);
+    expect(extracted.jobDescription).toContain("Buffalo");
+    expect(extracted.jobDescription).toContain("REQUIRED QUALIFICATIONS");
+    expect(extracted.jobDescription).toContain("TypeScript");
+    expect(extracted.jobDescription).not.toContain("<p>");
+  });
+
+  it("resolveJobDescriptionFromUrl loads Paycom via Mantle API without Gemini", async () => {
+    const html = readFileSync(join(fixturesDir, "paycom-portal-shell.html"), "utf8");
+    const payload = readFileSync(join(fixturesDir, "paycom-job-posting.json"), "utf8");
+    const steps: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("generativelanguage.googleapis.com")) {
+        throw new Error("Gemini should not be called for Paycom");
+      }
+      if (url.includes("paycomonline.net") && url.includes("/jobs/520488")) {
+        return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
+      }
+      if (url.includes("portal-applicant-tracking") && url.includes("/api/ats/job-postings/520488")) {
+        const headers = new Headers(init?.headers);
+        expect(headers.get("authorization")).toBe("Bearer test-paycom-jwt");
+        return new Response(payload, { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const extracted = await resolveJobDescriptionFromUrl(paycomUrl, (step) => steps.push(step));
+    expect(steps).toEqual(["fetch", "extract"]);
+    expect(extracted.roleTitle).toBe("Software Engineer");
+    expect(extracted.jobDescription).toMatch(/Buffalo Manufacturing Works|REQUIRED QUALIFICATIONS/i);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
 

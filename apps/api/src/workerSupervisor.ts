@@ -109,16 +109,8 @@ function signalRunningWorker(signal: NodeJS.Signals = "SIGUSR1"): boolean {
   if (testHooks.signalWorker) {
     return testHooks.signalWorker(signal);
   }
-  const pid = managedChild?.pid;
-  if (pid && isPidAlive(pid)) {
-    try {
-      process.kill(pid, signal);
-      return true;
-    } catch {
-      // fall through to lock-based pid
-    }
-  }
-
+  // tsx is a launcher; its child owns the wake handler. Always signal the
+  // worker's lock PID, never the launcher (SIGUSR1 can start its debugger).
   const lockPath = resolve(workerPackageDir(), "data", "worker.pid");
   if (!existsSync(lockPath)) {
     return false;

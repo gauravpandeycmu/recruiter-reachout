@@ -46,6 +46,21 @@ describe("reactivateCandidates", () => {
     expect(result.reactivated[0]?.isActive).not.toBe(false);
     expect(store.listActiveCandidates().map((entry) => entry.id)).toEqual([person.id]);
   });
+
+  it("restarts Jobright when an archived candidate without email is reactivated", async () => {
+    const person = store.upsertCandidate({
+      ...createCandidate({ fullName: "No Email", company: "Acme", linkedinUrl: "https://linkedin.com/in/no-email" }),
+      discoveryStage: "finder",
+      discoveryAttempts: 2,
+      lastError: "old fallback miss",
+    });
+    store.archiveCandidate(person.id);
+
+    const result = await reactivateCandidates(store, [person.id]);
+    expect(result.reactivated[0]?.discoveryStage).toBe("jobright");
+    expect(result.reactivated[0]?.discoveryAttempts).toBe(0);
+    expect(result.reactivated[0]?.lastError).toBeUndefined();
+  });
 });
 
 describe("rescheduleQueuedSend sendNow archives for Send progress", () => {
@@ -79,6 +94,17 @@ describe("rescheduleQueuedSend sendNow archives for Send progress", () => {
       fileName: "resume.pdf",
       mimeType: "application/pdf",
       dataBase64: Buffer.from("%PDF-1.4\nfake").toString("base64"),
+    });
+    const now = new Date().toISOString();
+    store.upsertCompanyContent({
+      id: "sendnowco",
+      company: "sendnowco",
+      companyDisplayName: "SendNowCo",
+      subject: "Hi {firstName}",
+      body: "Hello",
+      source: "generated",
+      createdAt: now,
+      updatedAt: now,
     });
   });
 

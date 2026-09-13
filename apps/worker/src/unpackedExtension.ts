@@ -92,9 +92,16 @@ export function tryPrepareUnpackedExtension(options: PrepareUnpackedExtensionOpt
 export async function waitForExtensionServiceWorker(
   context: import("playwright").BrowserContext,
   timeoutMs = 30_000,
+  extensionId?: string,
 ): Promise<void> {
-  if (context.serviceWorkers().length > 0) {
+  const matches = (url: string) => !extensionId || url.startsWith(`chrome-extension://${extensionId}/`);
+  if (context.serviceWorkers().some((worker) => matches(worker.url()))) {
     return;
   }
-  await context.waitForEvent("serviceworker", { timeout: timeoutMs });
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const remaining = Math.max(1, deadline - Date.now());
+    const worker = await context.waitForEvent("serviceworker", { timeout: remaining });
+    if (matches(worker.url())) return;
+  }
 }

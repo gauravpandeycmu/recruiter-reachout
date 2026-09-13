@@ -2,6 +2,19 @@ import { describe, expect, it, vi } from "vitest";
 import { runFinderChain } from "../src/finderChain.js";
 
 describe("runFinderChain", () => {
+  it("reports every provider execution, including misses before a later find", async () => {
+    const onLookup = vi.fn();
+    await runFinderChain({
+      steps: [
+        { id: "salesql", canUse: () => true, run: async () => ({ status: "not_found", provider: "salesql" }) },
+        { id: "apollo", canUse: () => true, run: async () => ({ status: "found", email: "jane@acme.com", provider: "apollo" }) },
+      ],
+      company: "Acme",
+      onLookup,
+    });
+    expect(onLookup.mock.calls).toEqual([["salesql", "not_found"], ["apollo", "found"]]);
+  });
+
   it("returns SalesQL found without calling Apollo", async () => {
     const apollo = vi.fn();
     const outcome = await runFinderChain({
@@ -38,6 +51,33 @@ describe("runFinderChain", () => {
     });
 
     expect(outcome).toMatchObject({ status: "found", email: "nick@snowflake.com", provider: "apollo" });
+  });
+
+  it("records SalesQL credit exhaustion and still falls through to Apollo", async () => {
+    const onProviderUnavailable = vi.fn();
+    const outcome = await runFinderChain({
+      steps: [
+        {
+          id: "salesql",
+          canUse: () => true,
+          run: async () => ({
+            status: "not_found",
+            provider: "salesql",
+            creditSpent: false,
+            providerUnavailableReason: "quota_exhausted",
+          }),
+        },
+        {
+          id: "apollo",
+          canUse: () => true,
+          run: async () => ({ status: "found", email: "jane@acme.com", provider: "apollo", creditSpent: false }),
+        },
+      ],
+      onProviderUnavailable,
+    });
+
+    expect(onProviderUnavailable).toHaveBeenCalledWith("salesql", "quota_exhausted");
+    expect(outcome).toMatchObject({ status: "found", provider: "apollo" });
   });
 
   it("treats a previous-employer SalesQL address as a miss and tries Apollo", async () => {

@@ -24,6 +24,8 @@ export interface ProviderQuotaStatus {
   allowed: boolean;
   used: number;
   limit?: number;
+  unavailableUntil?: string;
+  unavailableReason?: "quota_exhausted";
 }
 
 export interface WorkerStatusUpdate {
@@ -31,7 +33,7 @@ export interface WorkerStatusUpdate {
   message: string;
   candidateId?: string;
   candidateName?: string;
-  provider?: "jobright" | "salesql" | "apollo";
+  provider?: import("@recruiter/shared").DiscoveryProvider;
   /** Usually injected by the client from ApiClientOptions.workerStartedAt. */
   workerStartedAt?: string;
 }
@@ -63,10 +65,12 @@ export interface LinkedInCaptureReportResult {
 }
 
 export interface WorkerApiClient {
-  fetchNextDiscoveryCandidate(): Promise<RecruiterCandidate | undefined>;
-  reportDiscoveryResult(candidateId: string, outcome: DiscoveryOutcome): Promise<RecruiterCandidate>;
+  fetchNextDiscoveryCandidate(stage?: "jobright" | "finder"): Promise<RecruiterCandidate | undefined>;
+  reportDiscoveryResult(candidateId: string, outcome: DiscoveryOutcome, stage?: "jobright" | "finder"): Promise<RecruiterCandidate>;
   triggerSend(candidateId: string): Promise<unknown>;
-  fetchCanUseProvider(provider: "salesql" | "jobright" | "apollo"): Promise<ProviderQuotaStatus>;
+  fetchCanUseProvider(provider: import("@recruiter/shared").DiscoveryProvider): Promise<ProviderQuotaStatus>;
+  reportProviderUnavailable?(provider: import("@recruiter/shared").FinderProvider, reason: "quota_exhausted"): Promise<void>;
+  reportProviderLookup?(input: { eventId: string; provider: import("@recruiter/shared").DiscoveryProvider; status: "found" | "not_found" | "error" }): Promise<void>;
   reportWorkerStatus(update: WorkerStatusUpdate): Promise<WorkerStatus>;
   fetchDiscoverySettings(): Promise<DiscoverySettings>;
   fetchNextSendJob(): Promise<SendJob | undefined>;
@@ -76,6 +80,10 @@ export interface WorkerApiClient {
       nextClaimAllowedAt?: string;
       hasInProgressSend: boolean;
       hasDiscovery: boolean;
+      hasJobrightDiscovery?: boolean;
+      hasFinderDiscovery?: boolean;
+      jobrightDiscoveryCount?: number;
+      finderDiscoveryCount?: number;
       hasCapture: boolean;
       hasEnrich: boolean;
       hasLinkedInMessage: boolean;
@@ -125,11 +133,12 @@ export function createApiClient(options: ApiClientOptions = {}): WorkerApiClient
   const workerStartedAt = options.workerStartedAt;
 
   return {
-    async fetchNextDiscoveryCandidate(): Promise<RecruiterCandidate | undefined> {
+    async fetchNextDiscoveryCandidate(stage?: "jobright" | "finder"): Promise<RecruiterCandidate | undefined> {
       // Mutating GET (claims the candidate server-side the instant it's
       // processed) — bound it the same way as fetchNextSendJob so a hang
       // can't leave a candidate claimed with the worker never knowing.
-      const response = await fetchWithTimeout(`${baseUrl}/api/automation/next-discovery`);
+      const suffix = stage ? `?stage=${encodeURIComponent(stage)}` : "";
+      const response = await fetchWithTimeout(`${baseUrl}/api/automation/next-discovery${suffix}`);
       if (response.status === 404) {
         return undefined;
       }
@@ -139,16 +148,25 @@ export function createApiClient(options: ApiClientOptions = {}): WorkerApiClient
       return (await response.json()) as RecruiterCandidate;
     },
 
-    async reportDiscoveryResult(candidateId: string, outcome: DiscoveryOutcome): Promise<RecruiterCandidate> {
+    async reportDiscoveryResult(candidateId: string, outcome: DiscoveryOutcome, stage?: "jobright" | "finder"): Promise<RecruiterCandidate> {
       const response = await fetchWithTimeout(`${baseUrl}/api/candidates/${candidateId}/email-discovered`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(outcome),
+        body: JSON.stringify({ ...outcome, discoveryStage: stage }),
       });
       if (!response.ok) {
         throw new Error(`Failed to report discovery result (${response.status}): ${await response.text()}`);
       }
       return (await response.json()) as RecruiterCandidate;
+    },
+
+    async reportProviderLookup(input): Promise<void> {
+      const response = await fetchWithTimeout(`${baseUrl}/api/automation/provider-lookup`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(input),
+      });
+      if (!response.ok) throw new Error(`Failed to record provider lookup (${response.status}): ${await response.text()}`);
     },
 
     async triggerSend(candidateId: string): Promise<unknown> {
@@ -164,12 +182,23 @@ export function createApiClient(options: ApiClientOptions = {}): WorkerApiClient
       return payload;
     },
 
-    async fetchCanUseProvider(provider: "salesql" | "jobright" | "apollo"): Promise<ProviderQuotaStatus> {
+    async fetchCanUseProvider(provider: import("@recruiter/shared").DiscoveryProvider): Promise<ProviderQuotaStatus> {
       const response = await fetch(`${baseUrl}/api/automation/can-use-provider/${provider}`);
       if (!response.ok) {
         throw new Error(`Failed to fetch provider quota (${response.status}): ${await response.text()}`);
       }
       return (await response.json()) as ProviderQuotaStatus;
+    },
+
+    async reportProviderUnavailable(provider: import("@recruiter/shared").FinderProvider, reason: "quota_exhausted"): Promise<void> {
+      const response = await fetch(`${baseUrl}/api/automation/provider-unavailable`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ provider, reason }),
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to record provider availability (${response.status}): ${await response.text()}`);
+      }
     },
 
     async reportWorkerStatus(update: WorkerStatusUpdate): Promise<WorkerStatus> {
@@ -219,6 +248,10 @@ export function createApiClient(options: ApiClientOptions = {}): WorkerApiClient
       nextClaimAllowedAt?: string;
       hasInProgressSend: boolean;
       hasDiscovery: boolean;
+      hasJobrightDiscovery?: boolean;
+      hasFinderDiscovery?: boolean;
+      jobrightDiscoveryCount?: number;
+      finderDiscoveryCount?: number;
       hasCapture: boolean;
       hasEnrich: boolean;
       hasLinkedInMessage: boolean;
@@ -232,6 +265,10 @@ export function createApiClient(options: ApiClientOptions = {}): WorkerApiClient
         nextClaimAllowedAt?: string;
         hasInProgressSend: boolean;
         hasDiscovery: boolean;
+        hasJobrightDiscovery?: boolean;
+        hasFinderDiscovery?: boolean;
+        jobrightDiscoveryCount?: number;
+        finderDiscoveryCount?: number;
         hasCapture: boolean;
         hasEnrich: boolean;
         hasLinkedInMessage: boolean;

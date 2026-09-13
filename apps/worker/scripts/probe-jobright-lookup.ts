@@ -7,7 +7,10 @@ import {
   isChromiumProfileLocked,
   launchPersistentBrowserContext,
 } from "../src/browserContext.js";
-import { createJobrightPlaywrightAdapter } from "../src/jobrightPlaywrightAdapter.js";
+import {
+  createJobrightPlaywrightAdapter,
+  dismissJobrightBlockingOverlays,
+} from "../src/jobrightPlaywrightAdapter.js";
 import { resolveWorkerDataDir } from "../src/paths.js";
 
 async function main() {
@@ -28,7 +31,7 @@ async function main() {
   const page = ctx.pages()[0] ?? (await ctx.newPage());
   console.log("goto", jobUrl);
   await page.goto(jobUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
-  await page.waitForTimeout(2500);
+  await dismissJobrightBlockingOverlays(page);
 
   const adapter = createJobrightPlaywrightAdapter(page, { jobUrl });
   console.log("fill", linkedinUrl);

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  clearJobrightContactResultCard,
   createJobrightPlaywrightAdapter,
   dismissJobrightBlockingOverlays,
   dismissJobrightPromoOverlays,
@@ -164,6 +165,74 @@ describe("dismissJobrightPromoOverlays", () => {
       getByRole: vi.fn(() => roleLocator()),
     };
     expect(await dismissJobrightPromoOverlays(page as never)).toBe(false);
+  });
+});
+
+describe("clearJobrightContactResultCard", () => {
+  it("returns false when no contact result card is visible", async () => {
+    const page = {
+      getByText: vi.fn(() => fakeInvisible()),
+      locator: vi.fn(() => fakeInvisible()),
+      reload: vi.fn(async () => {}),
+    };
+    expect(await clearJobrightContactResultCard(page as never)).toBe(false);
+    expect(page.reload).not.toHaveBeenCalled();
+  });
+
+  it("clicks the finish-card close control instead of reloading", async () => {
+    let toastVisible = true;
+    const close = {
+      isVisible: vi.fn(async () => true),
+      click: vi.fn(async () => {
+        toastVisible = false;
+      }),
+      first: function first() {
+        return this;
+      },
+    };
+    const toast = {
+      isVisible: vi.fn(async () => toastVisible),
+      waitFor: vi.fn(async () => {
+        if (toastVisible) throw new Error("still visible");
+      }),
+      first: function first() {
+        return this;
+      },
+    };
+    const page = {
+      getByText: vi.fn(() => toast),
+      locator: vi.fn(() => close),
+      reload: vi.fn(async () => {}),
+    };
+    expect(await clearJobrightContactResultCard(page as never)).toBe(true);
+    expect(close.click).toHaveBeenCalled();
+    expect(page.reload).not.toHaveBeenCalled();
+  });
+
+  it("falls back to reload when close does not clear the toast", async () => {
+    const toast = {
+      isVisible: vi.fn(async () => true),
+      waitFor: vi.fn(async () => {
+        throw new Error("still visible");
+      }),
+      first: function first() {
+        return this;
+      },
+    };
+    const close = {
+      isVisible: vi.fn(async () => true),
+      click: vi.fn(async () => {}),
+      first: function first() {
+        return this;
+      },
+    };
+    const page = {
+      getByText: vi.fn(() => toast),
+      locator: vi.fn(() => close),
+      reload: vi.fn(async () => {}),
+    };
+    expect(await clearJobrightContactResultCard(page as never)).toBe(true);
+    expect(page.reload).toHaveBeenCalled();
   });
 });
 

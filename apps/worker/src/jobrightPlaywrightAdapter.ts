@@ -146,6 +146,34 @@ export async function dismissJobrightPromoOverlays(page: Page): Promise<boolean>
 }
 
 /**
+ * Clear a leftover Find Any Email result card so the next candidate is not
+ * misread as already found. Prefer the card's close control (~300ms) over a
+ * full page reload (~1–2s+). DOM-removing the card breaks subsequent lookups.
+ */
+export async function clearJobrightContactResultCard(page: Page): Promise<boolean> {
+  const toast = page.getByText(JOBRIGHT_CONTACT_RESULT_TEXT).first();
+  if (!(await toast.isVisible().catch(() => false))) {
+    return false;
+  }
+
+  const close = page.locator('[class*="finish-card-close"], svg[aria-label="close"]').first();
+  if (await close.isVisible().catch(() => false)) {
+    await close.click({ force: true, timeout: 2_000 }).catch(() => undefined);
+    const gone = await toast
+      .waitFor({ state: "hidden", timeout: 3_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (gone || !(await toast.isVisible().catch(() => false))) {
+      return true;
+    }
+  }
+
+  // Last resort — stale toast must not leak into the next candidate.
+  await page.reload({ waitUntil: "domcontentloaded" }).catch(() => undefined);
+  return true;
+}
+
+/**
  * Real Playwright wiring for the "Find Any Email" flow, derived directly from
  * a live walkthrough against the real Jobright product (see the plan doc).
  * This file is intentionally thin/declarative; all branching logic lives in
@@ -160,7 +188,6 @@ export function createJobrightPlaywrightAdapter(
   async function ensureLinkedInInput() {
     await dismissJobrightBlockingOverlays(page);
     await assertJobrightSession(page);
-    await sleep(300);
     let input = page.getByPlaceholder(LINKEDIN_INPUT_PLACEHOLDER).or(linkedInInputCandidates(page)).first();
     if ((await input.count()) === 0 || !(await input.first().isVisible().catch(() => false))) {
       if (jobUrl) {
@@ -168,7 +195,6 @@ export function createJobrightPlaywrightAdapter(
       } else {
         await page.reload({ waitUntil: "domcontentloaded", timeout: 45_000 }).catch(() => undefined);
       }
-      await sleep(800);
       await dismissJobrightBlockingOverlays(page);
       await assertJobrightSession(page);
       input = page.getByPlaceholder(LINKEDIN_INPUT_PLACEHOLDER).or(linkedInInputCandidates(page)).first();
@@ -184,11 +210,9 @@ export function createJobrightPlaywrightAdapter(
     async fillLinkedInUrl(url: string): Promise<void> {
       // Reusing the same page across candidates previously let a stale
       // "Contact Info Found" toast/reveal-modal from the PREVIOUS candidate get
-      // misread as THIS candidate's result. Clear overlays first.
-      const toast = page.getByText(JOBRIGHT_CONTACT_RESULT_TEXT).first();
-      if (await toast.isVisible().catch(() => false)) {
-        await page.reload({ waitUntil: "domcontentloaded" }).catch(() => undefined);
-      }
+      // misread as THIS candidate's result. Clear the finish card first (close
+      // button), not a full reload — reload added ~1–2s per warm lookup.
+      await clearJobrightContactResultCard(page);
 
       let lastError: unknown;
       for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -290,6 +314,8 @@ export function createJobrightPlaywrightAdapter(
       await page.getByRole("button", { name: CANCEL_TEXT }).click();
       await modal.waitFor({ state: "hidden", timeout: 5000 }).catch(() => {});
       await dismissJobrightBlockingOverlays(page);
+      // Drop the result card so the next fill does not spend time clearing it.
+      await clearJobrightContactResultCard(page);
     },
   };
 }

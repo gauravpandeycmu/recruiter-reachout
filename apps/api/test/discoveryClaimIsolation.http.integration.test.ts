@@ -209,7 +209,7 @@ describe("discovery claim isolation HTTP", () => {
       expectStatus: 200,
     });
     expect(worker.body.id).toBe(id);
-    expect(worker.body.forceProvider).toBe("salesql");
+    expect(worker.body.forceProvider).toBe("finder");
   });
 
   it("Look up now after a stolen claim releases it so the worker can look them up immediately", async () => {

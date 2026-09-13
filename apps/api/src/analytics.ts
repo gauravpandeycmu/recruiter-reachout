@@ -5,7 +5,7 @@ import type {
   RecruiterCandidate,
   TrackingEvent,
 } from "@recruiter/shared";
-import { resolveCandidateCompany } from "@recruiter/shared";
+import { discoveryProviderLabel, resolveCandidateCompany, type DiscoveryProvider } from "@recruiter/shared";
 import { audit } from "@recruiter/shared/auditLog";
 import type { Store } from "./store.js";
 
@@ -138,6 +138,7 @@ export function buildAnalyticsSummary(
       .filter((company): company is string => Boolean(company)),
   ).size;
   const queueBreakdown = buildQueueBreakdown(store);
+  const providerLookups = buildProviderLookupStats(store, candidates);
 
   return {
     today: {
@@ -170,6 +171,7 @@ export function buildAnalyticsSummary(
       monthKey: u.monthKey,
       count: u.count,
     })),
+    providerLookups,
     daily: dailyWithSchedule,
     cumulativeSends,
     hourly,
@@ -192,6 +194,35 @@ export function buildAnalyticsSummary(
     },
     generatedAt: new Date().toISOString(),
   };
+}
+
+const LOOKUP_PROVIDER_ORDER: DiscoveryProvider[] = [
+  "jobright",
+  "salesql",
+  "apollo",
+  "hunter",
+  "prospeo",
+  "getprospect",
+  "kwinbi",
+];
+
+function buildProviderLookupStats(store: Store, candidates: RecruiterCandidate[]): AnalyticsSummary["providerLookups"] {
+  const usage = store.listProviderUsage();
+  return LOOKUP_PROVIDER_ORDER.map((provider) => {
+    const rows = usage.filter((row) => row.provider === provider);
+    const trackedAttempts = rows.reduce((sum, row) => sum + (row.attemptedCount ?? 0), 0);
+    const historicalUsage = rows.reduce((sum, row) => sum + row.count, 0);
+    const trackedFound = rows.reduce((sum, row) => sum + (row.foundCount ?? 0), 0);
+    const historicalFound = candidates.filter((candidate) =>
+      candidate.emailCandidates?.some((guess) => guess.evidence === provider),
+    ).length;
+    return {
+      provider,
+      label: discoveryProviderLabel(provider),
+      attempted: Math.max(trackedAttempts, historicalUsage, historicalFound),
+      found: Math.max(trackedFound, historicalFound),
+    };
+  });
 }
 
 export function updateAnalyticsGoal(

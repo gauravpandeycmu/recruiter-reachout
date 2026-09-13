@@ -49,6 +49,7 @@ const DOMAIN_TO_COMPANY: Record<string, string> = {
   "oracle.com": "Oracle",
   "ibm.com": "IBM",
   "nvidia.com": "NVIDIA",
+  "gm.com": "General Motors",
   "adobe.com": "Adobe",
   "spotify.com": "Spotify",
   "snap.com": "Snap",
@@ -69,6 +70,9 @@ const DOMAIN_TO_COMPANY: Record<string, string> = {
   "atlassian.com": "Atlassian",
   "github.com": "GitHub",
   "gitlab.com": "GitLab",
+  "cursor.com": "Cursor",
+  "anysphere.co": "Cursor",
+  "anysphere.com": "Cursor",
 };
 
 export function emailDomain(email: string | undefined): string {

@@ -73,6 +73,50 @@ function createApolloAdapter(): ApolloPageAdapter {
 }
 
 describe("runDiscoveryPass", () => {
+  it("runs the Jobright queue without invoking Finder and tags the report stage", async () => {
+    const apiClient = createFakeApiClient();
+    const createSalesqlAdapterFn = vi.fn(createSalesqlAdapter);
+    await runDiscoveryPass({
+      apiClient,
+      discoveryStage: "jobright",
+      createJobrightAdapter: () => ({ ...createJobrightAdapter(), waitForContactResult: vi.fn().mockResolvedValue({ found: false }) }),
+      createSalesqlAdapter: createSalesqlAdapterFn,
+      jobrightDryRun: false,
+      salesqlDryRun: false,
+      autoSendAfterDiscovery: false,
+    });
+
+    expect(apiClient.fetchNextDiscoveryCandidate).toHaveBeenCalledWith("jobright");
+    expect(createSalesqlAdapterFn).not.toHaveBeenCalled();
+    expect(apiClient.reportDiscoveryResult).toHaveBeenCalledWith(
+      "candidate-1",
+      { status: "not_found", provider: "jobright" },
+      "jobright",
+    );
+  });
+
+  it("runs the Finder queue without invoking Jobright and tags the report stage", async () => {
+    const apiClient = createFakeApiClient();
+    const createJobrightAdapterFn = vi.fn(createJobrightAdapter);
+    await runDiscoveryPass({
+      apiClient,
+      discoveryStage: "finder",
+      createJobrightAdapter: createJobrightAdapterFn,
+      createSalesqlAdapter,
+      jobrightDryRun: false,
+      salesqlDryRun: false,
+      autoSendAfterDiscovery: false,
+    });
+
+    expect(apiClient.fetchNextDiscoveryCandidate).toHaveBeenCalledWith("finder");
+    expect(createJobrightAdapterFn).not.toHaveBeenCalled();
+    expect(apiClient.reportDiscoveryResult).toHaveBeenCalledWith(
+      "candidate-1",
+      expect.objectContaining({ status: "found", provider: "salesql", email: "salesql@example.com" }),
+      "finder",
+    );
+  });
+
   it("returns idle without creating an adapter when there is no candidate to discover", async () => {
     const apiClient = createFakeApiClient({ fetchNextDiscoveryCandidate: vi.fn().mockResolvedValue(undefined) });
     const createJobrightAdapterFn = vi.fn();
@@ -289,7 +333,7 @@ describe("runDiscoveryPass", () => {
       status: "found",
       email: "a.v.talnikov@gmail.com",
       provider: "salesql",
-      creditSpent: false,
+      creditSpent: true,
     });
     expect(apiClient.triggerSend).toHaveBeenCalled();
   });

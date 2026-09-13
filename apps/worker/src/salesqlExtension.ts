@@ -94,8 +94,13 @@ export async function waitForSalesqlServiceWorker(
   context: import("playwright").BrowserContext,
   timeoutMs = 30000,
 ): Promise<void> {
-  if (context.serviceWorkers().length > 0) {
+  const matches = (url: string) => url.startsWith(`chrome-extension://${SALESQL_EXTENSION_ID}/`);
+  if (context.serviceWorkers().some((worker) => matches(worker.url()))) {
     return;
   }
-  await context.waitForEvent("serviceworker", { timeout: timeoutMs });
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const worker = await context.waitForEvent("serviceworker", { timeout: Math.max(1, deadline - Date.now()) });
+    if (matches(worker.url())) return;
+  }
 }

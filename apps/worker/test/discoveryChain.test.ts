@@ -1,8 +1,13 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { runDiscoveryChain } from "../src/discoveryChain.js";
 import type { JobrightPageAdapter } from "../src/jobright.js";
 import type { SalesqlPageAdapter } from "../src/salesql.js";
 import type { ApolloPageAdapter } from "../src/apollo.js";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 function jobrightAdapter(overrides: Partial<JobrightPageAdapter> = {}): JobrightPageAdapter {
   return {
@@ -253,7 +258,9 @@ describe("runDiscoveryChain", () => {
     const salesql = salesqlAdapter({
       readRevealedEmail: vi.fn().mockResolvedValue("jane.recruiter@acme.com"),
     });
-    const apollo = apolloAdapter();
+    const apollo = apolloAdapter({
+      readRevealedEmail: vi.fn().mockResolvedValue("jane.apollo@acme.com"),
+    });
     const outcome = await runDiscoveryChain("https://www.linkedin.com/in/jane-doe", {
       jobrightAdapter: jobrightAdapter({ waitForContactResult: vi.fn().mockResolvedValue({ found: false }) }),
       createSalesqlAdapter: () => salesql,
@@ -275,15 +282,15 @@ describe("runDiscoveryChain", () => {
     expect(apollo.navigateToProfile).not.toHaveBeenCalled();
   });
 
-  it("falls through SalesQL miss to Apollo", async () => {
+  it("uses Apollo after SalesQL misses when both are allowed", async () => {
     const salesql = salesqlAdapter({
       readRevealedEmail: vi.fn().mockResolvedValue(undefined),
       readPanelStatus: vi.fn().mockResolvedValue("no_emails"),
     });
     const apollo = apolloAdapter({
-      readRevealedEmail: vi.fn().mockResolvedValue("nick.choumitsky@snowflake.com"),
+      readRevealedEmail: vi.fn().mockResolvedValue("jane.apollo@acme.com"),
     });
-    const outcome = await runDiscoveryChain("https://www.linkedin.com/in/nchoumitsky", {
+    const outcome = await runDiscoveryChain("https://www.linkedin.com/in/jane-doe", {
       jobrightAdapter: jobrightAdapter({ waitForContactResult: vi.fn().mockResolvedValue({ found: false }) }),
       createSalesqlAdapter: () => salesql,
       createApolloAdapter: () => apollo,
@@ -292,32 +299,67 @@ describe("runDiscoveryChain", () => {
       apolloDryRun: false,
       canUseSalesql: () => true,
       canUseApollo: () => true,
-      company: "Snowflake",
+      company: "Acme",
     });
 
-    expect(outcome).toMatchObject({
-      status: "found",
-      email: "nick.choumitsky@snowflake.com",
-      provider: "apollo",
-    });
+    expect(outcome).toMatchObject({ status: "found", email: "jane.apollo@acme.com", provider: "apollo" });
     expect(salesql.navigateToProfile).toHaveBeenCalled();
     expect(apollo.navigateToProfile).toHaveBeenCalled();
   });
 
+  it("uses Hunter after SalesQL and Apollo miss", async () => {
+    const salesql = salesqlAdapter({
+      readRevealedEmail: vi.fn().mockResolvedValue(undefined),
+      readPanelStatus: vi.fn().mockResolvedValue("no_emails"),
+    });
+    const apollo = apolloAdapter({
+      readRevealedEmail: vi.fn().mockResolvedValue(undefined),
+      readPanelStatus: vi.fn().mockResolvedValue("no_emails"),
+    });
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ data: { email: "jane@acme.com" } }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await runDiscoveryChain("https://www.linkedin.com/in/jane-doe", {
+      jobrightAdapter: jobrightAdapter({ waitForContactResult: vi.fn().mockResolvedValue({ found: false }) }),
+      createSalesqlAdapter: () => salesql,
+      createApolloAdapter: () => apollo,
+      hunterApiKey: "hunter-test-key",
+      jobrightDryRun: false,
+      salesqlDryRun: false,
+      apolloDryRun: false,
+      canUseSalesql: () => true,
+      canUseApollo: () => true,
+      canUseHunter: () => true,
+      company: "Acme",
+      fullName: "Jane Doe",
+    });
+
+    expect(outcome).toMatchObject({ status: "found", email: "jane@acme.com", provider: "hunter" });
+    expect(salesql.navigateToProfile).toHaveBeenCalled();
+    expect(apollo.navigateToProfile).toHaveBeenCalled();
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("api.hunter.io");
+  });
+
   it("forced Finder skips Jobright and uses SalesQL before Apollo", async () => {
     const jobright = jobrightAdapter();
+    const salesql = salesqlAdapter();
     const apollo = apolloAdapter();
     const outcome = await runDiscoveryChain("https://www.linkedin.com/in/jane-doe", {
       jobrightAdapter: jobright,
+      createSalesqlAdapter: () => salesql,
       createApolloAdapter: () => apollo,
       jobrightDryRun: false,
       salesqlDryRun: false,
-      canUseSalesql: () => false,
+      canUseSalesql: () => true,
       canUseApollo: () => true,
       forceProvider: "finder",
     });
 
+    expect(outcome).toMatchObject({ status: "found", email: "salesql@example.com", provider: "salesql" });
     expect(jobright.fillLinkedInUrl).not.toHaveBeenCalled();
-    expect(outcome).toMatchObject({ status: "found", email: "apollo@example.com", provider: "apollo" });
+    expect(salesql.navigateToProfile).toHaveBeenCalled();
+    expect(apollo.navigateToProfile).not.toHaveBeenCalled();
   });
 });

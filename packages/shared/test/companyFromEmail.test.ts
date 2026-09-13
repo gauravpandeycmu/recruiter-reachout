@@ -14,6 +14,7 @@ describe("companyFromEmail", () => {
     expect(inferCompanyFromEmail("kstraub@microsoft.com")).toBe("Microsoft");
     expect(inferCompanyFromEmail("tylermaher@google.com")).toBe("Google");
     expect(inferCompanyFromEmail("huyennguyen@emotiv.com")).toBe("Emotiv");
+    expect(inferCompanyFromEmail("michelle@cursor.com")).toBe("Cursor");
   });
 
   it("resolves ATS / careers subdomains to the real employer (multi-level domain)", () => {
@@ -87,6 +88,11 @@ describe("companyFromEmail", () => {
     expect(classifyOutreachEmail("recruiter@acme.io")).toBe("current_company");
   });
 
+  it("recognizes well-known abbreviated corporate domains", () => {
+    expect(classifyOutreachEmail("recruiter@gm.com", "General Motors")).toBe("current_company");
+    expect(pickOutreachEmail(["recruiter@gm.com"], "General Motors")).toBe("recruiter@gm.com");
+  });
+
   it("picks current-company work, else personal, never previous-employer work", () => {
     expect(
       pickOutreachEmail(["atalnikov@gmail.com", "atalnikov@apple.com"], "Apple"),
@@ -97,5 +103,8 @@ describe("companyFromEmail", () => {
     expect(pickOutreachEmail(["old.job@google.com"], "Apple")).toBeUndefined();
     expect(pickOutreachEmail(["recruiter@acme.io"])).toBe("recruiter@acme.io");
     expect(pickOutreachEmail(["work@unknowncorp.io", "me@gmail.com"])).toBe("work@unknowncorp.io");
+    expect(pickOutreachEmail(["mroque1416@gmail.com", "michelle@cursor.com"], "Cursor")).toBe(
+      "michelle@cursor.com",
+    );
   });
 });

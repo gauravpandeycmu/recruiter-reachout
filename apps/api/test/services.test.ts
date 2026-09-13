@@ -19,11 +19,14 @@ import {
   hasEligibleDiscoveryCandidate,
   nextDiscoveryCandidate,
   recordDiscoveryResult,
+  recordProviderLookup,
   removeEmailSample,
   requestDiscovery,
   requestSalesqlSweep,
   patchCandidateFromClient,
   resolveContentForCandidate,
+  assertCandidateHasSendableCopy,
+  buildSendJobPayload,
   setOutreachContent,
   previewEmail,
   createDraft,
@@ -40,6 +43,20 @@ import {
 import { Store } from "../src/store.js";
 
 describe("api services", () => {
+  it("records provider lookup totals idempotently without changing credit usage", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+    store.upsertProviderUsage({ provider: "apollo", monthKey: "2026-09", count: 4, updatedAt: new Date().toISOString() });
+
+    await recordProviderLookup(store, { eventId: "lookup-1", provider: "apollo", status: "found" }, new Date("2026-09-12"));
+    await recordProviderLookup(store, { eventId: "lookup-1", provider: "apollo", status: "found" }, new Date("2026-09-12"));
+
+    expect(store.getProviderUsage("apollo", "2026-09")).toMatchObject({ count: 4, attemptedCount: 5, foundCount: 1 });
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("uses recent completed sends as deduplicated style samples without names or footers", async () => {
     const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-sent-style-"));
     const store = new Store(join(directory, "store.sqlite"));
@@ -121,6 +138,62 @@ describe("api services", () => {
     expect(draft.candidate?.status).toBe("draft_created");
     expect(store.all().events[0]?.type).toBe("draft");
 
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("blocks send jobs when company outreach was never generated (stub-only fallback)", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const candidate = store.upsertCandidate(
+      createCandidate({
+        fullName: "Jane Doe",
+        company: "Acme",
+        email: "jane@acme.com",
+        emailCandidates: [{ email: "jane@acme.com", pattern: "first", confidence: "high", reason: "test" }],
+      }),
+    );
+    setOutreachContent(store, {
+      subject: "Quick note, {firstName}",
+      body: "Hi {firstName},\n\n",
+    });
+    await saveResume(store, {
+      fileName: "resume.pdf",
+      mimeType: "application/pdf",
+      dataBase64: Buffer.from("%PDF-1.4\nfake test pdf").toString("base64"),
+    });
+
+    expect(() => assertCandidateHasSendableCopy(store, candidate)).toThrow(/Generate outreach/);
+    expect(() =>
+      buildSendJobPayload(store, { candidateId: candidate.id, mode: "send_now" }),
+    ).toThrow(/Generate outreach/);
+
+    // Custom subject+body alone is enough to send.
+    store.updateCandidate(candidate.id, {
+      customSubject: "Real subject",
+      customBody: "Real body for Jane at Acme.",
+    });
+    expect(() => assertCandidateHasSendableCopy(store, store.listCandidates().find((c) => c.id === candidate.id)!)).not.toThrow();
+
+    // Company content alone is enough.
+    store.updateCandidate(candidate.id, { customSubject: undefined, customBody: undefined });
+    const now = new Date().toISOString();
+    store.upsertCompanyContent({
+      id: "acme",
+      company: "acme",
+      companyDisplayName: "Acme",
+      subject: "Acme role for {firstName}",
+      body: "Hi {firstName},\n\nGenerated for Acme.",
+      source: "generated",
+      createdAt: now,
+      updatedAt: now,
+    });
+    const payload = buildSendJobPayload(store, { candidateId: candidate.id, mode: "send_now" });
+    expect(payload.subject).toContain("Acme role");
+    expect(payload.textBody).toContain("Generated for Acme");
+
+    store.close();
     await rm(directory, { recursive: true, force: true });
   });
 
@@ -486,15 +559,20 @@ describe("email samples and per-company personalization", () => {
     process.env.GEMINI_API_KEY = "test-key";
     addEmailSample(store, { subject: "Hi {firstName}", body: "Sample body" });
 
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      let geminiPrompt = "";
+      if (url.includes("generativelanguage.googleapis.com") && typeof init?.body === "string") {
+        const request = JSON.parse(init.body) as { contents?: Array<{ parts?: Array<{ text?: string }> }> };
+        geminiPrompt = request.contents?.[0]?.parts?.[0]?.text ?? "";
+      }
       if (url.includes("jobs.acme.com")) {
         return new Response(
           "<html><body><h1>Software Engineer</h1><p>Job ID: 778812</p><p>Build distributed systems in Java and Kubernetes for our platform team.</p></body></html>",
           { status: 200, headers: { "content-type": "text/html" } },
         );
       }
-      if (url.includes("generativelanguage.googleapis.com") && fetchMock.mock.calls.length === 2) {
+      if (url.includes("generativelanguage.googleapis.com") && geminiPrompt.includes("Extract the job posting details")) {
         return new Response(
           JSON.stringify({
             candidates: [
@@ -558,6 +636,57 @@ describe("email samples and per-company personalization", () => {
     });
     const pageDownloads = fetchMock.mock.calls.filter(([input]) => String(input).includes("jobs.acme.com"));
     expect(pageDownloads).toHaveLength(1);
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("still generates when the job link cannot be read (e.g. Paycom login shell)", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    process.env.GEMINI_API_KEY = "test-key";
+    addEmailSample(store, { subject: "Hi {firstName}", body: "Sample body" });
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("paycomonline.net")) {
+        return new Response("<html><body><div id='app'></div></body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: '{"subject":"EWI note","body":"Hi {firstName}, EWI body.","linkedinSubject":"EWI role","linkedinMessage":"Hi {firstName},\\n\\nShort note about EWI with my resume attached."}',
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const content = await generateContentForCompany(store, "EWI", {
+      jobUrl: "https://www.paycomonline.net/v4/ats/web.php/portal/abc/jobs/1",
+      recipientTitles: ["Engineering Group Leader, Data Science at EWI"],
+    });
+
+    expect(content.subject).toBe("EWI note");
+    expect(content.generationContext?.jobUrl).toContain("paycomonline.net");
+    expect(content.generationContext?.jobDescription).toBeUndefined();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("generativelanguage.googleapis.com"))).toBe(
+      true,
+    );
 
     store.close();
     await rm(directory, { recursive: true, force: true });
@@ -747,6 +876,25 @@ describe("automatic email discovery bookkeeping", () => {
     });
     expect(keptWork.email).toBe("atalnikov@apple.com");
     expect(keptWork.company).toBe("Apple");
+
+    // Apollo reads the current LinkedIn contact card. Its address can use a
+    // related parent-company domain even when the outreach batch uses another
+    // current brand name.
+    const relatedDomain = store.upsertCandidate(
+      createCandidate({
+        fullName: "Christopher Wong",
+        company: "Cursor",
+        linkedinUrl: "https://linkedin.com/in/christopher-gw-wong",
+      }),
+    );
+    const keptApollo = await recordDiscoveryResult(store, relatedDomain.id, {
+      status: "found",
+      email: "cwong@x.ai",
+      provider: "apollo",
+      creditSpent: false,
+    });
+    expect(keptApollo.email).toBe("cwong@x.ai");
+    expect(keptApollo.company).toBe("Cursor");
 
     // A discovered PERSONAL-domain email is not an employer signal — the tagged
     // company must be preserved (inferCompanyFromEmail returns undefined → no branch fires).
@@ -962,6 +1110,8 @@ describe("automatic email discovery bookkeeping", () => {
     // worker re-parks the re-added person after a single miss (attempts 3 -> 4 >= 3),
     // silently giving them one attempt instead of the intended MAX_DISCOVERY_ATTEMPTS.
     expect(reAdded.discoveryAttempts ?? 0).toBe(0);
+    expect(reAdded.discoveryStage).toBe("jobright");
+    expect(reAdded.discoveryClaimedAt).toBeUndefined();
     expect(reAdded.lastError).toBeUndefined();
 
     // Teeth: one miss after re-add must not immediately re-park the person.
@@ -1063,7 +1213,8 @@ describe("automatic email discovery bookkeeping", () => {
     expect(result.queued).toBe(2);
     expect(result.candidateIds.sort()).toEqual([missing1.id, missing2.id].sort());
     for (const id of result.candidateIds) {
-      expect(store.listCandidates().find((candidate) => candidate.id === id)?.forceProvider).toBe("salesql");
+      expect(store.listCandidates().find((candidate) => candidate.id === id)?.forceProvider).toBe("finder");
+      expect(store.listCandidates().find((candidate) => candidate.id === id)?.discoveryStage).toBe("finder");
     }
 
     store.close();

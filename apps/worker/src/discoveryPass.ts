@@ -5,10 +5,15 @@ import type { JobrightDiscoveryOptions, JobrightPageAdapter } from "./jobright.j
 import type { SalesqlDiscoveryOptions, SalesqlPageAdapter } from "./salesql.js";
 import type { ApolloDiscoveryOptions, ApolloPageAdapter } from "./apollo.js";
 import { isFinderForce, isFinderProvider, discoveryProviderLabel } from "@recruiter/shared";
+import { randomUUID } from "node:crypto";
 
 export interface DiscoveryPassDeps {
   apiClient: WorkerApiClient;
-  createJobrightAdapter: () => JobrightPageAdapter;
+  createJobrightAdapter?: () => JobrightPageAdapter;
+  /** Isolated durable queue. Omit for the legacy Jobright-then-Finder pass. */
+  discoveryStage?: "jobright" | "finder";
+  /** A waiting parallel Finder consumer must not overwrite Jobright's live status with "idle". */
+  reportIdleWhenEmpty?: boolean;
   createSalesqlAdapter?: () => SalesqlPageAdapter | Promise<SalesqlPageAdapter>;
   createApolloAdapter?: () => ApolloPageAdapter | Promise<ApolloPageAdapter>;
   jobrightDryRun: boolean;
@@ -19,6 +24,10 @@ export interface DiscoveryPassDeps {
   jobrightOptions?: Partial<JobrightDiscoveryOptions>;
   salesqlOptions?: Partial<SalesqlDiscoveryOptions>;
   apolloOptions?: Partial<ApolloDiscoveryOptions>;
+  prospeoApiKey?: string;
+  hunterApiKey?: string;
+  getProspectApiKey?: string;
+  kwinbiApiKey?: string;
   /**
    * Called after a SalesQL/Apollo timeout/error so the shared Playwright page can be
    * yanked off LinkedIn (aborting orphaned navigations) before the next pass.
@@ -34,6 +43,8 @@ export type DiscoveryPassResult = "worked" | "idle";
 export interface DiscoveryPassOutcome {
   result: DiscoveryPassResult;
   usedSalesql: boolean;
+  /** False only when this stage had no claimable candidate. */
+  claimedCandidate: boolean;
 }
 
 function isSendable(outcome: DiscoveryOutcome): boolean {
@@ -56,12 +67,17 @@ async function reportDiscoveryResultWithRetry(
   candidateId: string,
   outcome: DiscoveryOutcome,
   log: (message: string) => void,
+  stage?: "jobright" | "finder",
 ): Promise<boolean> {
   const backoffsMs = [0, 1_000, 3_000, 6_000, 12_000];
   for (let attempt = 0; attempt < backoffsMs.length; attempt += 1) {
     if (backoffsMs[attempt]! > 0) await sleep(backoffsMs[attempt]!);
     try {
-      await apiClient.reportDiscoveryResult(candidateId, outcome);
+      if (stage) {
+        await apiClient.reportDiscoveryResult(candidateId, outcome, stage);
+      } else {
+        await apiClient.reportDiscoveryResult(candidateId, outcome);
+      }
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -135,17 +151,19 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
 /** One iteration of the worker's discovery loop: pick a candidate, run the provider chain, report back, optionally auto-send. */
 export async function runDiscoveryPass(deps: DiscoveryPassDeps): Promise<DiscoveryPassOutcome> {
   const log = deps.log ?? (() => {});
-  const candidate = await deps.apiClient.fetchNextDiscoveryCandidate();
+  const candidate = await deps.apiClient.fetchNextDiscoveryCandidate(deps.discoveryStage);
   if (!candidate) {
-    await reportStatus(
-      deps.apiClient,
-      { phase: "idle", message: "Waiting for candidates that still need an email." },
-      log,
-    );
-    return { result: "idle", usedSalesql: false };
+    if (deps.reportIdleWhenEmpty !== false) {
+      await reportStatus(
+        deps.apiClient,
+        { phase: "idle", message: "Waiting for candidates that still need an email." },
+        log,
+      );
+    }
+    return { result: "idle", usedSalesql: false, claimedCandidate: false };
   }
 
-  const forcedFinder = isFinderForce(candidate.forceProvider);
+  const forcedFinder = deps.discoveryStage === "finder" || isFinderForce(candidate.forceProvider);
   const providerLabel = forcedFinder ? "Finder" : "Jobright";
   let currentStatus: Parameters<WorkerApiClient["reportWorkerStatus"]>[0] = {
     phase: "looking_up",
@@ -158,13 +176,19 @@ export async function runDiscoveryPass(deps: DiscoveryPassDeps): Promise<Discove
   const stopHeartbeat = startHeartbeat(deps.apiClient, () => currentStatus, log);
 
   const canUseFinderSource = async (
-    provider: "apollo" | "salesql",
+    provider: import("@recruiter/shared").FinderProvider,
     reason?: "auto" | "previous_employer",
   ): Promise<boolean> => {
-    if (provider === "apollo" && !deps.createApolloAdapter) {
+    if (provider === "salesql" && !deps.createSalesqlAdapter) {
       return false;
     }
-    if (provider === "salesql" && !deps.createSalesqlAdapter) {
+    if (provider === "prospeo" && !deps.prospeoApiKey) {
+      return false;
+    }
+    if (provider === "hunter" && !deps.hunterApiKey) return false;
+    if (provider === "getprospect" && !deps.getProspectApiKey) return false;
+    if (provider === "kwinbi" && !deps.kwinbiApiKey) return false;
+    if (provider === "apollo" && !deps.createApolloAdapter) {
       return false;
     }
     if (!forcedFinder && reason !== "previous_employer") {
@@ -178,29 +202,58 @@ export async function runDiscoveryPass(deps: DiscoveryPassDeps): Promise<Discove
   };
 
   let usedSalesql = false;
-  let usedFinder: "apollo" | "salesql" | undefined;
+  let usedFinder: import("@recruiter/shared").FinderProvider | undefined;
   let outcome: DiscoveryOutcome;
   try {
     outcome = await withTimeout(
       runDiscoveryChain(candidate.linkedinUrl ?? "", {
-        jobrightAdapter: deps.createJobrightAdapter(),
-        createSalesqlAdapter: deps.createSalesqlAdapter,
-        createApolloAdapter: deps.createApolloAdapter,
+        jobrightAdapter: deps.discoveryStage === "finder" ? undefined : deps.createJobrightAdapter?.(),
+        createSalesqlAdapter: deps.discoveryStage === "jobright" ? undefined : deps.createSalesqlAdapter,
+        createApolloAdapter: deps.discoveryStage === "jobright" ? undefined : deps.createApolloAdapter,
         jobrightDryRun: deps.jobrightDryRun,
         salesqlDryRun: deps.salesqlDryRun,
         apolloDryRun: deps.apolloDryRun,
-        forceProvider: candidate.forceProvider,
+        forceProvider: deps.discoveryStage === "finder" ? "finder" : candidate.forceProvider,
         canUseSalesql: (reason) => canUseFinderSource("salesql", reason),
         canUseApollo: (reason) => canUseFinderSource("apollo", reason),
+        canUseProspeo: (reason) => canUseFinderSource("prospeo", reason),
+        canUseHunter: (reason) => canUseFinderSource("hunter", reason),
+        canUseGetProspect: (reason) => canUseFinderSource("getprospect", reason),
+        canUseKwinbi: (reason) => canUseFinderSource("kwinbi", reason),
+        hunterApiKey: deps.discoveryStage === "jobright" ? undefined : deps.hunterApiKey,
+        prospeoApiKey: deps.discoveryStage === "jobright" ? undefined : deps.prospeoApiKey,
+        getProspectApiKey: deps.discoveryStage === "jobright" ? undefined : deps.getProspectApiKey,
+        kwinbiApiKey: deps.discoveryStage === "jobright" ? undefined : deps.kwinbiApiKey,
         jobrightOptions: deps.jobrightOptions,
         salesqlOptions: deps.salesqlOptions,
         apolloOptions: deps.apolloOptions,
         company: candidate.company,
+        fullName: candidate.fullName,
+        reportProviderUnavailable: deps.apiClient.reportProviderUnavailable
+          ? (provider, reason) => deps.apiClient.reportProviderUnavailable!(provider, reason)
+          : undefined,
+        reportProviderLookup: deps.apiClient.reportProviderLookup
+          ? async (provider, status) => {
+              try {
+                await deps.apiClient.reportProviderLookup!({ eventId: randomUUID(), provider, status });
+              } catch (error) {
+                log(`Could not record ${discoveryProviderLabel(provider)} lookup stats: ${error instanceof Error ? error.message : String(error)}`);
+              }
+            }
+          : undefined,
         log: (message) => {
-          const overlay: "apollo" | "salesql" | undefined = /trying Apollo/i.test(message)
+          const overlay: import("@recruiter/shared").FinderProvider | undefined = /trying Apollo/i.test(message)
             ? "apollo"
             : /trying SalesQL/i.test(message)
               ? "salesql"
+              : /trying Prospeo/i.test(message)
+                ? "prospeo"
+                : /trying Hunter/i.test(message)
+                  ? "hunter"
+                  : /trying GetProspect/i.test(message)
+                    ? "getprospect"
+                    : /trying Kwinbi/i.test(message)
+                      ? "kwinbi"
               : undefined;
           if (overlay) {
             usedFinder = overlay;
@@ -270,13 +323,13 @@ export async function runDiscoveryPass(deps: DiscoveryPassDeps): Promise<Discove
     log,
   );
 
-  const reported = await reportDiscoveryResultWithRetry(deps.apiClient, candidate.id, outcome, log);
+  const reported = await reportDiscoveryResultWithRetry(deps.apiClient, candidate.id, outcome, log, deps.discoveryStage);
   const providerNote = "provider" in outcome && outcome.provider ? ` via ${outcome.provider}` : "";
   if (!reported) {
     log(
       `Could not save discovery result for ${candidate.fullName} (${candidate.id}) after retries — it will stay claimed until the stale-claim window lapses.`,
     );
-    return { result: "idle", usedSalesql };
+    return { result: "idle", usedSalesql, claimedCandidate: true };
   }
   log(
     `Discovery for ${candidate.fullName} (${candidate.id}): ${outcome.status}${providerNote}${
@@ -321,7 +374,7 @@ export async function runDiscoveryPass(deps: DiscoveryPassDeps): Promise<Discove
     log,
   );
 
-  return { result: discoveryPassResultForOutcome(outcome), usedSalesql };
+  return { result: discoveryPassResultForOutcome(outcome), usedSalesql, claimedCandidate: true };
 }
 
 /** Exported for unit tests — found → hot loop; everything else → idle backoff. */

@@ -8,6 +8,12 @@ describe("pickBestEmail", () => {
     expect(pickBestEmail(panel, "Snowflake")).toBe("nick.choumitsky@snowflake.com");
   });
 
+  it("prefers current-company work over verified Gmail", () => {
+    const panel =
+      "Emails michelle@cursor.com Work Catch-all mroque1416@gmail.com Verified Direct";
+    expect(pickBestEmail(panel, "Cursor")).toBe("michelle@cursor.com");
+  });
+
   it("rejects a previous-employer work address when a company tag is present", () => {
     expect(pickBestEmail("old.job@google.com Work", "Snowflake")).toBeUndefined();
   });

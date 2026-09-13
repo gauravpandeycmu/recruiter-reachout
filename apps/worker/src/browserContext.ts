@@ -16,6 +16,8 @@ export interface LaunchPersistentContextOptions {
   /** Browser channel. When loading extensions, defaults to Playwright's bundled `chromium` (required — Google Chrome blocks --load-extension). */
   channel?: string;
   headless?: boolean;
+  /** Explicitly allow unpacked extensions in Chromium's new headless mode. Defaults false to protect Gmail/Streak. */
+  allowHeadlessExtensions?: boolean;
   /** Unpacked Chrome extension directory(es) to load (e.g. SalesQL). */
   extensionPaths?: string[];
 }
@@ -247,14 +249,17 @@ export function resolveLaunchChannel(options: LaunchPersistentContextOptions): s
  * (headed, i.e. headless: false) so the session cookies persist in
  * userDataDir; every subsequent automated run reuses that already-trusted
  * session instead of asking the site to authenticate a bot from scratch.
+ *
+ * Extensions default to headed because Gmail/Streak's send path is only proven
+ * there. Callers may explicitly opt a compatible extension profile into new
+ * headless Chromium; the LinkedIn finder does this after live verification.
  */
 export async function launchPersistentBrowserContext(options: LaunchPersistentContextOptions): Promise<BrowserContext> {
   const extensionArgs = buildExtensionArgs(options.extensionPaths ?? []);
   const channel = resolveLaunchChannel(options);
   prepareChromiumUserDataDir(options.userDataDir);
-  // Chromium only loads --load-extension in a real (headed) window — headless silently
-  // drops Streak even if the path is set, which looks like "sent OK but not tracked".
-  const headless = extensionArgs.length > 0 ? false : (options.headless ?? true);
+  const requestedHeadless = options.headless ?? true;
+  const headless = extensionArgs.length > 0 && !options.allowHeadlessExtensions ? false : requestedHeadless;
 
   const context = await chromium.launchPersistentContext(options.userDataDir, {
     channel,

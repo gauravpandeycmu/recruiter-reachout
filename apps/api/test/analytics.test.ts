@@ -563,6 +563,11 @@ describe("analytics", () => {
     expect(summary.usage.apolloEmailsFound).toBe(1);
     expect(summary.usage.salesqlEmailsFound).toBe(1);
     expect(summary.usage.finderEmailsFound).toBe(2);
+    expect(summary.providerLookups.map((row) => row.provider)).toEqual([
+      "jobright", "salesql", "apollo", "hunter", "prospeo", "getprospect", "kwinbi",
+    ]);
+    expect(summary.providerLookups.find((row) => row.provider === "salesql")?.found).toBe(1);
+    expect(summary.providerLookups.find((row) => row.provider === "apollo")?.found).toBe(1);
   });
 
   it("estimates gemini usage from generated company content when no llm events exist", async () => {

@@ -58,6 +58,7 @@ describe("extension bulk save integration", () => {
     ]);
     const id = first?.savedCandidateId ?? "";
     store.archiveCandidate(id);
+    store.updateCandidate(id, { discoveryStage: "finder", discoveryAttempts: 2, lastError: "old miss" });
     await store.save();
     expect(store.listActiveCandidates()).toHaveLength(0);
 
@@ -68,6 +69,8 @@ describe("extension bulk save integration", () => {
 
     expect(second?.status).toBe("saved_now");
     expect(store.listActiveCandidates()).toHaveLength(1);
+    expect(store.listActiveCandidates()[0]?.discoveryStage).toBe("jobright");
+    expect(store.listActiveCandidates()[0]?.discoveryAttempts).toBe(0);
   });
 
   it("reactivates a previously sent person when Add this person is used again", async () => {
