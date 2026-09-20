@@ -34,6 +34,18 @@ export type BrowserActions = {
   closeDiscovery: boolean;
 };
 
+/**
+ * Email discovery wins between Gmail deliveries, but never interrupts a send
+ * that is already in progress. The current SendJob remains frozen in the API;
+ * this only decides which browser lane gets the next turn.
+ */
+export function shouldPrioritizeEmailDiscovery(input: {
+  hasDiscovery?: boolean;
+  hasInProgressSend?: boolean;
+}): boolean {
+  return Boolean(input.hasDiscovery) && !input.hasInProgressSend;
+}
+
 /** Keep a recently checked LinkedIn session open for the likely follow-up send,
  * unless Gmail has real work due and should take resource priority. */
 export function shouldKeepLinkedInMessagingWarm(input: {
@@ -134,12 +146,10 @@ export function decideHibernation(input: {
     Boolean(input.hasInProgressSend) ||
     (dueMs !== undefined && dueMs - now.getTime() <= warmupMs);
 
-  // Discovery / capture / enrich while Gmail is asleep. Never alongside the send window
-  // (one Chromium at a time — SalesQL stays closed until Gmail hibernates again).
-  // hasDiscovery from the API now stays true for in-flight claims too, so we do not
-  // self-exit mid-lookup and orphan discoveryClaimedAt.
+  // Jobright and Gmail use isolated browser profiles and may run together. Making
+  // these mutually exclusive starves new recruiters throughout a Send-now batch.
   const needDiscovery = Boolean(
-    !needGmail && (input.hasCaptureWork || input.hasEnrichWork || input.hasLinkedInMessageWork || input.hasDiscoveryWork),
+    input.hasCaptureWork || input.hasEnrichWork || input.hasLinkedInMessageWork || input.hasDiscoveryWork,
   );
 
   if (needDiscovery || needGmail) {

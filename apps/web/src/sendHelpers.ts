@@ -3,7 +3,7 @@ import type { UpcomingSendView } from "./api.js";
 
 /** Shared window: Send-now CTA and Next-up dueNow must agree. */
 export const SEND_NOW_WINDOW_MS = 90_000;
-export const DEFAULT_SEND_INTERVAL_MINUTES = 1;
+export const DEFAULT_SEND_INTERVAL_MINUTES = 0.5;
 
 /** Soft tint accents — backgrounds come from CSS so dark mode stays readable. */
 export const RESUME_TINTS = [
@@ -96,6 +96,7 @@ export function summarizeUpcomingSends(
   nextSlotPeople: number;
   nextSlotCompanies: string[];
   nextName?: string;
+  nextCompany?: string;
   dueNow: boolean;
 } | null {
   // Calendar order (earliest first) among actionable rows — do not let a later
@@ -113,6 +114,7 @@ export function summarizeUpcomingSends(
     return null;
   }
   const companies = new Set(timed.map((item) => item.company?.trim() || "Unknown company"));
+  const nextCompany = lead.company?.trim() || "Unknown company";
   const nextTime = lead.scheduledFor;
   const nextAt = new Date(nextTime).getTime();
   const dueNow =
@@ -123,7 +125,7 @@ export function summarizeUpcomingSends(
   const nextSlotCompanies = [
     ...new Set(nextSlot.map((item) => item.company?.trim() || "Unknown company")),
   ];
-  const peopleCount = timed.length;
+  const peopleCount = timed.filter((item) => (item.company?.trim() || "Unknown company") === nextCompany).length;
   const companyCount = companies.size;
   return {
     peopleLabel: `${peopleCount} ${peopleCount === 1 ? "person" : "people"} scheduled`,
@@ -132,6 +134,7 @@ export function summarizeUpcomingSends(
     nextSlotPeople: nextSlot.length,
     nextSlotCompanies,
     nextName: lead.fullName,
+    nextCompany,
     dueNow,
   };
 }
@@ -232,9 +235,58 @@ export function filterScheduledTabItems<T extends { jobMode?: string }>(items: T
 }
 
 /**
- * Discovery panel copy — never surface raw hibernation strings
- * ("Browsers asleep — next send 8am…") while the user is adding recruiters.
+ * Preview the first slot used by "Add to queue". The server recalculates this
+ * at submit time, so this browser value is only for the selected time/summary.
  */
+export function nextScheduledQueueStart(
+  items: Array<{ scheduledFor: string; failureReason?: string; jobStatus?: string }>,
+  now = new Date(),
+  intervalMinutes = DEFAULT_SEND_INTERVAL_MINUTES,
+): Date | null {
+  const liveTimes = items
+    .filter(
+      (item) =>
+        !item.failureReason &&
+        item.jobStatus !== "failed" &&
+        item.jobStatus !== "completed",
+    )
+    .map((item) => new Date(item.scheduledFor).getTime())
+    .filter((value) => Number.isFinite(value));
+  if (liveTimes.length === 0) {
+    return null;
+  }
+  const tail = Math.max(...liveTimes, now.getTime());
+  return new Date(tail + Math.max(1 / 60, intervalMinutes) * 60_000);
+}
+
+/** Human ETA for turning the full Scheduled queue into a paced Send-now run. */
+export function formatScheduledSendAllEstimate(
+  count: number,
+  intervalMinutes = DEFAULT_SEND_INTERVAL_MINUTES,
+): string {
+  if (count <= 0) return "0 min";
+  const estimatedSeconds = count * Math.max(1 / 60, intervalMinutes) * 60;
+  if (estimatedSeconds < 60) return "under 1 min";
+  return `about ${Math.ceil(estimatedSeconds / 60)} min`;
+}
+
+/** Active send-now rows still in the server upcoming list. */
+export function listSendNowUpcoming<T extends { jobMode?: string }>(items: T[]): T[] {
+  return items.filter((item) => item.jobMode === "send_now");
+}
+
+/**
+ * Remove all only clears leftover recruiters on the Send list. It must not wipe
+ * the delivery progress tracker while a Send now batch is in flight (or finished
+ * but still on screen awaiting Dismiss).
+ */
+export function shouldPreserveSendNowTrackingOnClearList(
+  mode: "now" | "later" | null | undefined,
+  session: { people?: unknown[] } | null | undefined,
+): boolean {
+  return mode === "now" || Boolean(session?.people && session.people.length > 0);
+}
+
 /**
  * True when the worker's last reported status is the deliberate "I exited
  * because nothing is due" hibernation — as opposed to a crash or an
@@ -399,6 +451,28 @@ export interface SendSession {
   startedAt: string;
 }
 
+/** Append a new Send-now batch without losing progress from an older batch. */
+export function mergeSendSessions(current: SendSession | null, next: SendSession): SendSession {
+  if (!current?.people.length) return next;
+  const people = [...current.people];
+  const seen = new Set(people.map((person) => person.queueItemId));
+  for (const person of next.people) {
+    if (!seen.has(person.queueItemId)) {
+      people.push(person);
+      seen.add(person.queueItemId);
+    }
+  }
+  return {
+    company: current.company === next.company ? current.company : "Send now batches",
+    people,
+    // The progress panel's draft preview follows the newest batch the user just
+    // edited and queued. Keep the original start for whole-run elapsed/ETA math.
+    subject: next.subject,
+    body: next.body,
+    startedAt: current.startedAt,
+  };
+}
+
 export function buildSendSessionFromUpcoming(
   company: string,
   items: Array<{
@@ -428,4 +502,11 @@ export function buildSendSessionFromUpcoming(
     body: draft?.body ?? first?.body ?? "",
     startedAt: new Date().toISOString(),
   };
+}
+
+/** Keep the current recipients page when the list shrinks (e.g. remove one person). */
+export function clampRecipientPage(page: number, totalCount: number, pageSize: number): number {
+  const size = Math.max(1, pageSize);
+  const pageCount = Math.max(1, Math.ceil(Math.max(0, totalCount) / size));
+  return Math.min(Math.max(0, page), pageCount - 1);
 }

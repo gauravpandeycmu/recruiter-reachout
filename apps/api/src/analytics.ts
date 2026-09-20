@@ -262,7 +262,7 @@ export function updateAnalyticsGoal(
     dailySendGoal,
     celebrateToday: Boolean(patch.celebrateToday),
     localDate,
-    sendStreak: summary.goalProgress.sendStreak,
+    goalStreak: summary.goalProgress.streak,
     sentToday: summary.goalProgress.sentToday,
   });
   return store.setAnalyticsGoalSettings(next);

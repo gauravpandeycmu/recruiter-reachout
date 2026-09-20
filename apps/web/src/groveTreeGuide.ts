@@ -238,8 +238,9 @@ export const GROVE_TREE_GUIDE: GroveTreeGuideEntry[] = [
 ];
 
 const LEGACY_UNLOCKED_TREES_KEY = "recruiter-reachout.grove-unlocked-trees";
+const LEGACY_ACTIVITY_UNLOCK_DAYS_KEY = "recruiter-reachout.grove-unlock-days.v2";
 /** Best streak-day count used for the field guide (species are derived from the live planting sequence). */
-const UNLOCK_DAYS_KEY = "recruiter-reachout.grove-unlock-days.v2";
+const UNLOCK_DAYS_KEY = "recruiter-reachout.grove-goal-unlock-days.v3";
 
 function readStoredUnlockDays(): number {
   try {
@@ -255,8 +256,10 @@ function readStoredUnlockDays(): number {
 function persistUnlockDays(days: number): void {
   try {
     localStorage.setItem(UNLOCK_DAYS_KEY, String(Math.max(0, Math.floor(days))));
-    // Drop the old species-id list — it went stale when the planting sequence changed.
+    // Old progress counted any outreach day. It must not manufacture trees now
+    // that Grove growth is earned only by meeting the configured daily goal.
     localStorage.removeItem(LEGACY_UNLOCKED_TREES_KEY);
+    localStorage.removeItem(LEGACY_ACTIVITY_UNLOCK_DAYS_KEY);
   } catch {
     // Ignore quota / private-mode failures.
   }

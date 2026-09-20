@@ -17,6 +17,7 @@ import {
   type TempUnit,
 } from "./weatherLocation";
 import { WeatherKindIcon, weatherKindLabel } from "./WeatherKindIcon";
+import { groveRenderSettings, shouldRunGrove } from "./powerMode";
 
 /**
  * Real-time WebGL Streak Grove (see apps/web/GROVE3D.md).
@@ -3652,6 +3653,7 @@ function StreakGrove3DComponent({
   goalMet,
   testMode = false,
   showHeader = true,
+  lowPower = false,
 }: {
   active?: boolean;
   /** Optional city override from Setup — empty means IP auto. */
@@ -3667,10 +3669,16 @@ function StreakGrove3DComponent({
   testMode?: boolean;
   /** When false, parent renders the title/streak chrome so the forest can lazy-load alone. */
   showHeader?: boolean;
+  /** Reduce only the expensive 3D rendering work; regular interface motion remains intact. */
+  lowPower?: boolean;
 }) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const worldRef = useRef<WorldRef | null>(null);
-  const groveControlsRef = useRef<{ resize: () => void; syncLoop: () => void } | null>(null);
+  const groveControlsRef = useRef<{
+    resize: () => void;
+    syncLoop: () => void;
+    applyPowerMode: () => void;
+  } | null>(null);
   const [webglFailed, setWebglFailed] = useState(false);
 
   // —— Temporary preview toggles (only while TEST MODE is on) ——
@@ -3683,6 +3691,8 @@ function StreakGrove3DComponent({
   streakRef.current = displayStreak;
   const activeRef = useRef(active);
   activeRef.current = active;
+  const lowPowerRef = useRef(lowPower);
+  lowPowerRef.current = lowPower;
   const streakAtRisk = displayStreak > 0 && sentToday === 0 && !(testMode && streakOverride != null);
   const overflow = Math.max(0, displayStreak - MAX_TREES_3D);
 
@@ -3772,7 +3782,9 @@ function StreakGrove3DComponent({
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
     // Cap pixel ratio hard — biggest laptop-heat saver on Retina
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.25));
+    renderer.setPixelRatio(
+      Math.min(window.devicePixelRatio || 1, groveRenderSettings(lowPowerRef.current).pixelRatioCap),
+    );
     renderer.setClearColor(new THREE.Color("#8eb4d4"), 1);
     // Shadows + PMREM are deferred until after the first paint (big cold-start cost)
     renderer.shadowMap.enabled = false;
@@ -3951,6 +3963,7 @@ function StreakGrove3DComponent({
           const hx = L.x + hash2(i, 31) * 10;
           spr.position.set(hx, L.y, L.z);
           spr.scale.set(L.sx, L.sy, 1);
+          spr.visible = !lowPowerRef.current || i % 2 === 0;
           scene.add(spr);
           cloudSprites.push(spr);
           cloudHomeX.push(hx);
@@ -4027,12 +4040,15 @@ function StreakGrove3DComponent({
       // when the sky actually changed — a PMREM bake is too heavy for no-ops.
       if (pmrem && envSig !== envSignature()) bakeEnv();
     };
+    let shadowsReady = false;
     afterPaint(() => {
       afterPaint(() => {
         afterPaint(() => {
           bakeEnv();
-          renderer.shadowMap.enabled = true;
-          sun.castShadow = true;
+          shadowsReady = true;
+          const settings = groveRenderSettings(lowPowerRef.current);
+          renderer.shadowMap.enabled = settings.shadows;
+          sun.castShadow = settings.shadows;
         });
       });
     });
@@ -4179,6 +4195,9 @@ function StreakGrove3DComponent({
     const resize = () => {
       const w = mount.clientWidth || 900;
       const h = mount.clientHeight || 460;
+      renderer.setPixelRatio(
+        Math.min(window.devicePixelRatio || 1, groveRenderSettings(lowPowerRef.current).pixelRatioCap),
+      );
       renderer.setSize(w, h, false);
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
@@ -4192,12 +4211,10 @@ function StreakGrove3DComponent({
     let frame = 0;
     let inView = true;
     let lastFrameMs = 0;
-    // Cap draw rate fairly hard — this scene is decorative, so we prefer lower GPU
-    // churn over ultra-smooth motion on high-refresh displays.
-    const FRAME_INTERVAL_MS = 1000 / 20;
     const loop = (time = performance.now()) => {
-      if (!activeRef.current || document.hidden || !inView) return;
-      if (time - lastFrameMs < FRAME_INTERVAL_MS) return;
+      if (!shouldRunGrove(activeRef.current, !document.hidden, inView)) return;
+      const settings = groveRenderSettings(lowPowerRef.current);
+      if (time - lastFrameMs < 1000 / settings.fps) return;
       lastFrameMs = time;
       const delta = clock.getDelta();
       elapsed += delta;
@@ -4300,12 +4317,27 @@ function StreakGrove3DComponent({
     };
 
     const syncLoop = () => {
-      if (activeRef.current && !document.hidden && inView) {
+      if (shouldRunGrove(activeRef.current, !document.hidden, inView)) {
         clock.getDelta();
         renderer.setAnimationLoop(loop);
       } else {
         renderer.setAnimationLoop(null);
       }
+    };
+    const applyPowerMode = () => {
+      const settings = groveRenderSettings(lowPowerRef.current);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, settings.pixelRatioCap));
+      renderer.setSize(mount.clientWidth || 900, mount.clientHeight || 460, false);
+      renderer.shadowMap.enabled = shadowsReady && settings.shadows;
+      sun.castShadow = shadowsReady && settings.shadows;
+      fireflyGeo.setDrawRange(0, Math.max(1, Math.round(fireflyCount * settings.particleScale)));
+      rain.obj.geometry.setDrawRange(0, Math.max(2, Math.round(rain.count * 2 * settings.particleScale)));
+      snow.obj.geometry.setDrawRange(0, Math.max(1, Math.round(snow.count * settings.particleScale)));
+      for (let i = 0; i < cloudSprites.length; i += 1) {
+        cloudSprites[i]!.visible = !lowPowerRef.current || i % 2 === 0;
+      }
+      lastFrameMs = 0;
+      syncLoop();
     };
     const io =
       typeof IntersectionObserver !== "undefined"
@@ -4352,7 +4384,9 @@ function StreakGrove3DComponent({
     groveControlsRef.current = {
       resize,
       syncLoop,
+      applyPowerMode,
     };
+    applyPowerMode();
 
     return () => {
       cancelled = true;
@@ -4400,6 +4434,10 @@ function StreakGrove3DComponent({
       controls.syncLoop();
     }
   }, [active]);
+
+  useEffect(() => {
+    groveControlsRef.current?.applyPowerMode();
+  }, [lowPower]);
 
   useEffect(() => {
     const world = worldRef.current;

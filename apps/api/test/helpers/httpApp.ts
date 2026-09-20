@@ -142,11 +142,11 @@ export async function flushWake(): Promise<void> {
 export { createCandidate };
 
 /** Seed a ready-to-schedule person into the app store (with company outreach copy). */
-export function seedReady(app: HttpApp, name: string, company: string, email: string) {
+export function ensureCompanyCopy(store: Store, company: string): void {
   const now = new Date().toISOString();
   const companyKey = company.replace(/\s+/g, " ").trim().toLowerCase();
-  if (!app.store.getCompanyContent(companyKey)) {
-    app.store.upsertCompanyContent({
+  if (!store.getCompanyContent(companyKey)) {
+    store.upsertCompanyContent({
       id: `cc-${companyKey}`,
       company: companyKey,
       companyDisplayName: company,
@@ -157,6 +157,10 @@ export function seedReady(app: HttpApp, name: string, company: string, email: st
       updatedAt: now,
     });
   }
+}
+
+export function seedReady(app: HttpApp, name: string, company: string, email: string) {
+  ensureCompanyCopy(app.store, company);
   return app.store.upsertCandidate(
     createCandidate({
       fullName: name,

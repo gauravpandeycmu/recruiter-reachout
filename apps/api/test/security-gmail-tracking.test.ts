@@ -19,6 +19,15 @@ describe("security gmail and tracking", () => {
     expect(decryptSecret(encrypted, "test-key")).toBe("refresh-token");
   });
 
+  it("hashes IPs for tracking events without storing the raw address", async () => {
+    const { hashIp } = await import("../src/security.js");
+    expect(hashIp(undefined)).toBeUndefined();
+    const hashed = hashIp("203.0.113.10");
+    expect(hashed).toMatch(/^[a-f0-9]{16}$/);
+    expect(hashed).not.toContain("203");
+    expect(hashIp("203.0.113.10")).toBe(hashed);
+  });
+
   it("includes oauth state in Gmail auth URL", () => {
     const url = getGmailAuthUrl({
       clientId: "client",

@@ -36,6 +36,7 @@ export interface DiscoveryChainDeps {
   getProspectApiKey?: string;
   kwinbiApiKey?: string;
   reportProviderLookup?: (provider: import("@recruiter/shared").DiscoveryProvider, status: "found" | "not_found" | "error") => void | Promise<void>;
+  recoverFinderPage?: (provider: import("@recruiter/shared").FinderProvider) => void | Promise<void>;
 }
 
 function mapJobrightOutcome(outcome: Awaited<ReturnType<typeof discoverEmailOnJobright>>): DiscoveryOutcome {
@@ -94,7 +95,7 @@ function mapApolloOutcome(outcome: Awaited<ReturnType<typeof discoverEmailOnApol
   return { status: "error", message: outcome.message, provider: "apollo", creditSpent: outcome.creditSpent };
 }
 
-function buildFinderSteps(
+export function buildFinderSteps(
   linkedinUrl: string,
   deps: DiscoveryChainDeps,
   reason: "auto" | "previous_employer",
@@ -104,6 +105,7 @@ function buildFinderSteps(
   if (deps.createSalesqlAdapter) {
     steps.push({
       id: "salesql",
+      timeoutMs: 25_000,
       canUse: () => deps.canUseSalesql(reason),
       run: async () =>
         mapSalesqlOutcome(
@@ -118,6 +120,7 @@ function buildFinderSteps(
   if (deps.createApolloAdapter) {
     steps.push({
       id: "apollo",
+      timeoutMs: 25_000,
       canUse: () => deps.canUseApollo?.(reason) ?? true,
       run: async () =>
         mapApolloOutcome(
@@ -183,6 +186,7 @@ export async function runDiscoveryChain(
       required: true,
       onProviderUnavailable: deps.reportProviderUnavailable,
       onLookup: deps.reportProviderLookup,
+      onProviderTimeout: deps.recoverFinderPage,
     });
     return (
       forcedOutcome ?? {
@@ -197,6 +201,8 @@ export async function runDiscoveryChain(
   if (!deps.jobrightAdapter) {
     return { status: "error", message: "Jobright browser is not configured.", provider: "jobright" };
   }
+  log("Trying Jobright.");
+  const jobrightStartedAt = Date.now();
   const jobrightOutcome = await discoverEmailOnJobright(deps.jobrightAdapter, linkedinUrl, {
     dryRun: deps.jobrightDryRun,
     ...deps.jobrightOptions,
@@ -214,6 +220,11 @@ export async function runDiscoveryChain(
       jobrightResult = { status: "not_found", provider: "jobright" };
     }
   }
+  log(
+    `Jobright finished in ${((Date.now() - jobrightStartedAt) / 1000).toFixed(1)}s (${jobrightResult.status}${
+      skippedPreviousEmployer ? ", previous_employer" : ""
+    }).`,
+  );
 
   // Current-company work or personal (Gmail, etc.) ends the chain.
   // Previous-employer work is treated as a miss so Finder can still try.
@@ -244,6 +255,7 @@ export async function runDiscoveryChain(
     required: false,
     onProviderUnavailable: deps.reportProviderUnavailable,
     onLookup: deps.reportProviderLookup,
+    onProviderTimeout: deps.recoverFinderPage,
   });
 
   if (!finderOutcome) {

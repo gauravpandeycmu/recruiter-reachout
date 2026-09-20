@@ -31,7 +31,7 @@ describe("Jobright lookup failure HTTP", () => {
     return bulk.body.results[0]?.savedCandidateId ?? "";
   }
 
-  it("timeout: lookup ran, no toast — claim released, not parked, worker can retry", async () => {
+  it("timeout: claim is released, reason is shown, and automation does not retry", async () => {
     app = await startHttpApp();
     const id = await seedJoe();
 
@@ -56,17 +56,15 @@ describe("Jobright lookup failure HTTP", () => {
 
     expect(result.body.status).toBe("new");
     expect(result.body.email).toBeFalsy();
-    expect(result.body.discoveryAttempts ?? 0).toBe(0);
-    expect(result.body.lastError).toBe("Timed out waiting for Jobright contact result.");
+    expect(result.body.discoveryAttempts).toBe(1);
+    expect(result.body.lastError).toContain("Timed out waiting for Jobright contact result.");
     expect(result.body.discoveryClaimedAt).toBeFalsy();
 
     const pending = await app.fetchJson<{ hasDiscovery: boolean }>("/api/automation/pending-work", {
       expectStatus: 200,
     });
-    expect(pending.body.hasDiscovery).toBe(true);
-
-    const retry = await app.fetchJson<{ id: string }>("/api/automation/next-discovery", { expectStatus: 200 });
-    expect(retry.body.id).toBe(id);
+    expect(pending.body.hasDiscovery).toBe(false);
+    await app.fetchJson("/api/automation/next-discovery", { expectStatus: 404 });
   });
 
   it("conclusive miss: Jobright said no contact — counts toward park, still no email", async () => {
@@ -83,7 +81,7 @@ describe("Jobright lookup failure HTTP", () => {
       },
     );
     expect(miss.body.email).toBeFalsy();
-    expect(miss.body.status).not.toBe("email_not_found");
+    expect(miss.body.status).toBe("email_not_found");
     expect(miss.body.discoveryAttempts).toBe(1);
   });
 
@@ -103,7 +101,7 @@ describe("Jobright lookup failure HTTP", () => {
     await app.fetchJson("/api/automation/next-discovery", { expectStatus: 404 });
   });
 
-  it("search/fill crash is an error: still discoverable, lastError kept, no email", async () => {
+  it("search/fill crash stops automatic retries and keeps the specific error", async () => {
     app = await startHttpApp();
     const id = await seedJoe();
     await app.fetchJson("/api/automation/next-discovery", { expectStatus: 200 });
@@ -119,7 +117,7 @@ describe("Jobright lookup failure HTTP", () => {
     const row = app.store.listCandidates().find((candidate) => candidate.id === id);
     expect(row?.status).toBe("new");
     expect(row?.email).toBeFalsy();
-    expect(row?.discoveryAttempts ?? 0).toBe(0);
+    expect(row?.discoveryAttempts).toBe(1);
     expect(row?.lastError).toMatch(/waiting for attached/);
   });
 });

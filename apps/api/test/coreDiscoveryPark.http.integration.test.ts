@@ -47,9 +47,9 @@ describe("core discovery park + spacing HTTP integration", () => {
     expect(second.body.id).not.toBe(first.body.id);
     expect([a, b]).toContain(second.body.id);
 
-    // First person is still eligible (not parked after one Jobright miss).
+    // First person is concluded after its one Jobright attempt.
     const still = app.store.listCandidates().find((row) => row.id === first.body.id);
-    expect(still?.status).not.toBe("email_not_found");
+    expect(still?.status).toBe("email_not_found");
     expect(still?.lastDiscoveryAttemptAt).toBeTruthy();
     expect(still?.discoveryAttempts).toBe(1);
   });
@@ -72,7 +72,7 @@ describe("core discovery park + spacing HTTP integration", () => {
     expect((await app.fetchJson("/api/automation/next-discovery")).status).toBe(404);
   });
 
-  it("transient error does not spend discoveryAttempts or park", async () => {
+  it("a technical error is shown and does not retry automatically", async () => {
     app = await startHttpApp();
     const id = await seedNeedsDiscovery("Transient Err", "transient-err-http");
 
@@ -88,11 +88,10 @@ describe("core discovery park + spacing HTTP integration", () => {
 
     const candidate = app.store.listCandidates().find((row) => row.id === id);
     expect(candidate?.status).not.toBe("email_not_found");
-    expect(candidate?.discoveryAttempts ?? 0).toBe(0);
+    expect(candidate?.discoveryAttempts).toBe(1);
     expect(candidate?.lastError).toMatch(/Timed out/i);
 
-    const next = await app.fetchJson<{ id: string }>("/api/automation/next-discovery", { expectStatus: 200 });
-    expect(next.body.id).toBe(id);
+    await app.fetchJson("/api/automation/next-discovery", { expectStatus: 404 });
   });
 
   it("dry_run reports without parking and without spending attempts", async () => {
@@ -160,9 +159,8 @@ describe("core discovery park + spacing HTTP integration", () => {
     const candidate = app.store.listCandidates().find((row) => row.id === id);
     expect(candidate?.forceProvider).toBeUndefined();
     expect(candidate?.lastError).toMatch(/quota/i);
-    // Still discoverable via normal Jobright path (not parked).
-    const next = await app.fetchJson<{ id: string }>("/api/automation/next-discovery", { expectStatus: 200 });
-    expect(next.body.id).toBe(id);
+    // It stays stopped until the user explicitly requests another lookup.
+    await app.fetchJson("/api/automation/next-discovery", { expectStatus: 404 });
     expect(app.store.listCandidates().find((row) => row.id === id)?.forceProvider).toBeUndefined();
   });
 
@@ -189,7 +187,7 @@ describe("core discovery park + spacing HTTP integration", () => {
     expect(candidate?.status).toBe("email_guessed");
   });
 
-  it("request-salesql-sweep wakes and force-flags everyone missing email", async () => {
+  it("request-salesql-sweep wakes untouched candidates without skipping their first Jobright check", async () => {
     app = await startHttpApp({ autoEnsureWorker: true });
     const a = await seedNeedsDiscovery("Sweep A", "sweep-a-http");
     const b = await seedNeedsDiscovery("Sweep B", "sweep-b-http");
@@ -215,7 +213,8 @@ describe("core discovery park + spacing HTTP integration", () => {
     expect(spawns).toBeGreaterThan(0);
 
     for (const id of [a, b]) {
-      expect(app.store.listCandidates().find((row) => row.id === id)?.forceProvider).toBe("finder");
+      expect(app.store.listCandidates().find((row) => row.id === id)?.forceProvider).toBeUndefined();
+      expect(app.store.listCandidates().find((row) => row.id === id)?.discoveryStage).toBe("jobright");
     }
   });
 

@@ -10,6 +10,7 @@ import {
   saveResume,
 } from "../src/services.js";
 import { Store } from "../src/store.js";
+import { ensureCompanyCopy } from "./helpers/httpApp.js";
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -45,6 +46,8 @@ describe("listUpcomingSends", () => {
       mimeType: "application/pdf",
       dataBase64: Buffer.from("%PDF-1.4\nfake").toString("base64"),
     });
+    ensureCompanyCopy(store, "Acme");
+    ensureCompanyCopy(store, "Beta");
   });
 
   afterEach(async () => {

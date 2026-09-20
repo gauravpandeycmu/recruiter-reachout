@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { runDiscoveryChain } from "../src/discoveryChain.js";
+import { buildFinderSteps, runDiscoveryChain } from "../src/discoveryChain.js";
 import type { JobrightPageAdapter } from "../src/jobright.js";
 import type { SalesqlPageAdapter } from "../src/salesql.js";
 import type { ApolloPageAdapter } from "../src/apollo.js";
@@ -361,5 +361,68 @@ describe("runDiscoveryChain", () => {
     expect(jobright.fillLinkedInUrl).not.toHaveBeenCalled();
     expect(salesql.navigateToProfile).toHaveBeenCalled();
     expect(apollo.navigateToProfile).not.toHaveBeenCalled();
+  });
+
+  it("logs Jobright try/finish timing around a lookup", async () => {
+    const logs: string[] = [];
+    await runDiscoveryChain("https://www.linkedin.com/in/jane-doe", {
+      jobrightAdapter: jobrightAdapter(),
+      jobrightDryRun: false,
+      salesqlDryRun: false,
+      canUseSalesql: () => false,
+      log: (message) => logs.push(message),
+    });
+    expect(logs.some((line) => line === "Trying Jobright.")).toBe(true);
+    expect(logs.some((line) => /Jobright finished in \d+(\.\d+)?s \(found\)/.test(line))).toBe(true);
+  });
+});
+
+describe("buildFinderSteps", () => {
+  it("keeps SalesQL → Apollo → Hunter → Prospeo → GetProspect → Kwinbi order", () => {
+    const steps = buildFinderSteps(
+      "https://www.linkedin.com/in/jane",
+      {
+        createSalesqlAdapter: () => salesqlAdapter(),
+        createApolloAdapter: () => apolloAdapter(),
+        hunterApiKey: "h",
+        prospeoApiKey: "p",
+        getProspectApiKey: "g",
+        kwinbiApiKey: "k",
+        jobrightDryRun: false,
+        salesqlDryRun: false,
+        canUseSalesql: () => true,
+        canUseApollo: () => true,
+        canUseHunter: () => true,
+        canUseProspeo: () => true,
+        canUseGetProspect: () => true,
+        canUseKwinbi: () => true,
+      },
+      "auto",
+    );
+    expect(steps.map((step) => step.id)).toEqual([
+      "salesql",
+      "apollo",
+      "hunter",
+      "prospeo",
+      "getprospect",
+      "kwinbi",
+    ]);
+  });
+
+  it("omits providers that are not configured", () => {
+    const steps = buildFinderSteps(
+      "https://www.linkedin.com/in/jane",
+      {
+        createApolloAdapter: () => apolloAdapter(),
+        hunterApiKey: "h",
+        jobrightDryRun: false,
+        salesqlDryRun: false,
+        canUseSalesql: () => true,
+        canUseApollo: () => true,
+        canUseHunter: () => true,
+      },
+      "previous_employer",
+    );
+    expect(steps.map((step) => step.id)).toEqual(["apollo", "hunter"]);
   });
 });

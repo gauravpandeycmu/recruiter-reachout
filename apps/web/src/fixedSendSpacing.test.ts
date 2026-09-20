@@ -14,8 +14,23 @@ describe("fixed send spacing", () => {
     expect(mainSource).not.toContain("INTERVAL_PRESETS");
   });
 
-  it("uses one minute for every web scheduling entry point", () => {
-    expect(apiSource).toContain("const FIXED_SEND_INTERVAL_MINUTES = 1");
+  it("uses thirty seconds for every web scheduling entry point", () => {
+    expect(apiSource).toContain("const FIXED_SEND_INTERVAL_MINUTES = 0.5");
     expect(apiSource.match(/intervalMinutes: FIXED_SEND_INTERVAL_MINUTES/g)).toHaveLength(3);
+  });
+
+  it("offers the queue shortcut only when a scheduled tail exists", () => {
+    expect(mainSource).toContain("canAddToScheduledQueue &&");
+    expect(mainSource).toContain("Add to queue");
+    expect(mainSource).toContain('appendToQueue: activeSchedulePreset === "queue"');
+  });
+
+  it("offers a bulk scheduled send that moves the exact queue into send progress", () => {
+    expect(mainSource).toContain("Send all now");
+    expect(mainSource).toContain("sendAllScheduledNow({");
+    expect(mainSource).toContain("scheduledSendAllItems.map((item) => item.queueItemId)");
+    expect(mainSource).toContain('setTrackedSendMode("now")');
+    expect(mainSource).toContain('getElementById("send-now-delivery-progress")');
+    expect(apiSource).toContain('request("/api/send-queue/send-all-now"');
   });
 });

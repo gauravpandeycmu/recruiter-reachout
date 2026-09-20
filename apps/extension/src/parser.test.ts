@@ -273,7 +273,50 @@ describe("extension parser", () => {
 
   it("suggests company from non-generic LinkedIn search keywords", () => {
     expect(inferCompanyFromSearchUrl("https://www.linkedin.com/search/results/people/?keywords=recruiter%20OpenAI")).toBe("OpenAI");
+    expect(inferCompanyFromSearchUrl("https://www.linkedin.com/search/results/people/?keywords=OpenAI%20recruiter")).toBe("OpenAI");
     expect(inferCompanyFromSearchUrl("https://www.linkedin.com/search/results/people/?keywords=technical%20recruiter")).toBeUndefined();
+  });
+
+  it("prefers LinkedIn's selected company filter over conflicting search keywords", () => {
+    document.body.innerHTML = `
+      <nav aria-label="Search filters">
+        <button aria-pressed="true" aria-label="Current company: Google">Google</button>
+      </nav>
+      <ul>
+        <li class="reusable-search__result-container">
+          <a href="https://www.linkedin.com/in/jason-wilson"><span aria-hidden="true">Jason Wilson</span></a>
+          <div class="entity-result__primary-subtitle">Executive Recruiter at Google</div>
+        </li>
+      </ul>
+    `;
+
+    const result = parseCurrentPage(
+      document,
+      "https://www.linkedin.com/search/results/people/?keywords=recruiter%20Meta&currentCompany=%5B%221441%22%5D",
+    );
+    expect(result.companySuggestion).toBe("Google");
+    expect(result.candidates[0]?.company).toBe("Google");
+  });
+
+  it("uses the common result-card employer when a selected company facet has no readable label", () => {
+    document.body.innerHTML = `
+      <ul>
+        <li class="reusable-search__result-container">
+          <a href="https://www.linkedin.com/in/ben-lee"><span aria-hidden="true">Ben Lee</span></a>
+          <div class="entity-result__primary-subtitle">Engineering Recruiter at Google</div>
+        </li>
+        <li class="reusable-search__result-container">
+          <a href="https://www.linkedin.com/in/kristina-t"><span aria-hidden="true">Kristina Taylor</span></a>
+          <div class="entity-result__primary-subtitle">Technical Recruiter at Google</div>
+        </li>
+      </ul>
+    `;
+
+    const result = parseCurrentPage(
+      document,
+      "https://www.linkedin.com/search/results/people/?keywords=Recruiter&currentCompany=%5B%221441%22%5D",
+    );
+    expect(result.companySuggestion).toBe("Google");
   });
 
   it("returns parse results with company suggestion without overriding explicit popup company", () => {
@@ -305,6 +348,33 @@ describe("extension parser", () => {
       linkedinUrl: "https://www.linkedin.com/in/sara-manchester-14b3a451/",
     });
     expect(result.companySuggestion).toBe("Google");
+  });
+
+  it.each([
+    ["Anshika Pathak", "She/Her", "Practo"],
+    ["Ashok Kumar", "Software developer engineer", "Practo"],
+    ["Monil Shah", "He/Him", "Spectrum"],
+    ["Ali Jackson", "Senior Recruiter", "Google"],
+  ])("does not mistake pronouns or a role for %s's company", (fullName, headline, company) => {
+    document.head.innerHTML = "";
+    document.title = `${fullName} | LinkedIn`;
+    document.body.innerHTML = `
+      <main>
+        <section aria-label="Primary content">
+          <h1>${fullName}</h1>
+          <p class="text-body-medium">${headline}</p>
+          <p>Greater Boston Area</p>
+          <button aria-label="Current company: ${company}">
+            <figure></figure>
+            <p>${company}</p>
+          </button>
+        </section>
+      </main>
+    `;
+
+    const result = parseCurrentPage(document, `https://www.linkedin.com/in/${fullName.toLowerCase().replace(/\s+/g, "-")}/`);
+    expect(result.companySuggestion).toBe(company);
+    expect(result.candidates[0]?.company).toBe(company);
   });
 
   it("accepts single-letter last initials like Ivan R from h1 and slug", () => {

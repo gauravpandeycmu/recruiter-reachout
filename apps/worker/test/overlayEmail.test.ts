@@ -17,4 +17,18 @@ describe("pickBestEmail", () => {
   it("rejects a previous-employer work address when a company tag is present", () => {
     expect(pickBestEmail("old.job@google.com Work", "Snowflake")).toBeUndefined();
   });
+
+  it("prefers personal mail when no company tag and work is error-flagged", () => {
+    const panel = "Emails old@other.com Work error catch-all person@gmail.com Verified Direct";
+    expect(pickBestEmail(panel)).toBe("person@gmail.com");
+  });
+
+  it("returns undefined when the panel has no email addresses", () => {
+    expect(pickBestEmail("No contact info yet", "Acme")).toBeUndefined();
+  });
+
+  it("keeps error-flagged current-company work when the employer is tagged", () => {
+    const panel = "Emails jane@acme.com Work error catch-all jane.personal@gmail.com Verified";
+    expect(pickBestEmail(panel, "Acme")).toBe("jane@acme.com");
+  });
 });

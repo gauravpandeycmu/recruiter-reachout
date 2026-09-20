@@ -210,7 +210,8 @@ describe("resolveGroveUnlockDays sticky storage", () => {
     const { resolveGroveUnlockDays } = await import("./groveTreeGuide");
     resolveGroveUnlockDays(4, 4);
     expect(localStorage.getItem("recruiter-reachout.grove-unlocked-trees")).toBeNull();
-    expect(localStorage.getItem("recruiter-reachout.grove-unlock-days.v2")).toBe("4");
+    expect(localStorage.getItem("recruiter-reachout.grove-goal-unlock-days.v3")).toBe("4");
+    expect(localStorage.getItem("recruiter-reachout.grove-unlock-days.v2")).toBeNull();
   });
 
   it("unlock species follow the live planting sequence for sticky days", async () => {

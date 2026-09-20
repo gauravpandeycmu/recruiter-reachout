@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createCandidate, startHttpApp, type HttpApp } from "./helpers/httpApp.js";
+import { createCandidate, ensureCompanyCopy, flushWake, startHttpApp, type HttpApp } from "./helpers/httpApp.js";
 
 describe("POST /api/send-queue/schedule HTTP integration (full API)", () => {
   let app: HttpApp;
@@ -10,6 +10,7 @@ describe("POST /api/send-queue/schedule HTTP integration (full API)", () => {
 
   it("returns 200 and queues jobs for extension-shaped candidates", async () => {
     app = await startHttpApp();
+    ensureCompanyCopy(app.store, "Acme");
     const candidate = app.store.upsertCandidate(
       createCandidate({
         fullName: "Extension Recruiter",
@@ -36,6 +37,8 @@ describe("POST /api/send-queue/schedule HTTP integration (full API)", () => {
 
   it("schedules overlapping slots without rejecting on hourly caps", async () => {
     app = await startHttpApp();
+    ensureCompanyCopy(app.store, "Acme");
+    ensureCompanyCopy(app.store, "Beta");
     process.env.HOURLY_SEND_LIMIT = "1";
     const first = app.store.upsertCandidate(
       createCandidate({
@@ -96,6 +99,7 @@ describe("POST /api/send-queue/reschedule-company HTTP integration (full API)", 
 
   it("Change time → tomorrow 8am via HTTP keeps the company batch", async () => {
     app = await startHttpApp();
+    ensureCompanyCopy(app.store, "Notion");
     process.env.GLOBAL_SEND_GAP_MINUTES = "4";
     process.env.DEFAULT_SCHEDULE_INTERVAL_MINUTES = "4";
 
@@ -157,7 +161,56 @@ describe("POST /api/send-queue/reschedule-company HTTP integration (full API)", 
       .filter((item) => people.some((person) => person.id === item.candidateId))
       .sort((a, b) => a.scheduledFor.localeCompare(b.scheduledFor));
     expect(after[0]!.scheduledFor).toBe(tomorrow8.toISOString());
-    expect(after[1]!.scheduledFor).toBe(new Date(tomorrow8.getTime() + 60_000).toISOString());
-    expect(after[2]!.scheduledFor).toBe(new Date(tomorrow8.getTime() + 2 * 60_000).toISOString());
+    expect(after[1]!.scheduledFor).toBe(new Date(tomorrow8.getTime() + 30_000).toISOString());
+    expect(after[2]!.scheduledFor).toBe(new Date(tomorrow8.getTime() + 60_000).toISOString());
+  });
+});
+
+describe("POST /api/send-queue/send-all-now HTTP integration (full API)", () => {
+  let app: HttpApp;
+
+  afterEach(async () => {
+    if (app) await app.close();
+  });
+
+  it("moves the exact requested schedule into the send-now progress lane", async () => {
+    app = await startHttpApp({ autoEnsureWorker: true });
+    process.env.GLOBAL_SEND_GAP_SECONDS = "30";
+    ensureCompanyCopy(app.store, "Acme");
+    ensureCompanyCopy(app.store, "Beta");
+    const people = [
+      app.store.upsertCandidate(createCandidate({ fullName: "Ada One", company: "Acme", email: "ada@acme.test" })),
+      app.store.upsertCandidate(createCandidate({ fullName: "Ben Two", company: "Beta", email: "ben@beta.test" })),
+    ];
+    const scheduled = await app.fetchJson<{ queued: Array<{ id: string }> }>("/api/send-queue/schedule", {
+      method: "POST",
+      body: JSON.stringify({
+        candidateIds: people.map((person) => person.id),
+        startAt: new Date(Date.now() + 2 * 60 * 60_000).toISOString(),
+        intervalMinutes: 0.5,
+        mode: "schedule",
+      }),
+      expectStatus: 200,
+    });
+    const queueItemIds = scheduled.body.queued.map((item) => item.id);
+
+    const response = await app.fetchJson<{
+      moved: number;
+      upcoming: Array<{ queueItemId: string; jobMode?: string; jobStatus?: string; scheduledFor: string }>;
+    }>("/api/send-queue/send-all-now", {
+      method: "POST",
+      body: JSON.stringify({ queueItemIds }),
+      expectStatus: 200,
+    });
+
+    expect(response.body.moved).toBe(2);
+    expect(response.body.upcoming.map((item) => item.queueItemId).sort()).toEqual([...queueItemIds].sort());
+    expect(response.body.upcoming.every((item) => item.jobMode === "send_now" && item.jobStatus === "pending")).toBe(
+      true,
+    );
+    const times = response.body.upcoming.map((item) => Date.parse(item.scheduledFor)).sort((a, b) => a - b);
+    expect(times[1]! - times[0]!).toBe(30_000);
+    await flushWake();
+    expect(app.spawnAttempts).toBeGreaterThan(0);
   });
 });

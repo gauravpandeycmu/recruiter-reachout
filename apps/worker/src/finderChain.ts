@@ -5,6 +5,8 @@ export interface FinderStep {
   id: FinderProvider;
   canUse: () => boolean | Promise<boolean>;
   run: () => Promise<DiscoveryOutcome>;
+  /** Browser-backed providers must not hold the entire fallback chain hostage. */
+  timeoutMs?: number;
 }
 
 export function finderQuotaMessage(id: FinderProvider): string {
@@ -29,6 +31,7 @@ export async function runFinderChain(args: {
   required?: boolean;
   onProviderUnavailable?: (provider: FinderProvider, reason: "quota_exhausted") => void | Promise<void>;
   onLookup?: (provider: FinderProvider, status: "found" | "not_found" | "error") => void | Promise<void>;
+  onProviderTimeout?: (provider: FinderProvider) => void | Promise<void>;
 }): Promise<DiscoveryOutcome | undefined> {
   const log = args.log ?? (() => {});
   if (args.steps.length === 0) {
@@ -55,7 +58,33 @@ export async function runFinderChain(args: {
     ran += 1;
     log(`Trying ${providerLabel(step.id)}.`);
     const startedAt = Date.now();
-    const outcome = await step.run();
+    const runPromise = step.run();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const outcome = step.timeoutMs
+      ? await Promise.race([
+          runPromise,
+          new Promise<DiscoveryOutcome>((resolve) => {
+            timeout = setTimeout(
+              () =>
+                resolve({
+                  status: "error",
+                  message: `${providerLabel(step.id)} timed out after ${step.timeoutMs}ms.`,
+                  provider: step.id,
+                  creditSpent: false,
+                }),
+              step.timeoutMs,
+            );
+          }),
+        ]).finally(() => {
+          if (timeout) clearTimeout(timeout);
+        })
+      : await runPromise;
+    if (outcome.status === "error" && outcome.message.includes("timed out after")) {
+      await args.onProviderTimeout?.(step.id);
+      // Recovery aborts the active page/navigation. Give the provider a brief
+      // chance to settle before another browser provider reuses that page.
+      await Promise.race([runPromise.catch(() => undefined), new Promise((resolve) => setTimeout(resolve, 2_000))]);
+    }
     log(`${providerLabel(step.id)} finished in ${((Date.now() - startedAt) / 1000).toFixed(1)}s (${outcome.status}).`);
     if (outcome.status === "not_found" && outcome.providerUnavailableReason === "quota_exhausted") {
       await args.onProviderUnavailable?.(step.id, "quota_exhausted");

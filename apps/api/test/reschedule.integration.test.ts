@@ -13,6 +13,7 @@ import {
 } from "../src/services.js";
 import { cancelScheduledSends } from "../src/sendJobs.js";
 import { Store } from "../src/store.js";
+import { ensureCompanyCopy } from "./helpers/httpApp.js";
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -63,6 +64,7 @@ describe("rescheduleQueuedSend integration", () => {
   });
 
   async function seed(name: string, email: string, company: string) {
+    ensureCompanyCopy(store, company);
     return store.upsertCandidate(
       createCandidate({
         fullName: name,
@@ -217,8 +219,8 @@ describe("rescheduleQueuedSend integration", () => {
       .sort((a, b) => a.scheduledFor.localeCompare(b.scheduledFor));
     expect(notionAfter.map((item) => item.scheduledFor)).toEqual([
       morningBlock.toISOString(),
+      new Date(morningBlock.getTime() + 30_000).toISOString(),
       new Date(morningBlock.getTime() + 60_000).toISOString(),
-      new Date(morningBlock.getTime() + 2 * 60_000).toISOString(),
     ]);
 
     const jobs = store
@@ -237,7 +239,7 @@ describe("rescheduleQueuedSend integration", () => {
     expect(new Date(seatgeekAfter[0]!).getTime()).toBeLessThan(morningBlock.getTime());
   });
 
-  it("rescheduleCompanyBatch lands a company on a new start with fixed one-minute spacing", async () => {
+  it("rescheduleCompanyBatch lands a company on a new start with fixed thirty-second spacing", async () => {
     // Use a stable far-future evening so local clock hour cannot collapse the window.
     const evening = new Date();
     evening.setDate(evening.getDate() + 2);
@@ -280,8 +282,8 @@ describe("rescheduleQueuedSend integration", () => {
       .filter((item) => [n1.id, n2.id, n3.id].includes(item.candidateId))
       .sort((a, b) => a.scheduledFor.localeCompare(b.scheduledFor));
     expect(fixed[0]!.scheduledFor).toBe(tomorrow8.toISOString());
-    expect(fixed[1]!.scheduledFor).toBe(new Date(tomorrow8.getTime() + 60_000).toISOString());
-    expect(fixed[2]!.scheduledFor).toBe(new Date(tomorrow8.getTime() + 2 * 60_000).toISOString());
+    expect(fixed[1]!.scheduledFor).toBe(new Date(tomorrow8.getTime() + 30_000).toISOString());
+    expect(fixed[2]!.scheduledFor).toBe(new Date(tomorrow8.getTime() + 60_000).toISOString());
   });
 
   it("rescheduleCompanyBatch clamps a past startAt to now instead of failing", async () => {

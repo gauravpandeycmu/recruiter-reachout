@@ -10,6 +10,7 @@ import {
   listKnownCompanyNames,
   type CaptureCompanyHints,
   clearActiveCandidates,
+  clearActiveEmailNotFoundCandidates,
   createCandidate,
   createEvent,
   generateContentForCompany,
@@ -192,6 +193,39 @@ describe("api services", () => {
     const payload = buildSendJobPayload(store, { candidateId: candidate.id, mode: "send_now" });
     expect(payload.subject).toContain("Acme role");
     expect(payload.textBody).toContain("Generated for Acme");
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("blocks sendable copy when only subject or only body is customized", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+    const candidate = store.upsertCandidate(
+      createCandidate({
+        fullName: "Jane Doe",
+        company: "Acme",
+        email: "jane@acme.com",
+        emailCandidates: [{ email: "jane@acme.com", pattern: "first", confidence: "high", reason: "test" }],
+      }),
+    );
+    setOutreachContent(store, { subject: "Quick note, {firstName}", body: "Hi {firstName},\n\n" });
+    await saveResume(store, {
+      fileName: "resume.pdf",
+      mimeType: "application/pdf",
+      dataBase64: Buffer.from("%PDF-1.4\nfake").toString("base64"),
+    });
+
+    store.updateCandidate(candidate.id, { customSubject: "Only subject", customBody: "   " });
+    expect(() =>
+      assertCandidateHasSendableCopy(store, store.listCandidates().find((c) => c.id === candidate.id)!),
+    ).toThrow(/Generate outreach/);
+
+    store.updateCandidate(candidate.id, { customSubject: "  ", customBody: "Only body text" });
+    expect(() =>
+      assertCandidateHasSendableCopy(store, store.listCandidates().find((c) => c.id === candidate.id)!),
+    ).toThrow(/Generate outreach/);
 
     store.close();
     await rm(directory, { recursive: true, force: true });
@@ -449,6 +483,54 @@ describe("api services", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("archives only active email_not_found recruiters and leaves others alone", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const ready = store.upsertCandidate(
+      createCandidate({
+        fullName: "Ready Person",
+        company: "Acme",
+        email: "ready@acme.com",
+        linkedinUrl: "https://www.linkedin.com/in/ready-person",
+      }),
+    );
+    const pending = store.upsertCandidate(
+      createCandidate({
+        fullName: "Still Looking",
+        company: "Acme",
+        linkedinUrl: "https://www.linkedin.com/in/still-looking",
+        status: "new",
+      }),
+    );
+    const missed = store.upsertCandidate(
+      createCandidate({
+        fullName: "No Email",
+        company: "Acme",
+        linkedinUrl: "https://www.linkedin.com/in/no-email",
+        status: "email_not_found",
+      }),
+    );
+    const alsoMissed = store.upsertCandidate(
+      createCandidate({
+        fullName: "Also Missed",
+        company: "Acme",
+        linkedinUrl: "https://www.linkedin.com/in/also-missed",
+        status: "email_not_found",
+      }),
+    );
+
+    const result = await clearActiveEmailNotFoundCandidates(store);
+    expect(result.archived.map((row) => row.id).sort()).toEqual([alsoMissed.id, missed.id].sort());
+    expect(store.listActiveCandidates().map((row) => row.id).sort()).toEqual([pending.id, ready.id].sort());
+    expect(store.listCandidates().find((row) => row.id === missed.id)?.isActive).toBe(false);
+    expect(store.listCandidates().find((row) => row.id === missed.id)?.archivedAt).toBeTruthy();
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("removes only matching active candidates from the dashboard", async () => {
     const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
     const store = new Store(join(directory, "store.sqlite"));
@@ -508,7 +590,7 @@ describe("email samples and per-company personalization", () => {
 
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(
+      vi.fn().mockImplementation(() => Promise.resolve(
         new Response(
           JSON.stringify({
             candidates: [
@@ -525,16 +607,16 @@ describe("email samples and per-company personalization", () => {
           }),
           { status: 200 },
         ),
-      ),
+      )),
     );
 
     const content = await generateContentForCompany(store, "Acme Corp");
-    expect(content).toMatchObject({ company: "acme corp", subject: "Hi {firstName} from Acme", source: "generated" });
+    expect(content).toMatchObject({ company: "acme corp", subject: "Software Engineer - Carnegie Mellon Grad", source: "generated" });
 
     const acmeCandidate = store.upsertCandidate(createCandidate({ fullName: "Jane Doe", company: "Acme Corp" }));
     const otherCandidate = store.upsertCandidate(createCandidate({ fullName: "John Roe", company: "Other Co" }));
 
-    expect(resolveContentForCandidate(store, acmeCandidate)?.subject).toBe("Hi {firstName} from Acme");
+    expect(resolveContentForCandidate(store, acmeCandidate)?.subject).toBe("Software Engineer - Carnegie Mellon Grad");
     expect(resolveContentForCandidate(store, otherCandidate)?.subject).toBe("Global subject");
 
     const customized = store.updateCandidate(acmeCandidate.id, {
@@ -681,7 +763,7 @@ describe("email samples and per-company personalization", () => {
       recipientTitles: ["Engineering Group Leader, Data Science at EWI"],
     });
 
-    expect(content.subject).toBe("EWI note");
+    expect(content.subject).toBe("Software Engineer - Carnegie Mellon Grad");
     expect(content.generationContext?.jobUrl).toContain("paycomonline.net");
     expect(content.generationContext?.jobDescription).toBeUndefined();
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes("generativelanguage.googleapis.com"))).toBe(
@@ -930,13 +1012,13 @@ describe("automatic email discovery bookkeeping", () => {
     expect(updated.email).toBeUndefined();
     expect(updated.lastError).toContain("no contact info found");
     expect(updated.discoveryAttempts).toBe(1);
-    expect(updated.status).not.toBe("email_not_found");
+    expect(updated.status).toBe("email_not_found");
 
     store.close();
     await rm(directory, { recursive: true, force: true });
   });
 
-  it("records an error result without spending the not_found retry budget, so it's retried indefinitely", async () => {
+  it("records a provider error once and waits for an explicit retry", async () => {
     const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
     const store = new Store(join(directory, "store.sqlite"));
     await store.load();
@@ -945,17 +1027,12 @@ describe("automatic email discovery bookkeeping", () => {
       createCandidate({ fullName: "Jane Doe", linkedinUrl: "https://linkedin.com/in/jane-doe" }),
     );
 
-    let updated = candidate;
-    // A transient/infra failure (e.g. a logged-out session) is not evidence the
-    // candidate is unfindable, so repeating it many times must never park the
-    // candidate the way repeated not_found results do.
-    for (let attempt = 1; attempt <= 5; attempt += 1) {
-      updated = await recordDiscoveryResult(store, candidate.id, { status: "error", message: "Automation timed out." });
-      expect(updated.discoveryAttempts ?? 0).toBe(0);
-      expect(updated.status).not.toBe("email_not_found");
-      expect(updated.lastError).toBe("Automation timed out.");
-    }
-    expect(nextDiscoveryCandidate(store)?.id).toBe(candidate.id);
+    const updated = await recordDiscoveryResult(store, candidate.id, { status: "error", provider: "jobright", message: "Automation timed out." });
+    expect(updated.discoveryAttempts).toBe(1);
+    expect(updated.status).not.toBe("email_not_found");
+    expect(updated.lastError).toContain("Jobright could not complete this lookup");
+    expect(updated.lastError).toContain("Automation timed out");
+    expect(nextDiscoveryCandidate(store)).toBeUndefined();
 
     store.close();
     await rm(directory, { recursive: true, force: true });
@@ -971,13 +1048,13 @@ describe("automatic email discovery bookkeeping", () => {
     );
 
     let updated = candidate;
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
+    for (let attempt = 1; attempt <= MAX_DISCOVERY_ATTEMPTS; attempt += 1) {
       updated = await recordDiscoveryResult(store, candidate.id, { status: "not_found" });
       expect(updated.discoveryAttempts).toBe(attempt);
     }
 
     expect(updated.status).toBe("email_not_found");
-    expect(updated.lastError).toContain("gave up after 3 attempts");
+    expect(updated.lastError).toContain("no contact info found");
     // Once parked, the worker must not keep re-selecting it (this is what previously
     // caused an infinite retry loop that burned Jobright lookups forever).
     expect(nextDiscoveryCandidate(store)?.id).toBeUndefined();
@@ -1024,7 +1101,7 @@ describe("automatic email discovery bookkeeping", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
-  it("requestDiscovery revives a given-up candidate and jumps it to the front of the queue", async () => {
+  it("requestDiscovery revives a prior miss at Finder without repeating Jobright", async () => {
     const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
     const store = new Store(join(directory, "store.sqlite"));
     await store.load();
@@ -1047,17 +1124,19 @@ describe("automatic email discovery bookkeeping", () => {
 
     expect(revived.status).toBe("new");
     expect(revived.discoveryAttempts).toBe(0);
-    expect(revived.lastDiscoveryAttemptAt).toBeUndefined();
+    expect(revived.lastDiscoveryAttemptAt).toBeDefined();
+    expect(revived.discoveryStage).toBe("finder");
+    expect(revived.forceProvider).toBe("finder");
     // Manual "look up now" must queue, not claim — otherwise the dashboard
     // steals the person from the worker the same way polling next-discovery did.
     expect(revived.discoveryClaimedAt).toBeUndefined();
-    expect(nextDiscoveryCandidate(store)?.id).toBe(stuck.id);
+    expect(nextDiscoveryCandidate(store, new Date(), "finder")?.id).toBe(stuck.id);
 
     store.close();
     await rm(directory, { recursive: true, force: true });
   });
 
-  it("requestDiscovery releases an in-flight worker claim so lookup can run immediately", async () => {
+  it("requestDiscovery preserves an in-flight claim instead of starting a duplicate lookup", async () => {
     const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
     const store = new Store(join(directory, "store.sqlite"));
     await store.load();
@@ -1070,9 +1149,13 @@ describe("automatic email discovery bookkeeping", () => {
     expect(claimed?.discoveryClaimedAt).toBeTruthy();
     expect(nextDiscoveryCandidate(store)).toBeUndefined();
 
-    const released = await requestDiscovery(store, candidate.id);
-    expect(released.discoveryClaimedAt).toBeUndefined();
-    expect(nextDiscoveryCandidate(store)?.id).toBe(candidate.id);
+    const requested = await requestDiscovery(store, candidate.id);
+    expect(requested.discoveryClaimedAt).toBe(claimed?.discoveryClaimedAt);
+    expect(requested.discoveryStage).toBe("jobright");
+    expect(requested.forceProvider).toBeUndefined();
+    // The live worker keeps sole ownership instead of a second queue claiming
+    // the same recruiter while the first Jobright lookup is still running.
+    expect(nextDiscoveryCandidate(store)).toBeUndefined();
 
     store.close();
     await rm(directory, { recursive: true, force: true });
@@ -1114,9 +1197,9 @@ describe("automatic email discovery bookkeeping", () => {
     expect(reAdded.discoveryClaimedAt).toBeUndefined();
     expect(reAdded.lastError).toBeUndefined();
 
-    // Teeth: one miss after re-add must not immediately re-park the person.
+    // One fresh request gets exactly one complete attempt.
     const afterOneMiss = await recordDiscoveryResult(store, candidate.id, { status: "not_found" });
-    expect(afterOneMiss.status).not.toBe("email_not_found");
+    expect(afterOneMiss.status).toBe("email_not_found");
     expect(afterOneMiss.discoveryAttempts).toBe(1);
 
     store.close();
@@ -1146,11 +1229,7 @@ describe("automatic email discovery bookkeeping", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
-  it("an automatic SalesQL not_found respects the shared attempts budget instead of parking immediately", async () => {
-    // Regression: an automatic Jobright -> SalesQL fallback miss used to park
-    // the candidate on the very first SalesQL not_found, skipping
-    // MAX_DISCOVERY_ATTEMPTS entirely — asymmetric with Jobright. Only an
-    // explicitly forced SalesQL check should still be a one-shot conclusion.
+  it("an automatic Finder-chain miss concludes after one complete pass", async () => {
     const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
     const store = new Store(join(directory, "store.sqlite"));
     await store.load();
@@ -1160,7 +1239,7 @@ describe("automatic email discovery bookkeeping", () => {
     );
 
     const first = await recordDiscoveryResult(store, candidate.id, { status: "not_found", provider: "salesql" });
-    expect(first.status).not.toBe("email_not_found");
+    expect(first.status).toBe("email_not_found");
     expect(first.discoveryAttempts).toBe(1);
 
     let updated = first;
@@ -1193,7 +1272,7 @@ describe("automatic email discovery bookkeeping", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
-  it("requestSalesqlSweep queues every active candidate still missing an email", async () => {
+  it("requestSalesqlSweep sends prior misses to Finder but gives untouched profiles their first Jobright check", async () => {
     const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
     const store = new Store(join(directory, "store.sqlite"));
     await store.load();
@@ -1207,15 +1286,25 @@ describe("automatic email discovery bookkeeping", () => {
     const missing2 = store.upsertCandidate(
       createCandidate({ fullName: "Missing Two", linkedinUrl: "https://linkedin.com/in/missing-two" }),
     );
+    store.updateCandidate(missing1.id, {
+      status: "email_not_found",
+      discoveryAttempts: 1,
+      lastDiscoveryAttemptAt: new Date().toISOString(),
+      lastError: "Jobright did not find an email.",
+    });
 
     const result = await requestSalesqlSweep(store);
 
     expect(result.queued).toBe(2);
     expect(result.candidateIds.sort()).toEqual([missing1.id, missing2.id].sort());
-    for (const id of result.candidateIds) {
-      expect(store.listCandidates().find((candidate) => candidate.id === id)?.forceProvider).toBe("finder");
-      expect(store.listCandidates().find((candidate) => candidate.id === id)?.discoveryStage).toBe("finder");
-    }
+    expect(store.listCandidates().find((candidate) => candidate.id === missing1.id)).toMatchObject({
+      forceProvider: "finder",
+      discoveryStage: "finder",
+    });
+    expect(store.listCandidates().find((candidate) => candidate.id === missing2.id)).toMatchObject({
+      discoveryStage: "jobright",
+    });
+    expect(store.listCandidates().find((candidate) => candidate.id === missing2.id)?.forceProvider).toBeUndefined();
 
     store.close();
     await rm(directory, { recursive: true, force: true });

@@ -145,15 +145,18 @@ export async function dismissJobrightPromoOverlays(page: Page): Promise<boolean>
   return false;
 }
 
+/** How a leftover Jobright "Contact Info Found" card was cleared (for logs/tests). */
+export type JobrightCardClearResult = "absent" | "closed" | "reloaded";
+
 /**
  * Clear a leftover Find Any Email result card so the next candidate is not
  * misread as already found. Prefer the card's close control (~300ms) over a
  * full page reload (~1–2s+). DOM-removing the card breaks subsequent lookups.
  */
-export async function clearJobrightContactResultCard(page: Page): Promise<boolean> {
+export async function clearJobrightContactResultCard(page: Page): Promise<JobrightCardClearResult> {
   const toast = page.getByText(JOBRIGHT_CONTACT_RESULT_TEXT).first();
   if (!(await toast.isVisible().catch(() => false))) {
-    return false;
+    return "absent";
   }
 
   const close = page.locator('[class*="finish-card-close"], svg[aria-label="close"]').first();
@@ -164,13 +167,17 @@ export async function clearJobrightContactResultCard(page: Page): Promise<boolea
       .then(() => true)
       .catch(() => false);
     if (gone || !(await toast.isVisible().catch(() => false))) {
-      return true;
+      // eslint-disable-next-line no-console -- adapter has no worker log hook
+      console.log("[jobright] cleared leftover contact card via close button");
+      return "closed";
     }
   }
 
   // Last resort — stale toast must not leak into the next candidate.
+  // eslint-disable-next-line no-console -- adapter has no worker log hook
+  console.log("[jobright] leftover contact card close failed — reloading page");
   await page.reload({ waitUntil: "domcontentloaded" }).catch(() => undefined);
-  return true;
+  return "reloaded";
 }
 
 /**

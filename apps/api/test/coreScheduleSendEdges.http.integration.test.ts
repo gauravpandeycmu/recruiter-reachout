@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createCandidate, startHttpApp, type HttpApp } from "./helpers/httpApp.js";
+import { createCandidate, ensureCompanyCopy, startHttpApp, type HttpApp } from "./helpers/httpApp.js";
 
 /**
  * Schedule / pause / resume / fail / retry — HTTP edges that drive Send UI state.
@@ -12,6 +12,7 @@ describe("core schedule + send HTTP — edge cases", () => {
   });
 
   function seedReady(name: string, company: string, email: string) {
+    ensureCompanyCopy(app.store, company);
     return app.store.upsertCandidate(
       createCandidate({
         fullName: name,

@@ -18,7 +18,12 @@ import { tryPrepareStreakExtension, waitForStreakServiceWorker } from "./streakE
 import { GMAIL_USER_DATA_DIR } from "./setupSessions.js";
 import { runSendPass } from "./sendPass.js";
 import { acquireWorkerLock, releaseWorkerLock } from "./workerLock.js";
-import { decideHibernation, shouldKeepLinkedInMessagingWarm, shouldSelfExit } from "./workerHibernate.js";
+import {
+  decideHibernation,
+  shouldKeepLinkedInMessagingWarm,
+  shouldPrioritizeEmailDiscovery,
+  shouldSelfExit,
+} from "./workerHibernate.js";
 import { shouldPreferSalesqlBrowserForLinkedInCapture } from "./linkedinCaptureBrowser.js";
 
 const JOBRIGHT_DRY_RUN = (process.env.JOBRIGHT_DRY_RUN ?? "true").toLowerCase() !== "false";
@@ -205,7 +210,11 @@ async function main(): Promise<void> {
     if (!pageLooksDead(jobrightPage, jobrightContext)) {
       return jobrightPage!;
     }
-    log("Waking Jobright browser for discovery…");
+    log(
+      `Waking Jobright browser for discovery (${
+        (process.env.JOBRIGHT_HEADLESS ?? "true").toLowerCase() !== "false" ? "headless" : "headed"
+      })…`,
+    );
     jobrightContext = await launchPersistentBrowserContext({
       userDataDir: JOBRIGHT_USER_DATA_DIR,
       headless: (process.env.JOBRIGHT_HEADLESS ?? "true").toLowerCase() !== "false",
@@ -273,6 +282,11 @@ async function main(): Promise<void> {
         salesqlContextHeadless = undefined;
       }
       await closeSiblingSalesqlDirContext("salesql");
+      if (requiredMode === "salesql" && configuredHeadless) {
+        log(
+          "SalesQL: SALESQL_HEADLESS=true is ignored — forcing headed (content UI does not inject in headless Chromium).",
+        );
+      }
       log(`Waking ${requiredMode === "salesql" ? "SalesQL" : "Apollo/LinkedIn"} finder browser (${desiredHeadless ? "headless" : "headed"})…`);
       salesqlContext = await launchPersistentBrowserContext({
         userDataDir: SALESQL_USER_DATA_DIR,
@@ -341,12 +355,16 @@ async function main(): Promise<void> {
       gmailPage = undefined;
     }
 
-    log(`Waking Gmail browser (${reason})…`);
+    const gmailHeadless = isGmailHeadless();
+    log(`Waking Gmail browser (${reason}, ${gmailHeadless ? "headless" : "headed"})…`);
     gmailContext = await launchPersistentBrowserContext({
       userDataDir: GMAIL_USER_DATA_DIR,
-      headless: isGmailHeadless(),
+      headless: gmailHeadless,
       extensionPaths: [streakExtensionPath],
     });
+    log(
+      `Gmail Chromium launched (${gmailHeadless ? "headless" : "headed"}; extensions force headed unless allowHeadlessExtensions).`,
+    );
     gmailPage = pickGmailPage(gmailContext) ?? (await gmailContext.newPage());
     // Cold start after hibernate: land on inbox so session + Streak inject before compose.
     await gmailPage
@@ -373,10 +391,11 @@ async function main(): Promise<void> {
       return linkedinCapturePage!;
     }
     await closeSiblingSalesqlDirContext("linkedin");
-    log("Waking LinkedIn capture browser…");
+    const captureHeadless = (process.env.SALESQL_HEADLESS ?? "true").toLowerCase() !== "false";
+    log(`Waking LinkedIn capture browser (${captureHeadless ? "headless" : "headed"})…`);
     linkedinOnlyContext = await launchPersistentBrowserContext({
       userDataDir: SALESQL_USER_DATA_DIR,
-      headless: (process.env.SALESQL_HEADLESS ?? "true").toLowerCase() !== "false",
+      headless: captureHeadless,
     });
     linkedinCapturePage = linkedinOnlyContext.pages()[0] ?? (await linkedinOnlyContext.newPage());
     return linkedinCapturePage;
@@ -420,6 +439,7 @@ async function main(): Promise<void> {
   let sendPassInFlight = false;
   let linkedinMessagePassInFlight = false;
   let discoveryPassesInFlight = 0;
+  let discoveryBatchInFlight = false;
   let linkedinMessageWarmUntil = 0;
 
   /** Single source of truth for turning a pending-work snapshot into a hibernation
@@ -557,6 +577,13 @@ async function main(): Promise<void> {
       }
 
       const decision = computeDecision(pending);
+      // Finish an already-claimed Gmail send, then let newly queued email
+      // discovery run before the next delivery. This keeps the UI responsive
+      // without ever closing Gmail mid-compose or mutating frozen SendJobs.
+      const prioritizeEmailDiscovery = shouldPrioritizeEmailDiscovery({
+        hasDiscovery: pending?.hasDiscovery,
+        hasInProgressSend: pending?.hasInProgressSend,
+      });
       const hasLiveLinkedInMessagingPage =
         !pageLooksDead(linkedinCapturePage, linkedinOnlyContext) ||
         (linkedinCapturePage === salesqlPage && !pageLooksDead(salesqlPage, salesqlContext));
@@ -564,17 +591,17 @@ async function main(): Promise<void> {
         hasLiveLinkedInPage: hasLiveLinkedInMessagingPage,
         warmUntilMs: linkedinMessageWarmUntil,
         nowMs: Date.now(),
-        needGmail: decision.needGmail,
+        needGmail: decision.needGmail && !prioritizeEmailDiscovery,
       });
 
-      if (!decision.needGmail) {
+      if (!decision.needGmail || prioritizeEmailDiscovery) {
         await hibernateGmail(decision.reason);
       }
       if (!decision.needDiscovery && !keepLinkedInMessagingWarm) {
         await hibernateDiscoveryBrowsers(decision.reason);
       }
 
-      if (decision.needGmail) {
+      if (decision.needGmail && !prioritizeEmailDiscovery) {
         // Warm Gmail (+ Streak) during the pre-send window even when nothing is claimable yet.
         // runSendPass alone only opens the page when a job is claimed — that skips the entire warmup.
         await ensureGmailPage(
@@ -599,11 +626,12 @@ async function main(): Promise<void> {
         }
       }
 
-      // Prefer one Chromium at a time: while Gmail is in the send window, defer discovery/capture.
-      if (decision.needDiscovery && !decision.needGmail) {
+      // Focus-stealing LinkedIn overlay work still waits for Gmail. Jobright has
+      // an isolated context and may continue while the paced send queue runs.
+      if (decision.needDiscovery) {
         // Do NOT open SalesQL Chromium just to poll empty capture/enrich queues —
         // extensions force a headed window (blank tab + SalesQL signup chrome).
-        if (pending?.hasCapture || pending?.hasEnrich || pending?.hasLinkedInMessage) {
+        if (!decision.needGmail && (pending?.hasCapture || pending?.hasEnrich || pending?.hasLinkedInMessage)) {
           const capturePage = await ensureLinkedInCapturePage();
           if (pending?.hasLinkedInMessage) {
             const messagingPass = await runLinkedInMessagingPassTracked({ apiClient, page: capturePage, log });
@@ -635,13 +663,17 @@ async function main(): Promise<void> {
           }
         }
 
-        if (pending?.hasDiscovery) {
+        if (pending?.hasDiscovery && !discoveryBatchInFlight) {
           // Two isolated durable queues run concurrently. Jobright only claims
           // Jobright-stage rows; Finder only claims rows Jobright already handed
           // off. Both reports remain keyed by candidate id, so completion order
           // cannot attach one recruiter's email to another recruiter.
           const hasJobright = pending.hasJobrightDiscovery ?? true;
-          const hasFinder = pending.hasFinderDiscovery ?? false;
+          // Finder fallbacks may use focus-stealing extension overlays; defer
+          // those during Gmail, while the isolated Jobright producer continues.
+          const hasFinder =
+            (prioritizeEmailDiscovery || !decision.needGmail) &&
+            (pending.hasFinderDiscovery ?? false);
           const passes: Array<Promise<unknown>> = [];
           let jobrightProducerDone = !hasJobright;
 
@@ -676,7 +708,7 @@ async function main(): Promise<void> {
           // Start the consumer even when Finder is initially empty. It waits
           // for Jobright handoffs instead of delaying every fallback until the
           // next outer worker cycle.
-          if (hasFinder || hasJobright) {
+          if ((prioritizeEmailDiscovery || !decision.needGmail) && (hasFinder || hasJobright)) {
             passes.push(
               (async () => {
                 const maximumClaims = Math.max(
@@ -731,11 +763,22 @@ async function main(): Promise<void> {
             );
           }
 
-          await Promise.all(passes);
-          // Recheck pending work promptly after misses/errors as well as hits.
-          // New explicit actions can interrupt this inter-lookup pause.
-          await interruptibleIdleSleep(DISCOVERY_DELAY_MS);
-          continue;
+          discoveryBatchInFlight = true;
+          const discoveryBatch = Promise.all(passes)
+            .catch((error) => {
+              log(`Background discovery batch failed: ${error instanceof Error ? error.message : String(error)}`);
+            })
+            .finally(() => {
+              discoveryBatchInFlight = false;
+            });
+          if (prioritizeEmailDiscovery) {
+            // One finder overlay at a time. Wait for this batch to settle before
+            // reopening Gmail for the next saved delivery.
+            await discoveryBatch;
+            await delay(250);
+            continue;
+          }
+          void discoveryBatch;
         }
       }
 
@@ -778,14 +821,16 @@ async function main(): Promise<void> {
           : decision.sleepMs || IDLE_DELAY_MS,
         1_000,
       );
-      const minutes = Math.max(1, Math.round(sleepFor / 60_000));
+      const recheckLabel = sleepFor < 60_000
+        ? `~${Math.max(1, Math.round(sleepFor / 1_000))}s`
+        : `~${Math.max(1, Math.round(sleepFor / 60_000))}m`;
       await apiClient
         .reportWorkerStatus({
           phase: "idle",
           message:
             decision.needGmail || decision.needDiscovery
               ? `Working (${decision.reason}).`
-              : `Browsers asleep — ${decision.reason}. Recheck ~${minutes}m.`,
+              : `Browsers asleep — ${decision.reason}. Recheck ${recheckLabel}.`,
         })
         .catch(() => {});
       await interruptibleIdleSleep(sleepFor);

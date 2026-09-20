@@ -22,6 +22,7 @@ import {
   addEmailSample,
   applyBatchPreviewEdits,
   clearActiveCandidates,
+  clearActiveEmailNotFoundCandidates,
   generateCompanyContent,
   getAnalytics,
   getEnvStatus,
@@ -38,6 +39,7 @@ import {
   updateAnalyticsGoal,
   type UpcomingSendView,
   scheduleSends,
+  sendAllScheduledNow,
   addPersonToScheduledBatch,
   cancelScheduledSends,
   pausePendingSends,
@@ -77,7 +79,13 @@ import {
   stripTestModePrefix,
   summarizeUpcomingSends,
   filterScheduledTabItems,
+  nextScheduledQueueStart,
+  formatScheduledSendAllEstimate,
+  listSendNowUpcoming,
+  shouldPreserveSendNowTrackingOnClearList,
   buildSendSessionFromUpcoming,
+  mergeSendSessions,
+  clampRecipientPage,
   formatCompanyBlockShiftMessage,
   discoveryStatusLabel,
   peekNextDiscoveryCandidate,
@@ -87,7 +95,8 @@ import {
 import { appDataPollKey, shouldApplyPollResult, workerStatusPollKey } from "./pollKeys";
 import {
   buildSendProgressRows,
-  compactSendChecklist,
+  buildSendProgressRowsFromSession,
+  formatSendEta,
   localYmd,
   resolveQueueProgressStatus,
 } from "./sendProgress";
@@ -163,7 +172,7 @@ type UiPrefs = {
   companyName?: string;
 };
 
-const DEFAULT_SEND_INTERVAL_MINUTES = 1;
+const DEFAULT_SEND_INTERVAL_MINUTES = 0.5;
 
 function readStoredTab(): Tab {
   try {
@@ -526,6 +535,16 @@ function formatNextUpWhen(iso: string, dueNow: boolean): string {
   if (dueNow) {
     return "Due now";
   }
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "—";
+  const today = new Date();
+  const tomorrow = new Date(today);
+  tomorrow.setDate(today.getDate() + 1);
+  const sameDay = (a: Date, b: Date) =>
+    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  const time = date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  if (sameDay(date, today)) return `Today · ${time}`;
+  if (sameDay(date, tomorrow)) return `Tomorrow · ${time}`;
   return formatShortWhen(iso);
 }
 
@@ -1266,6 +1285,7 @@ function App() {
   const [editingEmailId, setEditingEmailId] = useState<string>();
   const [emailDraft, setEmailDraft] = useState("");
   const [emailEditBusy, setEmailEditBusy] = useState(false);
+  const [copiedRecipientValue, setCopiedRecipientValue] = useState<string>();
   const [historyPeoplePage, setHistoryPeoplePage] = useState<Record<string, number>>({});
   const [companyFact, setCompanyFact] = useState("");
   const [roleTitle, setRoleTitle] = useState("");
@@ -1321,6 +1341,7 @@ function App() {
   const [scheduledEditSubject, setScheduledEditSubject] = useState("");
   const [scheduledEditBody, setScheduledEditBody] = useState("");
   const [scheduledEditBusy, setScheduledEditBusy] = useState(false);
+  const [sendAllBusy, setSendAllBusy] = useState(false);
   const [rescheduleCompany, setRescheduleCompany] = useState<string | null>(null);
   const [rescheduleAt, setRescheduleAt] = useState("");
   const [rescheduleBusy, setRescheduleBusy] = useState(false);
@@ -1388,39 +1409,9 @@ function App() {
 
   const candidates = state?.candidates ?? [];
 
-  /** Keep Send tab looking like a normal batch after archive-on-queue (Send now). */
-  const sessionCandidates = useMemo((): RecruiterCandidate[] => {
-    if (!sendSession || trackedSendMode !== "now" || sendSession.people.length === 0) {
-      return [];
-    }
-    return sendSession.people.map(
-      (person) =>
-        ({
-          id: person.candidateId,
-          fullName: person.fullName,
-          firstName: person.fullName.split(/\s+/)[0] ?? person.fullName,
-          email: person.email,
-          company: person.company ?? sendSession.company,
-          profilePhotoUrl: person.profilePhotoUrl,
-          emailCandidates: person.email
-            ? [
-                {
-                  email: person.email,
-                  pattern: "api_verified",
-                  confidence: "high",
-                  reason: "From scheduled send",
-                },
-              ]
-            : [],
-          status: "email_guessed",
-          isActive: true,
-          createdAt: sendSession.startedAt,
-          updatedAt: sendSession.startedAt,
-        }) as RecruiterCandidate,
-    );
-  }, [sendSession, trackedSendMode]);
-
-  const displayCandidates = candidates.length > 0 ? candidates : sessionCandidates;
+  // The editable next batch is independent from delivery progress. Queued people
+  // remain in sendSession and must never reappear as editable recipients.
+  const displayCandidates = candidates;
 
   const sortedBacklog = useMemo(
     () => sortRows(backlog, backlogSort, (job, key) => job[key]),
@@ -1505,18 +1496,14 @@ function App() {
         latestAt.set(name, stamp);
       }
     }
-    const sessionCompany = sendSession?.company?.trim();
-    if (sessionCompany && !latestAt.has(sessionCompany)) {
-      latestAt.set(sessionCompany, sendSession!.startedAt);
-    }
     return [...latestAt.entries()]
       .sort((a, b) => b[1].localeCompare(a[1]))
       .map(([name]) => name);
-  }, [displayCandidates, sendSession]);
+  }, [displayCandidates]);
 
   const batchCompany = batchCompanies.includes(batchCompanyChoice)
     ? batchCompanyChoice
-    : batchCompanies[0] ?? sendSession?.company;
+    : batchCompanies[0];
 
   useEffect(() => {
     if (!batchCompany) {
@@ -1588,10 +1575,10 @@ function App() {
 
   useEffect(() => {
     setRecipientPage(0);
-  }, [batchCompany, displayCandidates.length]);
+  }, [batchCompany]);
 
   const recipientPageCount = Math.max(1, Math.ceil(displayCandidates.length / RECIPIENT_PAGE_SIZE));
-  const safeRecipientPage = Math.min(recipientPage, recipientPageCount - 1);
+  const safeRecipientPage = clampRecipientPage(recipientPage, displayCandidates.length, RECIPIENT_PAGE_SIZE);
   const pagedCandidates = displayCandidates.slice(
     safeRecipientPage * RECIPIENT_PAGE_SIZE,
     (safeRecipientPage + 1) * RECIPIENT_PAGE_SIZE,
@@ -1806,6 +1793,49 @@ function App() {
     }
   }, [batchSendQueue, trackedSendQueueIds.length, sendSession, trackedSendMode]);
 
+  // Recover Send-now progress when tracking was wiped (e.g. Remove all) but the
+  // server still has live send_now jobs. Rebuild session + queue ids from upcoming.
+  useEffect(() => {
+    const sendNow = listSendNowUpcoming(state?.upcomingSends ?? []);
+    if (sendNow.length === 0) {
+      return;
+    }
+    const needsMode = trackedSendMode !== "now";
+    const needsIds = trackedSendQueueIds.length === 0;
+    const needsSession = !sendSession?.people?.length;
+    if (!needsMode && !needsIds && !needsSession) {
+      return;
+    }
+    if (needsMode) {
+      setTrackedSendMode("now");
+      writeTrackedSendMode("now");
+    }
+    if (needsIds) {
+      const ids = sendNow.map((item) => item.queueItemId);
+      setTrackedSendQueueIds(ids);
+      writeTrackedSendQueueIds(ids);
+    }
+    if (needsSession) {
+      const company = sendNow[0]?.company?.trim() || "Batch";
+      const session = buildSendSessionFromUpcoming(
+        company,
+        sendNow.map((item) => ({
+          queueItemId: item.queueItemId,
+          candidateId: item.candidateId,
+          fullName: item.fullName,
+          email: item.email,
+          company: item.company,
+          profilePhotoUrl: item.profilePhotoUrl,
+          subject: item.subject,
+          body: item.body,
+        })),
+        { subject: sendNow[0]?.subject, body: sendNow[0]?.body },
+      );
+      setSendSession(session);
+      writeSendSession(session);
+    }
+  }, [state?.upcomingSends, trackedSendMode, trackedSendQueueIds.length, sendSession]);
+
   const scheduledSendCount = batchSendQueue.filter((item) => item.status === "scheduled").length;
   const upcomingSends = state?.upcomingSends ?? [];
   /** Later-dated schedule queue — send-now bumps move to the Send progress bar instead. */
@@ -1813,6 +1843,22 @@ function App() {
     () => filterScheduledTabItems(upcomingSends),
     [upcomingSends],
   );
+  const scheduledSendAllItems = useMemo(
+    () => scheduledLaterSends.filter((item) => item.jobStatus !== "in_progress"),
+    [scheduledLaterSends],
+  );
+  const scheduledSendAllHasInProgress = scheduledLaterSends.some(
+    (item) => item.jobStatus === "in_progress",
+  );
+  const scheduledSendAllEstimate = formatScheduledSendAllEstimate(
+    scheduledSendAllItems.length,
+    scheduleIntervalMinutes,
+  );
+  const queueAppendStart = useMemo(
+    () => nextScheduledQueueStart(scheduledLaterSends, new Date(), scheduleIntervalMinutes),
+    [scheduledLaterSends, scheduleIntervalMinutes],
+  );
+  const canAddToScheduledQueue = queueAppendStart !== null;
   const upcomingSummary = useMemo(() => summarizeUpcomingSends(scheduledLaterSends), [scheduledLaterSends]);
   const upcomingByCompany = useMemo(() => groupUpcomingByCompany(scheduledLaterSends), [scheduledLaterSends]);
   const isSendingPhase =
@@ -1855,23 +1901,32 @@ function App() {
     if (hasFailures || hasPaused) {
       return;
     }
-    // All sent — clear session.
-    setTrackedSendQueueIds([]);
-    writeTrackedSendQueueIds([]);
-    setTrackedSendMode(null);
-    writeTrackedSendMode(null);
-    setSendSession(null);
-    writeSendSession(null);
+    // All sent — keep the home-feed progress panel until the user dismisses it.
+    // Clearing here made "Send now" look like it vanished back to an empty home.
   }, [trackedSendQueueIds, isSendingPhase, state?.sendQueue]);
 
   const sendActiveCandidateId =
     isSendingPhase && workerStatus?.status?.candidateId && batchCandidateIds.has(workerStatus.status.candidateId)
       ? workerStatus.status.candidateId
       : undefined;
-  const sendProgressRows = useMemo(
-    () => buildSendProgressRows(batchSendQueue, sendProgressPeople, sendActiveCandidateId),
-    [batchSendQueue, sendProgressPeople, sendActiveCandidateId],
-  );
+  const sendProgressRows = useMemo(() => {
+    if (trackedSendMode === "now" && sendSession) {
+      return buildSendProgressRowsFromSession(
+        batchSendQueue,
+        sendSession,
+        sendActiveCandidateId,
+        scheduleIntervalMinutes,
+      );
+    }
+    return buildSendProgressRows(batchSendQueue, sendProgressPeople, sendActiveCandidateId);
+  }, [
+    trackedSendMode,
+    sendSession,
+    batchSendQueue,
+    sendProgressPeople,
+    sendActiveCandidateId,
+    scheduleIntervalMinutes,
+  ]);
   const sendProgress = useMemo(() => {
     if (sendProgressRows.length === 0) {
       return null;
@@ -1893,11 +1948,6 @@ function App() {
     const overallEnd: SendProgressRow =
       remaining.length > 0 ? remaining[remaining.length - 1]! : sendProgressRows[sendProgressRows.length - 1]!;
     const percent = total === 0 ? 0 : Math.round((doneCount / total) * 100);
-    const checklist = compactSendChecklist(sendProgressRows);
-    const first = checklist[0];
-    const last = checklist[checklist.length - 1];
-    const firstIndex = first ? sendProgressRows.findIndex((row) => row.id === first.id) : 0;
-    const lastIndex = last ? sendProgressRows.findIndex((row) => row.id === last.id) : -1;
     const activelyQueuing = sendProgressRows.some(
       (row) => row.status === "scheduled" || row.status === "sending",
     );
@@ -1913,9 +1963,6 @@ function App() {
       paused: !activelyQueuing && !isSendingPhase && pausedCount > 0,
       current,
       overallEnd,
-      checklist,
-      omittedBefore: Math.max(0, firstIndex),
-      omittedAfter: lastIndex >= 0 ? Math.max(0, sendProgressRows.length - 1 - lastIndex) : 0,
     };
   }, [sendProgressRows, isSendingPhase]);
 
@@ -1963,7 +2010,12 @@ function App() {
         : null;
 
   const scheduleSummary = useMemo(() => {
-    const start = activeSchedulePreset === "now" ? new Date() : parseDatetimeLocal(scheduleStartAt);
+    const start =
+      activeSchedulePreset === "now"
+        ? new Date()
+        : activeSchedulePreset === "queue" && queueAppendStart
+          ? queueAppendStart
+          : parseDatetimeLocal(scheduleStartAt);
     if (Number.isNaN(start.getTime()) || readyCandidates.length === 0) {
       return null;
     }
@@ -1985,7 +2037,16 @@ function App() {
       }),
       durationMin: Math.max(0, readyCandidates.length - 1) * scheduleIntervalMinutes,
     };
-  }, [scheduleStartAt, readyCandidates.length]);
+  }, [activeSchedulePreset, queueAppendStart, readyCandidates.length, scheduleStartAt, scheduleIntervalMinutes]);
+
+  useEffect(() => {
+    if (activeSchedulePreset !== "queue") return;
+    if (!queueAppendStart) {
+      setActiveSchedulePreset(null);
+      return;
+    }
+    setScheduleStartAt(toDatetimeLocalValue(queueAppendStart));
+  }, [activeSchedulePreset, queueAppendStart?.getTime()]);
 
   function applySchedulePreset(presetId: string) {
     const preset = SCHEDULE_PRESETS.find((entry) => entry.id === presetId);
@@ -1994,6 +2055,18 @@ function App() {
     }
     setScheduleStartAt(toDatetimeLocalValue(preset.resolve()));
     setActiveSchedulePreset(presetId);
+  }
+
+  function applyQueuePreset() {
+    if (!queueAppendStart) return;
+    setScheduleStartAt(toDatetimeLocalValue(queueAppendStart));
+    setActiveSchedulePreset("queue");
+  }
+
+  function selectedScheduleStart(): Date {
+    if (activeSchedulePreset === "now") return new Date();
+    if (activeSchedulePreset === "queue" && queueAppendStart) return queueAppendStart;
+    return parseDatetimeLocal(scheduleStartAt);
   }
 
   async function refresh() {
@@ -2085,8 +2158,8 @@ function App() {
       return;
     }
     const unlockDays = resolveGroveUnlockDays(
-      analytics.goalProgress.sendStreak,
-      analytics.goalProgress.longestSendStreak,
+      analytics.goalProgress.streak,
+      analytics.usage.longestStreak,
     );
     setGroveUnlockDays(unlockDays);
     let cancelled = false;
@@ -2098,7 +2171,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [analytics?.goalProgress.sendStreak, analytics?.goalProgress.longestSendStreak]);
+  }, [analytics?.goalProgress.streak, analytics?.usage.longestStreak]);
 
   async function loadTestModeSettings() {
     try {
@@ -2240,7 +2313,11 @@ function App() {
 
     autosize(previewBodyRef.current);
     autosize(linkedinMessageRef.current);
-  }, [previewBody, linkedinMessage, previewMotion, selectedId]);
+  // Saving/refetching remounts `.preview-content` via previewAnimKey even when
+  // the text itself is unchanged. Re-run sizing for that new textarea; without
+  // this dependency it falls back to the one-row/min-height layout and visually
+  // clips a successfully saved email until the page is refreshed.
+  }, [previewBody, linkedinMessage, previewMotion, selectedId, previewAnimKey]);
 
   // Grove weather prefs live in localStorage; keep App state in sync so Grow always re-renders
   useEffect(() => {
@@ -2476,7 +2553,15 @@ function App() {
     }
   }
 
-  async function savePreviewEdits(candidate: RecruiterCandidate): Promise<boolean> {
+  const savePreviewInFlightRef = useRef<Promise<boolean> | null>(null);
+
+  async function savePreviewEdits(
+    candidate: RecruiterCandidate,
+    options?: { quiet?: boolean },
+  ): Promise<boolean> {
+    if (savePreviewInFlightRef.current) {
+      return savePreviewInFlightRef.current;
+    }
     const subjectText = previewSubject.trim();
     const bodyText = previewBody.trim();
     if (!subjectText || !bodyText) {
@@ -2489,28 +2574,50 @@ function App() {
       return false;
     }
     setPreviewSaving(true);
+    const run = (async (): Promise<boolean> => {
+      try {
+        const result = await applyBatchPreviewEdits({
+          company,
+          subject: subjectText,
+          body: bodyText,
+          linkedinSubject: linkedinSubject.trim() || undefined,
+          linkedinMessage: linkedinMessage.trim() || undefined,
+          sourceCandidateId: candidate.id,
+        });
+        // Keep send-now session snapshot in sync so switching recipients doesn't
+        // restore the pre-edit copy from session storage.
+        setSendSession((prev) => {
+          if (!prev) {
+            return prev;
+          }
+          const next = { ...prev, subject: subjectText, body: bodyText };
+          writeSendSession(next);
+          return next;
+        });
+        await runPreview(candidate);
+        setLinkedinSubject(fillRecipientTokens(result.companyContent.linkedinSubject ?? "", candidate));
+        setLinkedinMessage(fillRecipientTokens(result.companyContent.linkedinMessage ?? "", candidate));
+        if (!options?.quiet) {
+          setMessage(
+            `Saved email and LinkedIn copy for all ${companyCandidates.length} recipient(s) in ${result.companyContent.companyDisplayName}.`,
+          );
+        }
+        await refresh();
+        return true;
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : "Failed to save preview edits.");
+        return false;
+      } finally {
+        setPreviewSaving(false);
+      }
+    })();
+    savePreviewInFlightRef.current = run;
     try {
-      const result = await applyBatchPreviewEdits({
-        company,
-        subject: subjectText,
-        body: bodyText,
-        linkedinSubject: linkedinSubject.trim() || undefined,
-        linkedinMessage: linkedinMessage.trim() || undefined,
-        sourceCandidateId: candidate.id,
-      });
-      await runPreview(candidate);
-      setLinkedinSubject(fillRecipientTokens(result.companyContent.linkedinSubject ?? "", candidate));
-      setLinkedinMessage(fillRecipientTokens(result.companyContent.linkedinMessage ?? "", candidate));
-      setMessage(
-        `Saved email and LinkedIn copy for all ${companyCandidates.length} recipient(s) in ${result.companyContent.companyDisplayName}.`,
-      );
-      await refresh();
-      return true;
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Failed to save preview edits.");
-      return false;
+      return await run;
     } finally {
-      setPreviewSaving(false);
+      if (savePreviewInFlightRef.current === run) {
+        savePreviewInFlightRef.current = null;
+      }
     }
   }
 
@@ -2541,7 +2648,48 @@ function App() {
       setPreviewDirty(false);
       return true;
     }
-    return savePreviewEdits(candidate);
+    return savePreviewEdits(candidate, { quiet: true });
+  }
+
+  async function selectRecipient(nextId: string) {
+    if (nextId === selectedId) {
+      return;
+    }
+    const current = selected;
+    if (current && previewDirty && previewLoadedId === current.id) {
+      const ok = await ensurePreviewSaved(current);
+      if (!ok) {
+        return;
+      }
+    }
+    setSelectedId(nextId);
+  }
+
+  async function copyRecipientValue(candidateId: string, kind: "name" | "email", value: string) {
+    const key = `${candidateId}:${kind}`;
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopiedRecipientValue(key);
+      window.setTimeout(() => setCopiedRecipientValue((current) => current === key ? undefined : current), 1600);
+    } catch {
+      setMessage(`Could not copy the ${kind} automatically.`);
+    }
+  }
+
+  async function flushPreviewOnBlur(event?: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) {
+    // Moving between subject and body is still editing the same email. Save
+    // only when focus actually leaves the mail card, matching the UI promise.
+    const nextFocus = event?.relatedTarget;
+    if (nextFocus instanceof Element && nextFocus.closest(".editable-mail-preview")) {
+      return;
+    }
+    if (!selected || !previewDirty || previewLoadedId !== selected.id || previewSaving) {
+      return;
+    }
+    if (!previewSubject.trim() || !previewBody.trim()) {
+      return;
+    }
+    await savePreviewEdits(selected, { quiet: true });
   }
 
   async function chooseEmail(candidate: RecruiterCandidate, email: string) {
@@ -2592,6 +2740,7 @@ function App() {
   }
 
   async function clearSendList() {
+    const preserveSendProgress = shouldPreserveSendNowTrackingOnClearList(trackedSendMode, sendSession);
     const result = await clearActiveCandidates();
     setSelectedId(undefined);
     setPreview(undefined);
@@ -2601,11 +2750,56 @@ function App() {
     setLinkedinMessage("");
     setPreviewLoadedId(undefined);
     setPreviewDirty(false);
-    setMessage(`Cleared ${result.archived.length} candidate(s). History was preserved.`);
-    setTrackedSendQueueIds([]);
-    setTrackedSendMode(null);
-    writeTrackedSendMode(null);
+    if (preserveSendProgress) {
+      setMessage(
+        `Cleared ${result.archived.length} leftover recruiter(s). Sending progress stays below.`,
+      );
+    } else {
+      setMessage(`Cleared ${result.archived.length} candidate(s). History was preserved.`);
+      setTrackedSendQueueIds([]);
+      setTrackedSendMode(null);
+      writeTrackedSendMode(null);
+    }
     await refresh();
+  }
+
+  async function clearEmailNotFoundFromSendList() {
+    const targets = displayCandidates.filter((candidate) => candidate.status === "email_not_found");
+    if (targets.length === 0) {
+      setMessage("No recruiters with “No email found” to remove.");
+      return;
+    }
+    try {
+      // Prefer the bulk archive route; if the API process is stale (404), fall back to
+      // the existing per-candidate DELETE that has always worked.
+      let archived: RecruiterCandidate[] = [];
+      try {
+        const result = await clearActiveEmailNotFoundCandidates();
+        archived = result.archived;
+      } catch {
+        archived = [];
+      }
+      if (archived.length === 0) {
+        archived = await Promise.all(targets.map((person) => removeCandidate(person.id)));
+      }
+      const removedIds = new Set(archived.map((person) => person.id));
+      if (selectedId && removedIds.has(selectedId)) {
+        setSelectedId(undefined);
+        setPreview(undefined);
+        setPreviewSubject("");
+        setPreviewBody("");
+        setLinkedinSubject("");
+        setLinkedinMessage("");
+        setPreviewLoadedId(undefined);
+        setPreviewDirty(false);
+      }
+      setMessage(
+        `Removed ${archived.length} recruiter${archived.length === 1 ? "" : "s"} with no email found. History was preserved.`,
+      );
+      await refresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to remove recruiters with no email found.");
+    }
   }
 
   async function runLookupNow(candidate: RecruiterCandidate) {
@@ -2956,6 +3150,72 @@ function App() {
     }
   }
 
+  async function runSendAllScheduledNow() {
+    if (scheduledSendAllHasInProgress) {
+      setMessage("A scheduled email is already sending. Wait for it to finish, then use Send all.");
+      return;
+    }
+    if (scheduledSendAllItems.length === 0) {
+      setMessage("There are no scheduled emails to send.");
+      return;
+    }
+
+    setBusy(true);
+    setSendAllBusy(true);
+    try {
+      const result = await sendAllScheduledNow({
+        queueItemIds: scheduledSendAllItems.map((item) => item.queueItemId),
+      });
+      if (result.moved === 0 || result.upcoming.length === 0) {
+        setMessage("There are no scheduled emails to send.");
+        return;
+      }
+
+      const session = buildSendSessionFromUpcoming(
+        "All scheduled emails",
+        result.upcoming.map((item) => ({
+          queueItemId: item.queueItemId,
+          candidateId: item.candidateId,
+          fullName: item.fullName,
+          email: item.email,
+          company: item.company,
+          profilePhotoUrl: item.profilePhotoUrl,
+          subject: item.subject,
+          body: item.body,
+        })),
+        { subject: result.upcoming[0]?.subject, body: result.upcoming[0]?.body },
+      );
+      const currentSession = trackedSendMode === "now" ? sendSession : null;
+      const mergedSession = mergeSendSessions(currentSession, session);
+      const existingIds = trackedSendMode === "now" ? trackedSendQueueIds : [];
+      const mergedIds = [
+        ...new Set([...existingIds, ...result.upcoming.map((item) => item.queueItemId)]),
+      ];
+      setTrackedSendMode("now");
+      writeTrackedSendMode("now");
+      setTrackedSendQueueIds(mergedIds);
+      writeTrackedSendQueueIds(mergedIds);
+      setSendSession(mergedSession);
+      writeSendSession(mergedSession);
+      setTab("send");
+      setMessage(
+        `Sending ${result.moved} scheduled email${result.moved === 1 ? "" : "s"} now. Each saved email and resume is unchanged.`,
+      );
+      await refresh();
+      window.requestAnimationFrame(() => {
+        document.getElementById("send-now-delivery-progress")?.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+      });
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to send the scheduled queue.");
+    } finally {
+      setSendAllBusy(false);
+      setBusy(false);
+    }
+  }
+
   async function addHistoryCompanyToSend(company: CompanyHistorySummary) {
     const recruiters = company.recruiters ?? [];
     if (recruiters.length === 0) {
@@ -3051,9 +3311,7 @@ function App() {
     writeTrackedSendMode(null);
     setSendSession(null);
     writeSendSession(null);
-    setTab("scheduled");
-    setMessage("Back on Scheduled.");
-    void refresh().catch(() => undefined);
+    setMessage("");
   }
 
   async function removeScheduledCompany(company: string, items: UpcomingSendView[]) {
@@ -3114,8 +3372,7 @@ function App() {
   async function runScheduleSends() {
     const pausedIds = batchPausedQueueIds;
     if (pausedIds.length > 0 && trackedSendMode === "now") {
-      const startAt =
-        activeSchedulePreset === "now" ? new Date() : parseDatetimeLocal(scheduleStartAt);
+      const startAt = selectedScheduleStart();
       if (activeSchedulePreset === "now") {
         setScheduleStartAt(toDatetimeLocalValue(startAt));
       }
@@ -3125,6 +3382,7 @@ function App() {
           queueItemIds: pausedIds,
           startAt: startAt.toISOString(),
           resumeId: selectedResumeId || undefined,
+          appendToQueue: activeSchedulePreset === "queue",
         });
         if (result.resumed === 0) {
           setMessage("Nothing paused to resume.");
@@ -3158,8 +3416,7 @@ function App() {
       return;
     }
     // Refresh "Now" to the current moment so the first slot is due immediately.
-    const startAt =
-      activeSchedulePreset === "now" ? new Date() : parseDatetimeLocal(scheduleStartAt);
+    const startAt = selectedScheduleStart();
     if (activeSchedulePreset === "now") {
       setScheduleStartAt(toDatetimeLocalValue(startAt));
     }
@@ -3170,6 +3427,7 @@ function App() {
         startAt: startAt.toISOString(),
         mode: isScheduleForNow(startAt, activeSchedulePreset) ? "send_now" : "schedule",
         resumeId: selectedResumeId || undefined,
+        appendToQueue: activeSchedulePreset === "queue",
       });
       const queued = result.queued ?? [];
       const jobs = Array.isArray(result.jobs) ? result.jobs : [];
@@ -3209,9 +3467,6 @@ function App() {
           }.`
         : "";
       const sendMode = resolveTrackedSendMode(startAt, activeSchedulePreset);
-      setTrackedSendMode(sendMode);
-      writeTrackedSendMode(sendMode);
-      setTrackedSendQueueIds(queued.map((item) => item.id));
       if (sendMode === "now") {
         const byCandidate = new Map(queued.map((item) => [item.candidateId, item.id]));
         const session = buildSendSessionFromUpcoming(
@@ -3228,13 +3483,34 @@ function App() {
           })),
           { subject: previewSubject || subject, body: previewBody || body },
         );
-        setSendSession(session);
-        writeSendSession(session);
-        // Keep the same Send layout + preview while jobs run (list is archived server-side).
-        setSelectedId(readyCandidates[0]?.id);
+        const mergedSession = mergeSendSessions(sendSession, session);
+        const mergedIds = [...new Set([...trackedSendQueueIds, ...queued.map((item) => item.id)])];
+        setTrackedSendMode("now");
+        writeTrackedSendMode("now");
+        setTrackedSendQueueIds(mergedIds);
+        setSendSession(mergedSession);
+        writeSendSession(mergedSession);
+        // Keep the exact saved draft visible after its editable recipient cards
+        // leave the roster. This also prevents an older batch preview from
+        // replacing the newly queued copy when another Send-now run is active.
+        setPreviewSubject(session.subject);
+        setPreviewBody(session.body);
+        setPreviewDirty(false);
+        // The queued roster leaves the editable list; progress remains below.
+        setSelectedId(undefined);
+        window.requestAnimationFrame(() => {
+          document.getElementById("send-now-delivery-progress")?.scrollIntoView({
+            behavior: "smooth",
+            block: "start",
+          });
+        });
       } else {
-        setSendSession(null);
-        writeSendSession(null);
+        // A later batch is independent and must not erase an active Send-now run.
+        if (!(trackedSendMode === "now" && sendSession?.people.length)) {
+          setTrackedSendMode("later");
+          writeTrackedSendMode("later");
+          setTrackedSendQueueIds(queued.map((item) => item.id));
+        }
         // Recipients leave today's batch when scheduled for later.
         setSelectedId(undefined);
         setPreview(undefined);
@@ -3248,7 +3524,9 @@ function App() {
       setMessage(
         sendMode === "now"
           ? `Queued ${jobs.length} email(s) for sending now.${shifted}${rejected}${failedNote} Track progress below.`
-          : `Scheduled ${jobs.length} email(s) for later.${shifted}${rejected}${failedNote} Check the Scheduled tab to review or edit.`,
+          : activeSchedulePreset === "queue"
+            ? `Added ${jobs.length} email(s) to the end of the scheduled queue.${shifted}${rejected}${failedNote}`
+            : `Scheduled ${jobs.length} email(s) for later.${shifted}${rejected}${failedNote} Check the Scheduled tab to review or edit.`,
       );
       if (jobFailures.length > 0 && jobs.length > 0) {
         setMessage(
@@ -3672,6 +3950,37 @@ function App() {
     }
   }
 
+  async function checkAllLinkedInMessaging() {
+    const recipients = companyCandidates.filter(
+      (person) => person.linkedinUrl && !person.linkedinMessageSentAt && !person.linkedinMessageTask,
+    );
+    if (!recipients.length) {
+      setMessage("Everyone in this list is already checked, queued, or sent.");
+      return;
+    }
+    setLinkedinSendBusy(true);
+    let queued = 0;
+    const failed: string[] = [];
+    try {
+      for (const person of recipients) {
+        try {
+          await checkLinkedInMessaging(person.id);
+          queued += 1;
+        } catch {
+          failed.push(person.fullName);
+        }
+      }
+      setMessage(
+        failed.length
+          ? `Checking ${queued} recruiters. Could not queue ${failed.length}; use Check again after the current checks finish.`
+          : `Checking LinkedIn messaging for ${queued} recruiter${queued === 1 ? "" : "s"}.`,
+      );
+    } finally {
+      await refresh().catch(() => undefined);
+      setLinkedinSendBusy(false);
+    }
+  }
+
   async function sendAllFreeLinkedInMessages() {
     const recipients = companyCandidates.filter(person => person.linkedinUrl && person.linkedinMessageAvailability === "free" && !person.linkedinMessageSentAt && !person.linkedinMessageTask);
     setLinkedinSendBusy(true);
@@ -3980,7 +4289,11 @@ function App() {
             className={`power-mode-chip${powerMode === "low" ? " on" : ""}`}
             aria-pressed={powerMode === "low"}
             onClick={() => setPowerMode(togglePowerMode(powerMode))}
-            title={powerMode === "low" ? "Low power mode is on" : "Turn on low power mode"}
+            title={
+              powerMode === "low"
+                ? "Low power mode is on · Grove rendering is reduced"
+                : "Reduce Grove rendering power"
+            }
           >
             {powerMode === "low" ? "Low power on" : "Low power"}
           </button>
@@ -4160,7 +4473,7 @@ function App() {
             {upcomingSummary ? (
               <>
                 <strong className="next-send-name">
-                  {upcomingSummary.nextName ?? upcomingSummary.peopleLabel}
+                  {upcomingSummary.nextCompany ?? upcomingSummary.companiesLabel}
                 </strong>
                 <span className="next-send-meta">{upcomingSummary.peopleLabel}</span>
                 <span className="next-send-time">
@@ -4173,19 +4486,19 @@ function App() {
             ) : (
               <>
                 <strong className="next-send-name">Nothing queued</strong>
-                <span className="next-send-meta">Send today or the trees wilt.</span>
+                <span className="next-send-meta">Meet today&apos;s goal to keep your grove growing.</span>
               </>
             )}
           </aside>
 
           <div
             className={`send-streak-wrap${
-              analytics && analytics.goalProgress.sendStreak > 0 && !analytics.goalProgress.activityToday
+              analytics && analytics.goalProgress.streak > 0 && !analytics.goalProgress.met
                 ? " at-risk"
                 : ""
             }`}
           >
-            {analytics && analytics.goalProgress.sendStreak > 0 && !analytics.goalProgress.activityToday ? (
+            {analytics && analytics.goalProgress.streak > 0 && !analytics.goalProgress.met ? (
               <span className="send-streak-risk-bubble" aria-hidden="true">
                 At risk!
               </span>
@@ -4193,16 +4506,16 @@ function App() {
             <button
               type="button"
               className={`panel send-streak-card${
-                analytics && analytics.goalProgress.sendStreak > 0 && !analytics.goalProgress.activityToday
+                analytics && analytics.goalProgress.streak > 0 && !analytics.goalProgress.met
                   ? " at-risk"
                   : ""
               }`}
               onClick={() => setTab("analytics")}
               aria-label={
                 analytics
-                  ? analytics.goalProgress.sendStreak > 0 && !analytics.goalProgress.activityToday
-                    ? `${analytics.goalProgress.sendStreak}-day streak at risk — send today. Open Grove.`
-                    : `${analytics.goalProgress.sendStreak}-day streak. Open Grove.`
+                  ? analytics.goalProgress.streak > 0 && !analytics.goalProgress.met
+                    ? `${analytics.goalProgress.streak}-day streak at risk — meet today's goal. Open Grove.`
+                    : `${analytics.goalProgress.streak}-day goal streak. Open Grove.`
                   : "Open Grove to see your streak"
               }
             >
@@ -4210,7 +4523,7 @@ function App() {
                 <StreakTreeBuddy />
               </div>
               <span className="send-streak-count">
-                {analytics ? analytics.goalProgress.sendStreak : "—"}
+                {analytics ? analytics.goalProgress.streak : "—"}
               </span>
               <span className="send-streak-label">day streak</span>
               <span className="send-streak-grow-link">See grove →</span>
@@ -4219,7 +4532,7 @@ function App() {
           </div>
           <section className="send-layout">
           <section className="panel batch-panel">
-            {displayCandidates.length === 0 ? (
+            {displayCandidates.length === 0 && !showSendProgress ? (
               <div className="empty-state">
                 <h2>No recruiters in batch yet</h2>
                 <p className="empty-state-lead">
@@ -4281,9 +4594,20 @@ function App() {
                 <div className="step">
                   <div className="step-heading">
                     <p className="step-label">1 · Recipients ({displayCandidates.length})</p>
-                    <button type="button" className="subtle-danger" onClick={() => void clearSendList()}>
-                      Remove all
-                    </button>
+                    <div className="step-heading-actions">
+                      {notFoundCount > 0 && (
+                        <button
+                          type="button"
+                          className="subtle-danger"
+                          onClick={() => void clearEmailNotFoundFromSendList()}
+                        >
+                          Remove not found ({notFoundCount})
+                        </button>
+                      )}
+                      <button type="button" className="subtle-danger" onClick={() => void clearSendList()}>
+                        Remove all
+                      </button>
+                    </div>
                   </div>
                   <div className="recipients-pager">
                     <div className="list recipients-list" style={{ ["--recipient-page-size" as string]: RECIPIENT_PAGE_SIZE }}>
@@ -4291,16 +4615,50 @@ function App() {
                         const chip = candidateChip(candidate, activeLookupId);
                         return (
                           <div className={candidate.id === selected?.id ? "candidate active" : "candidate"} key={candidate.id}>
-                            <button
+                            <div
                               className="candidate-select"
-                              onClick={() => setSelectedId(candidate.id)}
+                              role="button"
+                              tabIndex={0}
+                              onClick={() => void selectRecipient(candidate.id)}
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter" || event.key === " ") {
+                                  event.preventDefault();
+                                  void selectRecipient(candidate.id);
+                                }
+                              }}
                             >
                               <span className="candidate-row">
                                 <PersonAvatar candidate={candidate} />
                                 <span className="candidate-copy">
-                                  <strong>{candidate.fullName}</strong>
+                                  <button
+                                    type="button"
+                                    className="copyable-recipient-value recipient-name-copy"
+                                    aria-label={`Copy ${candidate.fullName}'s name`}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      void copyRecipientValue(candidate.id, "name", candidate.fullName);
+                                    }}
+                                  >
+                                    <strong>{candidate.fullName}</strong>
+                                    {copiedRecipientValue === `${candidate.id}:name` && <span className="recipient-copy-feedback">✓ Copied</span>}
+                                  </button>
                                   {candidate.title && <small className="candidate-title">{candidate.title}</small>}
-                                  <small>{candidate.email ?? candidate.company ?? "Waiting on discovery"}</small>
+                                  {candidate.email ? (
+                                    <button
+                                      type="button"
+                                      className="copyable-recipient-value recipient-email-copy"
+                                      aria-label={`Copy ${candidate.email}`}
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        void copyRecipientValue(candidate.id, "email", candidate.email!);
+                                      }}
+                                    >
+                                      <small>{candidate.email}</small>
+                                      {copiedRecipientValue === `${candidate.id}:email` && <span className="recipient-copy-feedback">✓ Copied</span>}
+                                    </button>
+                                  ) : (
+                                    <small>{candidate.company ?? "Waiting on discovery"}</small>
+                                  )}
                                   {batchCompanies.length > 1 && candidate.company && (
                                     <small className="candidate-company">{candidate.company}</small>
                                   )}
@@ -4309,7 +4667,7 @@ function App() {
                                   )}
                                 </span>
                               </span>
-                            </button>
+                            </div>
                             <span className="candidate-status">
                               <span className={`chip ${chip.tone}`}>{chip.label}</span>
                               {!candidate.email && (
@@ -4607,6 +4965,16 @@ function App() {
                           {preset.label}
                         </button>
                       ))}
+                      {canAddToScheduledQueue && (
+                        <button
+                          type="button"
+                          className={`schedule-chip schedule-chip-queue ${activeSchedulePreset === "queue" ? "active" : ""}`}
+                          onClick={applyQueuePreset}
+                          title="Place this batch immediately after your last scheduled email"
+                        >
+                          Add to queue
+                        </button>
+                      )}
                     </div>
                     <div className="schedule-controls">
                       <label>
@@ -4625,7 +4993,11 @@ function App() {
                       <p className="schedule-summary">
                         {readyCandidates.length} email{readyCandidates.length === 1 ? "" : "s"} · starts {scheduleSummary.startLabel}
                         {readyCandidates.length > 1
-                          ? ` · ends ~${scheduleSummary.endLabel} (${scheduleSummary.durationMin} min span)`
+                          ? ` · ends ~${scheduleSummary.endLabel} (${
+                              scheduleSummary.durationMin < 1
+                                ? `${Math.round(scheduleSummary.durationMin * 60)} sec`
+                                : `${scheduleSummary.durationMin} min`
+                            } span)`
                           : ""}
                       </p>
                     )}
@@ -4657,7 +5029,9 @@ function App() {
                       onClick={() => void runScheduleSends()}
                     >
                       {batchPausedQueueIds.length > 0
-                        ? isScheduleForNow(
+                        ? activeSchedulePreset === "queue"
+                          ? `Add ${batchPausedQueueIds.length} remaining to queue`
+                          : isScheduleForNow(
                             activeSchedulePreset === "now"
                               ? new Date()
                               : parseDatetimeLocal(scheduleStartAt),
@@ -4665,7 +5039,9 @@ function App() {
                           )
                           ? `Send ${batchPausedQueueIds.length} remaining now`
                           : `Schedule ${batchPausedQueueIds.length} remaining`
-                        : isScheduleForNow(
+                        : activeSchedulePreset === "queue"
+                          ? `Add ${readyCandidates.length} to queue`
+                          : isScheduleForNow(
                             activeSchedulePreset === "now"
                               ? new Date()
                               : parseDatetimeLocal(scheduleStartAt),
@@ -4685,9 +5061,12 @@ function App() {
                   )}
                   {showSendProgress && sendProgress && (
                     <div
-                      className={`send-progress-panel send-progress-inline-legacy ${
+                      id="send-now-delivery-progress"
+                      className={`send-progress-panel send-progress-inline ${
                         sendProgress.active ? "" : sendProgress.paused ? "paused" : "done"
                       }`}
+                      aria-live="polite"
+                      aria-label="Email delivery progress"
                     >
                       <div className="discovery-progress-meta">
                         <span
@@ -4748,25 +5127,32 @@ function App() {
                           </>
                         )}
                       </p>
-                      {sendProgress.failedCount > 0 && (
+                      {(sendProgress.failedCount > 0 || !sendProgress.active) && (
                         <div className="send-progress-actions">
-                          <button
-                            type="button"
-                            className="secondary"
-                            disabled={busy}
-                            onClick={() => void retryFailedInBatch()}
-                          >
-                            Retry failed ({sendProgress.failedCount})
-                          </button>
+                          {sendProgress.failedCount > 0 && (
+                            <button
+                              type="button"
+                              className="secondary"
+                              disabled={busy}
+                              onClick={() => void retryFailedInBatch()}
+                            >
+                              Retry failed ({sendProgress.failedCount})
+                            </button>
+                          )}
+                          {!sendProgress.active && (
+                            <button
+                              type="button"
+                              className="secondary"
+                              disabled={busy}
+                              onClick={() => dismissSendSession()}
+                            >
+                              Dismiss
+                            </button>
+                          )}
                         </div>
                       )}
-                      <ol className="send-checklist">
-                        {sendProgress.omittedBefore > 0 && (
-                          <li className="send-checklist-gap">
-                            {sendProgress.omittedBefore} earlier recipient{sendProgress.omittedBefore === 1 ? "" : "s"}…
-                          </li>
-                        )}
-                        {sendProgress.checklist.map((row) => (
+                      <ol className="send-checklist send-checklist-scroll">
+                        {sendProgressRows.map((row) => (
                           <li
                             key={row.id}
                             className={`send-checklist-item ${
@@ -4806,11 +5192,6 @@ function App() {
                             </span>
                           </li>
                         ))}
-                        {sendProgress.omittedAfter > 0 && (
-                          <li className="send-checklist-gap">
-                            +{sendProgress.omittedAfter} more queued…
-                          </li>
-                        )}
                       </ol>
                     </div>
                   )}
@@ -4826,7 +5207,7 @@ function App() {
             <div className="preview-panel-head">
               <div>
                 <h2>Email + LinkedIn</h2>
-                <p className="hint">Edits apply to everyone in this batch while first names stay personalized.</p>
+                <p className="hint">Edits autosave for everyone in this batch; first names stay personalized.</p>
               </div>
               {selected && (
                 <span className="preview-recipient-chip">
@@ -4874,6 +5255,7 @@ function App() {
                                     setPreviewSubject(event.target.value);
                                     setPreviewDirty(true);
                                   }}
+                                  onBlur={(event) => void flushPreviewOnBlur(event)}
                                   disabled={previewSaving || previewMotion === "collapse"}
                                 />
                                 <textarea
@@ -4885,6 +5267,7 @@ function App() {
                                     setPreviewBody(event.target.value);
                                     setPreviewDirty(true);
                                   }}
+                                  onBlur={(event) => void flushPreviewOnBlur(event)}
                                   rows={1}
                                   disabled={previewSaving || previewMotion === "collapse"}
                                 />
@@ -4896,8 +5279,8 @@ function App() {
                                 )}
                               </div>
                               <p className="hint">
-                                Saving updates the email and LinkedIn message for everyone in this batch. First names
-                                stay personalized. The footer is appended automatically on send.
+                                Changes save when you click away or switch recipients, and update everyone in this
+                                batch. First names stay personalized. The footer is appended automatically on send.
                               </p>
                               <div className="preview-edit-actions">
                                 <button
@@ -5028,7 +5411,7 @@ function App() {
                                           : selected.linkedinMessageAvailability === "free"
                                           ? "Free"
                                           : selected.linkedinMessageAvailability === "inmail"
-                                            ? `${selected.linkedinInmailCredits ?? "?"} InMails`
+                                            ? `${selected.linkedinInmailCredits ?? "?"} InMail credit${selected.linkedinInmailCredits === 1 ? "" : "s"} available`
                                             : selected.linkedinMessageAvailability === "checking"
                                               ? selected.linkedinMessageTask?.action === "send" ? "Sending your message…" : "Finding message options…"
                                               : selected.linkedinMessageAvailability === "unavailable"
@@ -5037,7 +5420,7 @@ function App() {
                                                   ? selected.linkedinSendStatus === "unconfirmed" ? "Confirm in LinkedIn" : selected.linkedinSendStatus === "failed" ? "Send failed" : "Check failed"
                                                   : "Not checked"}
                                       </span>
-                                      <small>
+                                      {selected.linkedinMessageAvailability !== "inmail" && <small>
                                         {selected.linkedinMessageSentAt
                                           ? `Sent on LinkedIn ${formatShortWhen(selected.linkedinMessageSentAt)}`
                                           : selected.linkedinMessageAvailability === "checking"
@@ -5046,7 +5429,7 @@ function App() {
                                               : "Checking free messaging and InMail availability."
                                             : selected.linkedinMessageStatusText ??
                                             "LinkedIn availability is checked after generation."}
-                                      </small>
+                                      </small>}
                                     </div>
                                     {!selected.linkedinMessageSentAt && (
                                       <div className="linkedin-send-actions">
@@ -5057,9 +5440,13 @@ function App() {
                                             type="button"
                                             className="secondary compact"
                                             disabled={linkedinSendBusy}
-                                            onClick={() => void checkLinkedInMessaging(selected.id).then(() => refresh())}
+                                            onClick={() =>
+                                              void (companyCandidates.length > 1
+                                                ? checkAllLinkedInMessaging()
+                                                : checkLinkedInMessaging(selected.id).then(() => refresh()))
+                                            }
                                           >
-                                            Check again
+                                            {companyCandidates.length > 1 ? `Check all (${companyCandidates.filter((person) => person.linkedinUrl && !person.linkedinMessageSentAt && !person.linkedinMessageTask).length})` : "Check again"}
                                           </button>
                                         )}
                                         <button
@@ -5085,22 +5472,43 @@ function App() {
                                   <div className="linkedin-batch-progress" aria-label="LinkedIn progress">
                                     <strong>{companyCandidates.filter(p => p.linkedinMessageSentAt).length} sent · {companyCandidates.filter(p => p.linkedinMessageTask).length} pending · {companyCandidates.filter(p => p.linkedinSendStatus === "failed").length} failed · {companyCandidates.filter(p => p.linkedinSendStatus === "unconfirmed").length} need confirmation</strong>
                                     {companyCandidates.map(person => (
-                                      <div className="linkedin-progress-person" key={person.id}>
+                                      <button
+                                        type="button"
+                                        className={`linkedin-progress-person${selected?.id === person.id ? " selected" : ""}`}
+                                        key={person.id}
+                                        aria-pressed={selected?.id === person.id}
+                                        onClick={() => void selectRecipient(person.id)}
+                                      >
                                         <span>{person.fullName}</span>
                                         <span role="status">
                                           {person.linkedinMessageTask && <span className="linkedin-activity" aria-hidden="true"><span /><span /><span /></span>}
-                                          {person.linkedinMessageSentAt ? "✓ Sent" : person.linkedinSendStatus === "unconfirmed" ? "Confirm in LinkedIn" : person.linkedinMessageTask ? person.linkedinMessageTask.action === "send" ? "Sending / queued" : "Checking availability" : person.linkedinSendStatus === "failed" ? "Send failed" : person.linkedinMessageAvailability === "free" ? "Free · Ready" : person.linkedinMessageAvailability === "inmail" ? "InMail · Skipped" : person.linkedinMessageAvailability === "error" ? "Check failed" : "Not ready"}
+                                          {person.linkedinMessageSentAt ? "✓ Sent" : person.linkedinSendStatus === "unconfirmed" ? "Confirm in LinkedIn" : person.linkedinMessageTask ? person.linkedinMessageTask.action === "send" ? "Sending / queued" : "Checking availability" : person.linkedinSendStatus === "failed" ? "Send failed" : person.linkedinMessageAvailability === "free" ? "Free message" : person.linkedinMessageAvailability === "inmail" ? "Needs InMail credit" : person.linkedinMessageAvailability === "error" ? "Check failed" : "Not ready"}
                                         </span>
-                                      </div>
+                                      </button>
                                     ))}
                                   </div>
                                 )}
                                 {companyCandidates.length > 1 && (
-                                  <button type="button" className="secondary compact"
-                                    disabled={linkedinSendBusy || !/^Hi [^,\n]+,/.test(linkedinMessage.trim()) || !companyCandidates.some(person => person.linkedinMessageAvailability === "free" && !person.linkedinMessageSentAt && !person.linkedinMessageTask)}
-                                    onClick={() => void sendAllFreeLinkedInMessages()}>
-                                    Send to all free ({companyCandidates.filter(person => person.linkedinMessageAvailability === "free" && !person.linkedinMessageSentAt && !person.linkedinMessageTask).length})
-                                  </button>
+                                  <div className="linkedin-send-actions">
+                                    <button
+                                      type="button"
+                                      className="secondary compact"
+                                      disabled={
+                                        linkedinSendBusy ||
+                                        !companyCandidates.some(
+                                          (person) => person.linkedinUrl && !person.linkedinMessageSentAt && !person.linkedinMessageTask,
+                                        )
+                                      }
+                                      onClick={() => void checkAllLinkedInMessaging()}
+                                    >
+                                      Check all recruiters
+                                    </button>
+                                    <button type="button" className="primary compact"
+                                      disabled={linkedinSendBusy || !/^Hi [^,\n]+,/.test(linkedinMessage.trim()) || !companyCandidates.some(person => person.linkedinMessageAvailability === "free" && !person.linkedinMessageSentAt && !person.linkedinMessageTask)}
+                                      onClick={() => void sendAllFreeLinkedInMessages()}>
+                                      Send to all free ({companyCandidates.filter(person => person.linkedinMessageAvailability === "free" && !person.linkedinMessageSentAt && !person.linkedinMessageTask).length})
+                                    </button>
+                                  </div>
                                 )}
                               </div>
                             </div>
@@ -5143,90 +5551,6 @@ function App() {
             )}
           </section>
         </section>
-        {showSendProgress && sendProgress && (
-          <section className="panel delivery-queue-panel" aria-live="polite" aria-label="Email delivery progress">
-            <div className="delivery-queue-head">
-              <div>
-                <p className="eyebrow">Delivery progress</p>
-                <h2>
-                  {sendProgress.active
-                    ? isSendingPhase
-                      ? `Sending to ${sendProgress.current.name}`
-                      : `Next: ${sendProgress.current.name}`
-                    : sendProgress.paused
-                      ? "Sending paused"
-                      : sendProgress.failedCount > 0
-                        ? "Finished with errors"
-                        : "All emails sent"}
-                </h2>
-                <p className="hint">
-                  {sendProgress.sentCount} sent · {sendProgress.remainingCount} remaining
-                  {sendProgress.failedCount > 0 ? ` · ${sendProgress.failedCount} failed` : ""}
-                </p>
-              </div>
-              <strong className="delivery-queue-count">{sendProgress.doneCount}/{sendProgress.total}</strong>
-            </div>
-            <div
-              className="progress-track delivery-queue-track"
-              role="progressbar"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={sendProgress.percent}
-            >
-              <div className="progress-fill" style={{ width: `${sendProgress.percent}%` }} />
-            </div>
-            <div className="delivery-queue-summary" aria-hidden="true">
-              <span className="sent">✓ Sent</span>
-              <span className="sending">● Sending</span>
-              <span className="pending">○ Pending</span>
-            </div>
-            <ol className="delivery-queue-list">
-              {sendProgressRows.map((row) => (
-                <li key={row.id} className={`delivery-queue-person ${row.status}`}>
-                  <span className="delivery-person-state" aria-hidden="true">
-                    {row.status === "sent"
-                      ? "✓"
-                      : row.status === "failed"
-                        ? "!"
-                        : row.status === "paused"
-                          ? "❚❚"
-                          : row.status === "sending"
-                            ? "●"
-                            : "○"}
-                  </span>
-                  <span className="delivery-person-copy">
-                    <strong>{row.name}</strong>
-                  </span>
-                  <span className="delivery-person-status">
-                    {row.status === "sent"
-                      ? "Sent"
-                      : row.status === "failed"
-                        ? "Failed"
-                        : row.status === "paused"
-                          ? "Paused"
-                          : row.status === "sending"
-                            ? "Sending now…"
-                            : `Pending · ${formatShortWhen(row.scheduledFor)}`}
-                  </span>
-                </li>
-              ))}
-            </ol>
-            {(showSessionStop || sendProgress.failedCount > 0) && (
-              <div className="delivery-queue-actions">
-                {showSessionStop && (
-                  <button className="secondary subtle-danger" disabled={busy} onClick={() => void runPausePendingSends()}>
-                    Pause remaining
-                  </button>
-                )}
-                {sendProgress.failedCount > 0 && (
-                  <button className="secondary" disabled={busy} onClick={() => void retryFailedInBatch()}>
-                    Retry failed ({sendProgress.failedCount})
-                  </button>
-                )}
-              </div>
-            )}
-          </section>
-        )}
         </section>
       )}
 
@@ -5246,16 +5570,18 @@ function App() {
                   Mails go out at their scheduled times while this app is running. Keep your laptop on — you do not need this tab open.
                 </p>
               </div>
-              {upcomingSummary && (
-                <div className="scheduled-next-card">
-                  <p className="eyebrow">Next up</p>
-                  <strong>{upcomingSummary.nextName ?? upcomingSummary.peopleLabel}</strong>
-                  <span>{upcomingSummary.companiesLabel}</span>
-                  <span className="scheduled-next-time">
-                    {formatNextUpWhen(upcomingSummary.nextTime, upcomingSummary.dueNow)}
-                  </span>
-                </div>
-              )}
+              <div className="scheduled-head-actions">
+                {upcomingSummary && (
+                  <div className="scheduled-next-card">
+                    <p className="eyebrow">Next up</p>
+                    <strong>{upcomingSummary.nextCompany ?? upcomingSummary.companiesLabel}</strong>
+                    <span>{upcomingSummary.companiesLabel}</span>
+                    <span className="scheduled-next-time">
+                      {formatNextUpWhen(upcomingSummary.nextTime, upcomingSummary.dueNow)}
+                    </span>
+                  </div>
+                )}
+              </div>
             </div>
 
             {scheduledLaterSends.length === 0 ? (
@@ -5721,6 +6047,26 @@ function App() {
                     </div>
                   );
                 })}
+                <div className="scheduled-send-all-footer">
+                  <div className="scheduled-send-all-card">
+                    <div>
+                      <strong>{scheduledLaterSends.length} email{scheduledLaterSends.length === 1 ? "" : "s"}</strong>
+                      <span>
+                        {scheduledSendAllHasInProgress
+                          ? "One is already sending"
+                          : `${scheduledSendAllEstimate} estimated`}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      className="primary"
+                      disabled={busy || scheduledEditBusy || rescheduleBusy || addPersonBusy || scheduledSendAllHasInProgress}
+                      onClick={() => void runSendAllScheduledNow()}
+                    >
+                      {sendAllBusy ? "Preparing…" : "Send all now"}
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
           </section>
@@ -6390,22 +6736,22 @@ function App() {
               <section className="panel village-hero-panel">
                 <div
                   className={`outreach-village streak-grove${analytics.goalProgress.met ? " celebrating" : ""}`}
-                  aria-label={`Streak grove with ${analytics.goalProgress.sendStreak} trees`}
+                  aria-label={`Streak grove with ${analytics.goalProgress.streak} trees`}
                 >
                   <div className="village-sky-label">
                     <div>
                       <p className="eyebrow">Your streak forest</p>
                       <h2>Streak Grove</h2>
                       <p className="hint">
-                        One tree for every day in a row you schedule or send — the forest keeps growing with your streak.
-                        Skip a day and it returns to bare soil.
+                        One tree for every day in a row you meet your daily company goal.
+                        Miss the goal and the current streak resets.
                       </p>
-                      {analytics.goalProgress.sendStreak > 0 && !analytics.goalProgress.activityToday && (
+                      {analytics.goalProgress.streak > 0 && !analytics.goalProgress.met && (
                         <p className="grove-warning">
-                          No outreach yet today — schedule or send one email to keep{" "}
-                          {analytics.goalProgress.sendStreak === 1
+                          Today&apos;s goal is not met yet — reach {analytics.goalProgress.goal} companies to keep{" "}
+                          {analytics.goalProgress.streak === 1
                             ? "your tree"
-                            : `all ${analytics.goalProgress.sendStreak} trees`}{" "}
+                            : `all ${analytics.goalProgress.streak} trees`}{" "}
                           alive.
                         </p>
                       )}
@@ -6423,10 +6769,10 @@ function App() {
                         <strong>{analytics.motivation.title}</strong>
                         <span>Level {analytics.motivation.level}</span>
                         <span>
-                          {analytics.goalProgress.sendStreak}-day streak
-                          {analytics.goalProgress.longestSendStreak > analytics.goalProgress.sendStreak
-                            ? ` · best ${analytics.goalProgress.longestSendStreak}`
-                            : analytics.goalProgress.longestSendStreak > 1
+                          {analytics.goalProgress.streak}-day streak
+                          {analytics.usage.longestStreak > analytics.goalProgress.streak
+                            ? ` · best ${analytics.usage.longestStreak}`
+                            : analytics.usage.longestStreak > 1
                               ? " · personal best"
                               : ""}
                         </span>
@@ -6438,18 +6784,15 @@ function App() {
                       active={tab === "analytics"}
                       weatherCity={groveWeatherCity}
                       tempUnit={groveTempUnit}
-                      streak={analytics.goalProgress.sendStreak}
-                      bestStreak={analytics.goalProgress.longestSendStreak}
-                      sentToday={
-                        analytics.goalProgress.activityToday
-                          ? Math.max(analytics.goalProgress.sentToday, 1)
-                          : 0
-                      }
+                      streak={analytics.goalProgress.streak}
+                      bestStreak={analytics.usage.longestStreak}
+                      sentToday={analytics.goalProgress.met ? analytics.goalProgress.sentToday : 0}
                       level={analytics.motivation.level}
                       title={analytics.motivation.title}
                       goalMet={analytics.goalProgress.met}
                       testMode={Boolean(envStatus?.testMode.enabled)}
                       showHeader={false}
+                      lowPower={powerMode === "low"}
                     />
                   </Suspense>
                 </div>
@@ -6649,7 +6992,7 @@ function App() {
                       <p className="eyebrow">Garden</p>
                       <h2>Contribution garden</h2>
                       <p className="hint">
-                        Past ~6 months through today — greener with every email sent; blossom when the daily goal was met.
+                        Past ~6 months through today — darker means more emails sent; blossom means the daily goal was met.
                       </p>
                     </div>
                   </div>
@@ -6795,9 +7138,9 @@ function App() {
                       </div>
                     </div>
                     <StreakRingGraphic
-                      current={analytics.goalProgress.sendStreak}
-                      best={analytics.goalProgress.longestSendStreak}
-                      activityToday={analytics.goalProgress.activityToday}
+                      current={analytics.goalProgress.streak}
+                      best={analytics.usage.longestStreak}
+                      activityToday={analytics.goalProgress.met}
                     />
                     <p className="hint analytics-asof">
                       As of {new Date(analytics.generatedAt).toLocaleString()}
@@ -6814,8 +7157,8 @@ function App() {
         <div className="goal-toast village-toast" role="status">
           <img src={DANCING_CAT_GIF} alt="" width={72} height={72} />
           <div>
-            <strong>Daily goal crushed — new rooftops unlocked!</strong>
-            <p>You hit today&apos;s send target. The countryside just got denser.</p>
+            <strong>Daily goal met — a new tree is growing!</strong>
+            <p>You reached today&apos;s company goal and extended your Grove streak.</p>
           </div>
           <button className="icon-button" aria-label="Dismiss" onClick={() => setShowCatToast(false)}>
             ×

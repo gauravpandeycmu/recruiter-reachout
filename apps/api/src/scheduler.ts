@@ -258,9 +258,7 @@ function addDays(date: Date, days: number): Date {
 }
 
 function addMinutes(date: Date, minutes: number): Date {
-  const result = new Date(date);
-  result.setMinutes(result.getMinutes() + minutes);
-  return result;
+  return new Date(date.getTime() + minutes * 60_000);
 }
 
 function withJitter(date: Date, jitterSeconds: number): Date {
@@ -321,7 +319,7 @@ export function scheduleCandidatesExplicit(
   );
 
   const startAt = input.startAt ? new Date(input.startAt) : new Date();
-  const intervalMinutes = input.intervalMinutes ?? Math.max(1, Math.floor(60 / settings.perHourCap));
+  const intervalMinutes = input.intervalMinutes ?? Math.max(0.5, 60 / settings.perHourCap);
   const jitterSeconds =
     input.jitterSeconds ??
     settings.jitterSeconds ??

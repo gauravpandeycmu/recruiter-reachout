@@ -18,6 +18,7 @@ import {
   setOutreachContent,
 } from "../src/services.js";
 import { Store } from "../src/store.js";
+import { ensureCompanyCopy } from "./helpers/httpApp.js";
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -65,6 +66,7 @@ describe("send-now handoff + pause integration", () => {
   });
 
   async function seedScheduled(name: string, email: string, company: string) {
+    ensureCompanyCopy(store, company);
     return store.upsertCandidate(
       createCandidate({
         fullName: name,

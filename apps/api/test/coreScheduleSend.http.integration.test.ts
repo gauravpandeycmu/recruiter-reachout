@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createCandidate, startHttpApp, type HttpApp } from "./helpers/httpApp.js";
+import { createCandidate, ensureCompanyCopy, startHttpApp, type HttpApp } from "./helpers/httpApp.js";
 import { globalSendGapMs } from "../src/sendJobs.js";
 
 describe("core schedule + send HTTP integration", () => {
@@ -10,6 +10,7 @@ describe("core schedule + send HTTP integration", () => {
   });
 
   function seedReady(name: string, company: string, email: string) {
+    ensureCompanyCopy(app.store, company);
     return app.store.upsertCandidate(
       createCandidate({
         fullName: name,
@@ -109,7 +110,7 @@ describe("core schedule + send HTTP integration", () => {
       .map((q) => Date.parse(q.scheduledFor))
       .sort((x, y) => x - y);
     expect(times[0]).toBeGreaterThanOrEqual(newStart.getTime() - 2_000);
-    expect(times[1]! - times[0]!).toBe(60_000);
+    expect(times[1]! - times[0]!).toBe(30_000);
   });
 
   it("send_now → claim → complete is idempotent on double complete", async () => {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createCandidate, flushWake, startHttpApp, type HttpApp } from "./helpers/httpApp.js";
+import { createCandidate, ensureCompanyCopy, flushWake, startHttpApp, type HttpApp } from "./helpers/httpApp.js";
 import { __resetWorkerSupervisorForTests, __setWorkerSupervisorTestHooks } from "../src/workerSupervisor.js";
 import { updateWorkerStatus } from "../src/services.js";
 
@@ -15,6 +15,7 @@ describe("core wake + wiring HTTP integration", () => {
   });
 
   function seedReady(name: string, company: string, email: string) {
+    ensureCompanyCopy(app.store, company);
     return app.store.upsertCandidate(
       createCandidate({
         fullName: name,

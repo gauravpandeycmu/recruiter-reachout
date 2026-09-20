@@ -178,6 +178,7 @@ const BANNED_PHRASES_ALWAYS = [
   "exciting mission",
   "sheer scale",
   "marketing ecosystem",
+  "job application",
 ];
 
 /**
@@ -310,16 +311,27 @@ export async function generateCompanyEmailContent(
   }
 
   const model = process.env.GEMINI_MODEL?.trim() || DEFAULT_MODEL;
+  const company = input.company.trim();
+  const roleTitle = sanitizeRoleTitle(input.roleTitle, company) || undefined;
+  const normalizedInput: GenerateContentInput = {
+    ...input,
+    company,
+    roleTitle,
+  };
 
   onProgress?.("voice");
   onProgress?.("draft");
   const draft = sanitizeGeneratedEmail(
-    parseGeneratedContent(await callGemini(buildPersonalizationPrompt(input), apiKey, model, "email_draft", deadlineAt)),
-    input.jobUrl,
+    parseGeneratedContent(
+      await callGemini(buildPersonalizationPrompt(normalizedInput), apiKey, model, "email_draft", deadlineAt),
+    ),
+    normalizedInput.jobUrl,
+    roleTitle,
+    company,
   );
   onProgress?.("review");
-  const issues = validateGeneratedEmail(draft, input.samples, input);
-  audit("generation.validation", { company: input.company, issues });
+  const issues = validateGeneratedEmail(draft, normalizedInput.samples, normalizedInput);
+  audit("generation.validation", { company, issues });
   if (issues.length === 0) {
     onProgress?.("polish");
     return { ...draft, model };
@@ -335,9 +347,17 @@ export async function generateCompanyEmailContent(
   try {
     repaired = sanitizeGeneratedEmail(
       parseGeneratedContent(
-        await callGemini(buildRepairPrompt(draft, issues, input.company, input.passionate, input.customise), apiKey, model, "email_repair", deadlineAt),
+        await callGemini(
+          buildRepairPrompt(draft, issues, company, normalizedInput.passionate, normalizedInput.customise),
+          apiKey,
+          model,
+          "email_repair",
+          deadlineAt,
+        ),
       ),
-      input.jobUrl,
+      normalizedInput.jobUrl,
+      roleTitle,
+      company,
     );
   } catch (error) {
     if (error instanceof Error && /timed out/i.test(error.message)) {
@@ -345,7 +365,7 @@ export async function generateCompanyEmailContent(
     }
     throw error;
   }
-  const remaining = validateGeneratedEmail(repaired, input.samples, input);
+  const remaining = validateGeneratedEmail(repaired, normalizedInput.samples, normalizedInput);
   if (remaining.length > 0) {
     return { ...repaired, model, warnings: remaining };
   }
@@ -355,7 +375,10 @@ export async function generateCompanyEmailContent(
 function sanitizeGeneratedEmail(
   content: Pick<GeneratedContent, "subject" | "body" | "linkedinSubject" | "linkedinMessage">,
   jobUrl?: string,
+  roleTitle?: string,
+  company?: string,
 ): Pick<GeneratedContent, "subject" | "body" | "linkedinSubject" | "linkedinMessage"> {
+  const deterministicSubject = buildGeneratedEmailSubject(roleTitle, company);
   const scrubDashes = (value: string) =>
     value
       .replace(/\s*[—–]\s*/g, ", ")
@@ -376,14 +399,61 @@ function sanitizeGeneratedEmail(
         /\bI(?:'m| am)\s+currently\s+interning\s+at\s+T-Mobile\s+focusing\s+on\s+backend\s+systems\s+and\s+AI\s+infrastructure\b/gi,
         "I recently completed an Agentic AI internship at T-Mobile, focused on backend systems and AI infrastructure",
       );
+  const scrubJobApplicationWording = (value: string) =>
+    value
+      // Only the ATS/share phrasing "Job Application for …" — never "consider my application for …".
+      .replace(/\b(?:the\s+)?job\s+application(?:\s+form)?\s+for\s+/gi, "")
+      .replace(/\b(about|regarding|for)\s+\1\b/gi, "$1")
+      .replace(/[ \t]{2,}/g, " ");
   return {
-    subject: scrubDashes(content.subject).slice(0, MAX_SUBJECT_CHARS).trim(),
-    linkedinSubject: clampLinkedInSubject(scrubDashes(content.linkedinSubject)),
-    body: stripBareJobUrls(normalizeCompletedInternship(scrubDashes(content.body)), jobUrl),
+    subject: deterministicSubject,
+    linkedinSubject: clampLinkedInSubject(scrubDashes(scrubJobApplicationWording(content.linkedinSubject))),
+    body: stripBareJobUrls(
+      normalizeCompletedInternship(scrubDashes(scrubJobApplicationWording(content.body))),
+      jobUrl,
+    ),
     linkedinMessage: clampLinkedInMessage(
-      stripBareJobUrls(normalizeCompletedInternship(scrubDashes(content.linkedinMessage)), jobUrl),
+      stripBareJobUrls(
+        normalizeCompletedInternship(scrubDashes(scrubJobApplicationWording(content.linkedinMessage))),
+        jobUrl,
+      ),
     ),
   };
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * LinkedIn / ATS share titles often arrive as "Job Application for Backend Engineer…".
+ * That prefix must never reach the draft — subject, prompt, or body.
+ */
+export function sanitizeRoleTitle(roleTitle?: string, company?: string): string {
+  let role = (roleTitle ?? "").replace(/\s+/g, " ").trim();
+  if (!role) {
+    return "";
+  }
+  role = role
+    .replace(/^(?:the\s+)?job\s+application(?:\s+form)?\s+for\s+/i, "")
+    .replace(/^(?:applying\s+for)\s+/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const companyName = company?.trim();
+  if (companyName) {
+    const escapedCompany = escapeRegExp(companyName);
+    role = role
+      .replace(new RegExp(`\\s+(?:at|@)\\s+${escapedCompany}\\s*$`, "i"), "")
+      .replace(new RegExp(`\\s*[-|:]\\s*${escapedCompany}\\s*$`, "i"), "")
+      .trim();
+  }
+  return role;
+}
+
+/** The subject is app-owned, never model-owned: role only, then the CMU suffix. */
+export function buildGeneratedEmailSubject(roleTitle?: string, company?: string): string {
+  const role = sanitizeRoleTitle(roleTitle, company) || "Software Engineer";
+  return `${role} - Carnegie Mellon Grad`;
 }
 
 /** Keep LinkedIn subjects scannable in the composer subject field. */
@@ -575,7 +645,7 @@ function buildAudienceSection(audience: RecipientAudience, titles: string[]): st
 
 export function buildPersonalizationPrompt(input: GenerateContentInput): string {
   const company = input.company.trim();
-  const roleTitle = input.roleTitle?.trim();
+  const roleTitle = sanitizeRoleTitle(input.roleTitle, company) || undefined;
   const companyFact = input.companyFact?.trim();
   const jobDescription = compactJobDescription(input.jobDescription);
   const linkedinPost = input.linkedinPost?.trim().slice(0, MAX_LINKEDIN_POST_CHARS);
@@ -610,7 +680,7 @@ export function buildPersonalizationPrompt(input: GenerateContentInput): string 
       "Passionate means a specific reason to want the work, not praise for the company or a louder version of a cover letter.",
       "Required shape:",
       "1. Open directly with interest in the specific role; skip generic wellbeing openers.",
-      `2. Name the role at ${company} once. Include a meaningful req ID when available.`,
+      `2. Name the role at ${company} once using the exact role title from TARGET (never "Job Application for …"). Include a meaningful req ID when available.`,
       "3. Include a distinct personal-interest paragraph of 1-2 short sentences. Explain what the candidate values about THIS company's product or approach and why they want to contribute. Do not reduce this to naming a job responsibility or omit it: that would read like normal mode. Ground it in the supplied company/posting context. Selecting passionate mode authorizes expressing current interest, not inventing past experiences.",
       "   Bad: 'You have built an impressive home for enthusiasts and a genuinely engaging community experience.' This evaluates the brand rather than explaining interest in the work.",
       "   Learn from the Gemini sample: attending a session and reading Cryptopedia show attention and effort, not generic admiration. Reuse such engagement ONLY for the company it actually concerns. Never invent articles read, products used, events attended, or long-standing fandom for another company. Without that history, explain a specific present-day reason to value the product instead.",
@@ -654,12 +724,12 @@ export function buildPersonalizationPrompt(input: GenerateContentInput): string 
     lines.push(
       "== STRUCTURE (three short moves, ~60-100 words total) ==",
       "Write a short personal note, not a compressed cover letter. Each paragraph has a purpose; avoid making every sentence follow a stock template.",
-      "1. HOOK (one sentence): name the opening and req ID. Without post text, say 'I came across the ... opening at ...'. Say 'I saw your post' only with matching post text. Never claim an application was submitted without evidence.",
+      "1. HOOK (one sentence): name the opening and put a known req ID in parentheses after the role mention. Without post text, say 'I came across the ... opening at ...'. Say 'I saw your post' only with matching post text. Never claim an application was submitted without evidence.",
       "2. WHO + PROOF (one short paragraph): begin with the job seeker's compact professional snapshot from the samples, normally school/program + years of experience + the most recent relevant employer or role. Do not reduce this to school alone. Follow it with exactly one concrete PROFESSIONAL accomplishment from work at an employer that is relevant to the opening.",
       "For a broad role, describe that accomplishment in one short sentence with at most two technical specifics. Do not stack API names, CI/CD, Kubernetes implementation details, concurrency counts, and metrics into the same sentence. Save denser detail for a specialist role whose posting explicitly calls for it.",
       "3. ASK (one sentence): end in the samples' straightforward style, preferably asking the recipient to consider the application or attached resume. Mention the attached resume in that sentence when natural. A brief 'Thank you for your time' may follow, but drop 'I look forward to hearing from you' and other ceremonial filler.",
       "The accomplishment should carry the relevance on its own. Do not add a generic sales sentence such as 'I am excited/eager to bring this focus, experience, or background to [company/product].' Add a company-specific relevance clause only when it is concrete, brief, and genuinely adds information.",
-      "Name the role only once in the opener. If the post already names that opening, do not repeat it in 'regarding the ... opening'. Include the company and any required req ID without repeating the hiring announcement.",
+      "Name the role only once in the opener using the exact role title from TARGET — never rewrite it as 'Job Application for …' or 'the Job Application for …'. If the post already names that opening, do not repeat it in 'regarding the ... opening'. Include the company and any required req ID without repeating the hiring announcement.",
       "Personalize through one specific responsibility or priority from the supplied job description or matching hiring post, then choose the verified aspect of the accomplishment that answers it. Naming the company alone is not a reason to reuse the same proof sentence. If no meaningful overlap exists, use honest transferable experience without manufacturing a connection.",
       "Keep the connection inside the proof sentence. Never relabel voice-agent validation as data engineering or model serving to echo the posting.",
       "Describe concrete actions, such as testing calls before releases, instead of vague promises 'to ensure production reliability'. State only results supported by the evidence; a plausible benefit is not a verified result.",
@@ -722,10 +792,10 @@ export function buildPersonalizationPrompt(input: GenerateContentInput): string 
       lines.push(
         "== JOB / REQ ID (required) ==",
         `- Detected ID(s): ${primaryIds.join(", ")}`,
-        "- Recruiters route by ID. Put the primary ID in the HOOK — ideally the first sentence after the greeting, or the subject if it still fits under 60 characters.",
-        `- Good patterns: "reaching out about ${primaryIds[0]}", "interested in req ${primaryIds[0]}", "applying to ${primaryIds[0]} (${roleTitle || "the opening"})".`,
+        "- Never put the ID in the subject. Put it in parentheses immediately after the role mention in the HOOK.",
+        `- Good pattern: "reaching out about the ${roleTitle || "opening"} role at ${company} (${primaryIds[0]})".`,
         "- Mention the ID exactly as written above. Do not invent extra IDs. If multiple IDs appear, use the first/primary one unless the posting clearly marks another as primary.",
-        "- Do NOT paste the job posting URL into the email — the send pipeline hyperlinks this ID once.",
+        "- Do NOT paste the job posting URL into the email. The send pipeline hyperlinks the role title once; the ID stays plain text.",
         "",
       );
     } else {
@@ -745,8 +815,8 @@ export function buildPersonalizationPrompt(input: GenerateContentInput): string 
         uuidPrimary
           ? `- Mention the role title (${roleTitle || "the opening"}) in the body. The send pipeline turns that title into one clickable link.`
           : primaryIds[0]
-            ? `- Mention only the job/req ID (${primaryIds[0]}) in the body. The send pipeline turns that single ID into one clickable link.`
-            : "- If you mention a job/req ID, the send pipeline turns that ID into a clickable link.",
+            ? "- Write the role title followed by the ID in parentheses. The send pipeline hyperlinks the role title, not the ID."
+            : `- Mention the role title (${roleTitle || "the opening"}) in the body. The send pipeline turns that title into one clickable link; keep any job/req ID plain text in parentheses.`,
         "- Do not write https://…, www.…, or any bare careers URL in the email body.",
         "",
       );
@@ -767,7 +837,7 @@ export function buildPersonalizationPrompt(input: GenerateContentInput): string 
       lines.push(
         "== JOB / REQ ID (required) ==",
         `- Detected ID from the posting URL: ${urlJobId}`,
-        `- Mention ${urlJobId} early in the hook (e.g. "reaching out about ${urlJobId}"). The send pipeline hyperlinks that ID once.`,
+        `- Never put ${urlJobId} in the subject. Mention the role title early and put ${urlJobId} in parentheses immediately after it. The send pipeline hyperlinks the role title only.`,
         "- Do NOT paste the job posting URL into the email body.",
         "",
       );
@@ -778,8 +848,8 @@ export function buildPersonalizationPrompt(input: GenerateContentInput): string 
       urlJobId && isOpaqueAtsJobId(urlJobId)
         ? `- Mention the role (${roleTitle || "the opening"}) early. The send pipeline hyperlinks the role title once — never paste the opaque identifier.`
         : roleTitle
-          ? `- Mention the role (${roleTitle}) early. Mention the job/req ID if known — the send pipeline hyperlinks the ID only, once.`
-          : "- Mention the opening early. Mention the job/req ID if known — the send pipeline hyperlinks the ID only, once.",
+          ? `- Mention the role (${roleTitle}) early, followed by the job/req ID in parentheses when known. The send pipeline hyperlinks the role title only.`
+          : "- Mention the opening early. Put the job/req ID in parentheses if known; the send pipeline hyperlinks the role mention only.",
       "- Do not write https://…, www.…, or any bare careers URL in the email body.",
       "",
     );
@@ -821,12 +891,13 @@ export function buildPersonalizationPrompt(input: GenerateContentInput): string 
     lines.push(
       "== HARD RULES (passionate mode) ==",
       "- Body: aim for 90-130 words (hard cap 200). Keep a shorter complete note. Do not add a company-praise paragraph.",
-      '- Subject: under 60 characters, front-loaded. Role + strongest credential works well.',
+      '- Subject is fixed by the app as "<exact role> - Carnegie Mellon Grad". Never put a job or req ID in it.',
       "- Keep the token {firstName} exactly as-is wherever the recipient's first name goes. Never replace or drop it.",
       "- Express interest plainly. Do not inflate enthusiasm, invent personal history, or add a second sentence selling your fit after the evidence. Contractions are fine when consistent with the samples.",
       "- Use the job description for responsibilities, not marketing copy. No flattering adjectives or unsupported product claims.",
       "- Still avoid empty fluff: no \"innovative culture\", \"exciting mission\", \"leverage\", \"delve\", \"esteemed\", \"aligns perfectly\", \"sheer scale\", \"marketing ecosystem\".",
       "- Never use em dashes (—) or en dashes (–).",
+      '- Never say "Job Application for …", "the Job Application for …", or similar. Name the role title directly (e.g. "regarding Backend Engineer, AI Engineering…").',
       "- Never invent events the job seeker attended, news, funding, or skills not in the samples.",
       audienceRule,
       extraContextBits.length
@@ -840,9 +911,10 @@ export function buildPersonalizationPrompt(input: GenerateContentInput): string 
     lines.push(
       "== HARD RULES ==",
       "- Body: aim for 60-100 words (hard cap 110), following the three-move structure above, plain text.",
-      '- Subject: 60 characters or fewer, direct and informative. Front-load the exact role or req, then at most one relevant credential if it fits. No clickbait, vague "quick note", all-caps urgency, or credential laundry lists.',
+      '- Subject is fixed by the app as "<exact role> - Carnegie Mellon Grad". Never put a job or req ID in it.',
       "- Keep the token {firstName} exactly as-is wherever the recipient's first name goes. Never replace or drop it.",
       "- If a target role/level is known (above), name it plainly so the recipient can match it to a req; otherwise use a sensible software/product engineering framing for this company — not a niche industry from the samples.",
+      '- Never say "Job Application for …" or "the Job Application for …". Use the exact role title from TARGET.',
       "- Exactly one ask at the end. Prefer the sample-like phrasing 'consider my application' or 'consider my attached resume for this role.' Do not replace it with a meeting request, multiple requests, or a salesy call to action. A short thank-you is fine; omit 'I look forward to hearing from you'.",
       '- Never make open-ended, self-serving asks ("what roles are available", "can you help me find a job", "any opportunities?"). A polite, specific ask the recipient can act on is what works.',
       audienceRule,
@@ -895,7 +967,7 @@ export function buildPersonalizationPrompt(input: GenerateContentInput): string 
     "- If helpful, end with a very short final paragraph noting that the resume is attached and asking them to take a quick look at the application. Do not mention connecting.",
     "- Do not use generic networking filler such as 'I would love to connect and learn more about your journey.'",
     "Before returning JSON, check the completed draft against these constraints; return only the draft, not the checklist:",
-    `- Email: aim for ${passionate ? "90-130" : "60-100"} words (hard cap ${passionate ? MAX_BODY_WORDS_PASSIONATE : MAX_BODY_WORDS}); includes {firstName}; names ${company}${roleTitle ? ` and the role (${roleTitle}) naturally` : ""}; one employer accomplishment and one ask. Both subjects must fit within ${MAX_SUBJECT_CHARS} characters. No bare URL, em/en dash, unfilled placeholder, banned phrase or unsupported claim. Ordinary hyphens in T-Mobile, AI-native and job IDs are allowed.`,
+    `- Email: aim for ${passionate ? "90-130" : "60-100"} words (hard cap ${passionate ? MAX_BODY_WORDS_PASSIONATE : MAX_BODY_WORDS}); includes {firstName}; names ${company}${roleTitle ? ` and the role (${roleTitle}) naturally` : ""}; one employer accomplishment and one ask. The email subject must use the exact fixed format above. No bare URL, em/en dash, unfilled placeholder, banned phrase or unsupported claim. Ordinary hyphens in T-Mobile, AI-native and job IDs are allowed.`,
     audience === "hiring_manager"
       ? '- Hiring manager: "your team" is allowed when supported by the supplied context.'
       : '- Recruiter, mixed or unknown audience: refer to roles/openings, not "your team".',
@@ -1119,10 +1191,6 @@ export function validateGeneratedEmail(
     issues.push("The T-Mobile internship is completed, so the email cannot describe it as current.");
   }
 
-  if (content.subject.length > MAX_SUBJECT_CHARS) {
-    issues.push(`The subject is ${content.subject.length} characters; shorten it to under 60 characters.`);
-  }
-
   for (const phrase of context?.passionate ? BANNED_PHRASES_ALWAYS : [...BANNED_PHRASES_ALWAYS, ...BANNED_PHRASES_DEFAULT_ONLY]) {
     if (combinedLower.includes(phrase)) {
       issues.push(`Remove the phrase "${phrase}"; it reads as templated.`);
@@ -1154,7 +1222,7 @@ export function validateGeneratedEmail(
         "Remove the opaque ATS identifier (and any truncated form of it) from the email — mention the role title instead.",
       );
     }
-    const roleTitle = context?.roleTitle?.trim();
+    const roleTitle = sanitizeRoleTitle(context?.roleTitle, context?.company);
     if (roleTitle && !combinedLower.includes(roleTitle.toLowerCase())) {
       issues.push(
         `Mention the role title (${roleTitle}) early in the email — ideally in the first sentence after the greeting.`,
@@ -1181,7 +1249,7 @@ export function validateGeneratedEmail(
       issues.push(
         primaryId && isOpaqueAtsJobId(primaryId)
           ? "Remove the bare job posting URL from the email body. Mention the role title — it will be hyperlinked automatically on send."
-          : "Remove the bare job posting URL from the email body. Mention only the job/req ID — it will be hyperlinked automatically on send.",
+          : "Remove the bare job posting URL from the email body. Mention the role title followed by the job/req ID in parentheses; the role title will be hyperlinked automatically on send.",
       );
     }
   }

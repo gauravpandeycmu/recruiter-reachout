@@ -135,7 +135,7 @@ export const GroveTreeFieldGuide = memo(function GroveTreeFieldGuide({
           <p className="hint">
             {testMode
               ? `TEST MODE — previewing all ${total} species (not saved to your collection; real progress is ${realUnlockedCount} of ${total}).`
-              : `Each streak day plants one tree in the grove. All ${total} unlock by day 100 of your best streak.`}
+              : `Each day you meet your daily company goal plants one tree. All ${total} unlock by day 100 of your best streak.`}
           </p>
         </div>
       </div>

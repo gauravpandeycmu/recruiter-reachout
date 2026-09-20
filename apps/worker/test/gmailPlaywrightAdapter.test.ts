@@ -323,4 +323,93 @@ describe("gmailPlaywrightAdapter", () => {
     const fallback = resumeUploadPayload(diskPath);
     expect(fallback.name).toBe("GauravPandey_Resume.pdf");
   });
+
+  it("returns bodyMode=html when insertHTML succeeds", async () => {
+    const { page } = mockPage();
+    const originalLocator = page.locator;
+    page.locator = vi.fn((selector: string) => {
+      const base = originalLocator(selector) as {
+        first: () => {
+          evaluate: ReturnType<typeof vi.fn>;
+          fill: ReturnType<typeof vi.fn>;
+          waitFor: ReturnType<typeof vi.fn>;
+        };
+      };
+      if (/message body|g_editable/i.test(selector)) {
+        const inner = base.first();
+        inner.evaluate = vi.fn(async (_fn?: unknown, html?: string) => Boolean(html));
+        return {
+          ...base,
+          first: () => inner,
+        };
+      }
+      return base;
+    });
+
+    const adapter = createGmailPlaywrightAdapter(page as never);
+    const mode = await adapter.fillCompose({
+      to: "recruiter@acme.com",
+      subject: "Hello",
+      textBody: "plain",
+      htmlBody: "<p>Hello <b>HTML</b></p>",
+    });
+    expect(mode).toBe("html");
+  });
+
+  it("falls back to bodyMode=plain when HTML insert and clipboard paste both fail", async () => {
+    const { page } = mockPage();
+    const originalLocator = page.locator;
+    const bodyFill = vi.fn(async () => {});
+    page.locator = vi.fn((selector: string) => {
+      const base = originalLocator(selector) as {
+        first: () => {
+          evaluate: ReturnType<typeof vi.fn>;
+          fill: ReturnType<typeof vi.fn>;
+          waitFor: ReturnType<typeof vi.fn>;
+        };
+      };
+      if (/message body|g_editable/i.test(selector)) {
+        const inner = base.first();
+        // focus() call has no html arg → undefined; insertHTML call has html → false
+        inner.evaluate = vi.fn(async () => false);
+        inner.fill = bodyFill;
+        return {
+          ...base,
+          first: () => inner,
+        };
+      }
+      return base;
+    });
+    page.evaluate = vi.fn(async () => {
+      throw new Error("clipboard denied");
+    });
+
+    const adapter = createGmailPlaywrightAdapter(page as never);
+    const mode = await adapter.fillCompose({
+      to: "recruiter@acme.com",
+      subject: "Hello",
+      textBody: "plain fallback body",
+      htmlBody: "<p>HTML that will fail</p>",
+    });
+    expect(mode).toBe("plain");
+    expect(bodyFill).toHaveBeenCalledWith("plain fallback body");
+  });
+
+  it("emits fill_done with bodyMode for sendOrSchedule stage logging", async () => {
+    const { page } = mockPage();
+    const stages: Array<{ stage: string; detail?: Record<string, unknown> }> = [];
+    const adapter = createGmailPlaywrightAdapter(page as never);
+    const outcome = await adapter.sendOrSchedule(
+      {
+        to: "recruiter@acme.com",
+        subject: "Hello",
+        textBody: "Body text",
+        htmlBody: "<p>Body text</p>",
+      },
+      (stage, detail) => stages.push({ stage, detail }),
+    );
+    expect(outcome.status).toBe("sent");
+    const fillDone = stages.find((entry) => entry.stage === "fill_done");
+    expect(fillDone?.detail?.bodyMode).toMatch(/html|plain/);
+  });
 });

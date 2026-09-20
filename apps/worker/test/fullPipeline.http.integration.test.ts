@@ -70,6 +70,22 @@ function jobrightTimeout(): JobrightPageAdapter {
   };
 }
 
+/** Company outreach required by assertCandidateHasSendableCopy (Setup stub alone is not enough). */
+function seedCompanyContent(app: HttpApp, company: string) {
+  const now = new Date().toISOString();
+  const key = company.replace(/\s+/g, " ").trim().toLowerCase();
+  app.store.upsertCompanyContent({
+    id: `cc-${key}`,
+    company: key,
+    companyDisplayName: company,
+    subject: "Quick note, {firstName}",
+    body: "Hi {firstName},\n\nInterested in {company}.",
+    source: "generated",
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
 describe("full worker + API pipeline (HTTP)", () => {
   let app: HttpApp;
 
@@ -162,6 +178,8 @@ describe("full worker + API pipeline (HTTP)", () => {
     expect(ada?.discoveryClaimedAt).toBeFalsy();
     expect(ben?.discoveryClaimedAt).toBeFalsy();
 
+    seedCompanyContent(app, "PipelineCo");
+
     const idle = await runDiscoveryPass({
       apiClient: worker,
       createJobrightAdapter: () => jobrightFound("should-not-run@pipeline.co"),
@@ -221,7 +239,7 @@ describe("full worker + API pipeline (HTTP)", () => {
     expect(executeSendJob).toHaveBeenCalledTimes(1);
   });
 
-  it("Jobright miss counts an attempt; timeout does not park the person", async () => {
+  it("Jobright runs once; an explicit Check again can start one fresh attempt", async () => {
     app = await startHttpApp();
     const worker = createApiClient({ baseUrl: app.baseUrl });
 
@@ -248,10 +266,16 @@ describe("full worker + API pipeline (HTTP)", () => {
     });
     const afterTimeout = app.store.listActiveCandidates().find((row) => row.fullName === "Joe Chen");
     expect(afterTimeout?.email).toBeFalsy();
-    expect(afterTimeout?.discoveryAttempts ?? 0).toBe(0);
+    expect(afterTimeout?.discoveryAttempts).toBe(1);
     expect(afterTimeout?.status).not.toBe("email_not_found");
     expect(afterTimeout?.lastError).toMatch(/timed out/i);
     expect(afterTimeout?.discoveryClaimedAt).toBeFalsy();
+
+    await app.fetchJson(`/api/candidates/${afterTimeout!.id}/request-discovery`, {
+      method: "POST",
+      body: JSON.stringify({}),
+      expectStatus: 200,
+    });
 
     await runDiscoveryPass({
       apiClient: worker,
@@ -263,7 +287,7 @@ describe("full worker + API pipeline (HTTP)", () => {
     const afterMiss = app.store.listActiveCandidates().find((row) => row.fullName === "Joe Chen");
     expect(afterMiss?.email).toBeFalsy();
     expect(afterMiss?.discoveryAttempts).toBe(1);
-    expect(afterMiss?.status).not.toBe("email_not_found");
+    expect(afterMiss?.status).toBe("email_not_found");
     expect(afterMiss?.lastError).toMatch(/no contact/i);
   });
 
@@ -295,6 +319,7 @@ describe("full worker + API pipeline (HTTP)", () => {
   it("auto-send after a found lookup queues TEST_MODE and the send pass completes it", async () => {
     app = await startHttpApp();
     const worker = createApiClient({ baseUrl: app.baseUrl });
+    seedCompanyContent(app, "AutoSendCo");
 
     await app.fetchJson("/api/candidates/bulk", {
       method: "POST",
@@ -337,6 +362,7 @@ describe("full worker + API pipeline (HTTP)", () => {
   it("enrich via the worker client re-renders a pending greeting", async () => {
     app = await startHttpApp();
     const worker = createApiClient({ baseUrl: app.baseUrl });
+    seedCompanyContent(app, "EnrichCo");
     const person = app.store.upsertCandidate(
       createCandidate({
         fullName: "Recruiter",
@@ -425,6 +451,7 @@ describe("full worker + API pipeline (HTTP)", () => {
   it("Gmail send failure → retry-failed → send pass succeeds", async () => {
     app = await startHttpApp();
     const worker = createApiClient({ baseUrl: app.baseUrl });
+    seedCompanyContent(app, "RetryCo");
     const person = app.store.upsertCandidate(
       createCandidate({
         fullName: "Retry Send",

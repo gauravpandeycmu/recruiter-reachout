@@ -1,13 +1,27 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   buildCompanyBlocks,
   companiesOverlapWithinGap,
   companyBlocksNeedCompact,
+  defaultGapMinutes,
   gapMsFromMinutes,
   packNewCompanyBlock,
   rebalanceCompanyBlocks,
   type BlockSlot,
 } from "../src/scheduleBlocks.js";
+
+const ORIGINAL_GAP_SECONDS = process.env.GLOBAL_SEND_GAP_SECONDS;
+const ORIGINAL_GAP_MINUTES = process.env.GLOBAL_SEND_GAP_MINUTES;
+const ORIGINAL_LEGACY_INTERVAL = process.env.DEFAULT_SCHEDULE_INTERVAL_MINUTES;
+
+afterEach(() => {
+  if (ORIGINAL_GAP_SECONDS === undefined) delete process.env.GLOBAL_SEND_GAP_SECONDS;
+  else process.env.GLOBAL_SEND_GAP_SECONDS = ORIGINAL_GAP_SECONDS;
+  if (ORIGINAL_GAP_MINUTES === undefined) delete process.env.GLOBAL_SEND_GAP_MINUTES;
+  else process.env.GLOBAL_SEND_GAP_MINUTES = ORIGINAL_GAP_MINUTES;
+  if (ORIGINAL_LEGACY_INTERVAL === undefined) delete process.env.DEFAULT_SCHEDULE_INTERVAL_MINUTES;
+  else process.env.DEFAULT_SCHEDULE_INTERVAL_MINUTES = ORIGINAL_LEGACY_INTERVAL;
+});
 
 function slot(
   id: string,
@@ -23,13 +37,21 @@ function times(map: Map<string, string>, ids: string[]): string[] {
 }
 
 describe("gapMsFromMinutes", () => {
-  it("never goes below 60 seconds", () => {
-    expect(gapMsFromMinutes(0)).toBe(60_000);
-    expect(gapMsFromMinutes(0.5)).toBe(60_000);
+  it("supports sub-minute spacing with a one-second safety floor", () => {
+    expect(gapMsFromMinutes(0)).toBe(1_000);
+    expect(gapMsFromMinutes(0.5)).toBe(30_000);
   });
 
   it("converts whole minutes", () => {
     expect(gapMsFromMinutes(4)).toBe(4 * 60_000);
+  });
+});
+
+describe("defaultGapMinutes", () => {
+  it("uses the current seconds setting ahead of a stale legacy one-minute value", () => {
+    process.env.GLOBAL_SEND_GAP_SECONDS = "30";
+    process.env.DEFAULT_SCHEDULE_INTERVAL_MINUTES = "1";
+    expect(defaultGapMinutes()).toBe(0.5);
   });
 });
 
@@ -98,6 +120,45 @@ describe("companiesOverlapWithinGap", () => {
 });
 
 describe("packNewCompanyBlock", () => {
+  it("places a batch in exact thirty-second slots", () => {
+    const packed = packNewCompanyBlock({
+      existing: [],
+      newSlots: [
+        { id: "a", company: "Acme" },
+        { id: "b", company: "Acme" },
+        { id: "c", company: "Acme" },
+      ],
+      desiredStart: "2030-06-01T15:00:00.000Z",
+      intervalMinutes: 0.5,
+      gapMinutes: 0.5,
+    });
+    expect(times(packed.scheduledForById, ["a", "b", "c"])).toEqual([
+      "2030-06-01T15:00:00.000Z",
+      "2030-06-01T15:00:30.000Z",
+      "2030-06-01T15:01:00.000Z",
+    ]);
+  });
+
+  it("moves a colliding thirty-second batch after the existing company", () => {
+    const packed = packNewCompanyBlock({
+      existing: [
+        slot("a1", "Acme", "2030-06-01T15:00:00.000Z"),
+        slot("a2", "Acme", "2030-06-01T15:00:30.000Z"),
+      ],
+      newSlots: [
+        { id: "b1", company: "Beta" },
+        { id: "b2", company: "Beta" },
+      ],
+      desiredStart: "2030-06-01T15:00:00.000Z",
+      intervalMinutes: 0.5,
+      gapMinutes: 0.5,
+    });
+    expect(times(packed.scheduledForById, ["b1", "b2"])).toEqual([
+      "2030-06-01T15:01:00.000Z",
+      "2030-06-01T15:01:30.000Z",
+    ]);
+  });
+
   it("keeps the new company at desired start when nothing else is pending", () => {
     const packed = packNewCompanyBlock({
       existing: [],

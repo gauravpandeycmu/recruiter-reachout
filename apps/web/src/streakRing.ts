@@ -13,9 +13,9 @@ export function streakRingMetrics(current: number, best: number, activityToday: 
   const todayLabel = activityToday ? "Secured" : current > 0 ? "At risk" : "Idle";
   const hint =
     current === 0
-      ? "Schedule a company batch to plant day one."
+      ? "Meet your daily company goal to plant day one."
       : isPersonalBest
-        ? "Personal best — keep scheduling to push further."
+        ? "Personal best — meet today’s goal to push further."
         : toBeat === 1
           ? "One more day to match your best."
           : `${toBeat} more days to match your best of ${best}.`;
@@ -32,12 +32,12 @@ export function streakRingMetrics(current: number, best: number, activityToday: 
     isPersonalBest,
     todayLabel,
     hint,
-    /** Fun-zone / grove should use outreach streaks, not legacy goal-met longest. */
+    /** Grove streak values are supplied by goal-met days. */
     bestForRing: Math.max(current, best),
   };
 }
 
 /** Best unlock / ring value from analytics goal progress fields. */
-export function resolveBestOutreachStreak(sendStreak: number, longestSendStreak: number): number {
-  return Math.max(0, Math.floor(sendStreak) || 0, Math.floor(longestSendStreak) || 0);
+export function resolveBestOutreachStreak(goalStreak: number, longestGoalStreak: number): number {
+  return Math.max(0, Math.floor(goalStreak) || 0, Math.floor(longestGoalStreak) || 0);
 }

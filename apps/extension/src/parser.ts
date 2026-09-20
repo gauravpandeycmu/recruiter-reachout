@@ -28,7 +28,10 @@ export function parseCurrentPage(documentRef: Document, href: string): PageParse
   const candidates = parseSearchResults(documentRef);
   return {
     candidates,
-    companySuggestion: inferCompanyFromSearchUrl(href) ?? inferCompanyFromPage(candidates),
+    companySuggestion:
+      inferSelectedCompanyFromSearchPage(documentRef, href, candidates) ??
+      inferCompanyFromSearchUrl(href) ??
+      inferCompanyFromPage(candidates),
   };
 }
 
@@ -552,6 +555,7 @@ export function parseSearchResults(documentRef: Document): PageCandidate[] {
       fullName,
       firstName: extractFirstName(fullName),
       title: extractTitle(containerText),
+      company: inferCompanyFromSearchCard(container ?? anchor),
       location: extractLocation(containerText),
       linkedinUrl: url,
       profilePhotoUrl: photoForSearchCard(container ?? anchor, url, fullName),
@@ -583,6 +587,7 @@ function candidateFromSearchCard(card: HTMLElement): PageCandidate | undefined {
     fullName,
     firstName: extractFirstName(fullName),
     title: extractTitle(containerText),
+    company: inferCompanyFromSearchCard(card),
     location: extractLocation(containerText),
     linkedinUrl: url,
     profilePhotoUrl: photoForSearchCard(card, url, fullName),
@@ -684,6 +689,95 @@ export function inferCompanyFromSearchUrl(href: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * A selected LinkedIn company facet is more authoritative than free-text
+ * keywords. Prefer explicit company-labelled chips; when LinkedIn only exposes
+ * a generic selected pill, use the common employer parsed from the result cards.
+ */
+export function inferSelectedCompanyFromSearchPage(
+  documentRef: Document,
+  href: string,
+  candidates: PageCandidate[] = [],
+): string | undefined {
+  const explicitlyLabelled = [
+    ...documentRef.querySelectorAll<HTMLElement>(
+      [
+        '[aria-label*="current company" i]',
+        '[aria-label*="company filter" i]',
+        '[data-control-name*="current_company" i]',
+        '[data-test-filter-value*="company" i]',
+      ].join(", "),
+    ),
+  ];
+  for (const node of explicitlyLabelled) {
+    const value =
+      cleanSelectedFilterCompany(node.getAttribute("aria-label") ?? "") ??
+      cleanSelectedFilterCompany(node.textContent ?? "");
+    if (value) return value;
+  }
+
+  let hasCompanyFacet = false;
+  try {
+    const url = new URL(href);
+    hasCompanyFacet = [...url.searchParams.keys()].some((key) => /(?:current|facet).*compan/i.test(key));
+  } catch {
+    // Ignore malformed URLs; explicit DOM labels above still work.
+  }
+  if (!hasCompanyFacet) return undefined;
+
+  const companies = candidates
+    .map((candidate) => candidate.company?.trim())
+    .filter((company): company is string => Boolean(company));
+  if (companies.length > 0) {
+    const counts = new Map<string, { label: string; count: number }>();
+    for (const company of companies) {
+      const key = company.toLowerCase();
+      const entry = counts.get(key) ?? { label: company, count: 0 };
+      entry.count += 1;
+      counts.set(key, entry);
+    }
+    const common = [...counts.values()].sort((a, b) => b.count - a.count)[0];
+    if (common && common.count >= Math.max(1, Math.ceil(companies.length / 2))) {
+      return common.label;
+    }
+  }
+
+  return undefined;
+}
+
+function cleanSelectedFilterCompany(raw: string): string | undefined {
+  const value = normalizeWhitespace(raw)
+    .replace(/^(?:current compan(?:y|ies)|company filter)\b\s*[:\-]?\s*/i, "")
+    .replace(/\s+filter\b.*$/i, "")
+    .replace(/^filter\b.*$/i, "")
+    .replace(/\s*[,.]?\s*clicking\b.*$/i, "")
+    .replace(/\s*[,.]?\s*(?:remove|selected)\b.*$/i, "")
+    .trim();
+  return looksLikeCompanyName(value) && !looksLikeSchool(value) ? cleanCompanyName(value) : undefined;
+}
+
+function inferCompanyFromSearchCard(root: ParentNode): string | undefined {
+  const selectors = [
+    ".entity-result__primary-subtitle",
+    ".entity-result__summary",
+    "[data-anonymize='job-title']",
+    "[class*='primary-subtitle']",
+  ];
+  const lines = [
+    ...selectors.flatMap((selector) =>
+      [...root.querySelectorAll<HTMLElement>(selector)].map((node) => normalizeWhitespace(node.textContent ?? "")),
+    ),
+    ...(root.textContent ?? "").split(/\n+/).map((line) => normalizeWhitespace(line)),
+  ];
+  for (const line of lines) {
+    const company = inferCompanyFromHeadline(line);
+    if (company && looksLikeCompanyName(company) && !looksLikeSchool(company)) {
+      return company;
+    }
+  }
+  return undefined;
 }
 
 export function inferNameFromText(text: string): string {
@@ -886,7 +980,7 @@ function inferCompanyFromPage(candidates: PageCandidate[]): string | undefined {
 
 /**
  * Prefer the current Experience role (date range includes Present), then JSON-LD
- * worksFor, then the top-card employer chip, then the headline.
+ * worksFor, then the top-card employer chip, then looser hero text and headline.
  * Do not scan the rest of the page — About / activity / "You both worked at"
  * routinely mention previous employers.
  */
@@ -903,13 +997,13 @@ export function inferCompanyFromProfile(
   if (fromJsonLd.company) {
     return fromJsonLd;
   }
-  const fromHero = inferCompanyFromHeroLines(documentRef);
-  if (fromHero.company) {
-    return fromHero;
-  }
   const fromTopCard = inferCompanyFromTopCard(documentRef);
   if (fromTopCard.company) {
     return fromTopCard;
+  }
+  const fromHero = inferCompanyFromHeroLines(documentRef);
+  if (fromHero.company) {
+    return fromHero;
   }
   const fromHeadline = inferCompanyFromHeadline(title);
   if (fromHeadline) {
@@ -1258,6 +1352,16 @@ function looksLikeCompanyName(name: string): boolean {
     return false;
   }
   if (/^(follow|see all|company|linkedin|show all|more)$/i.test(name)) {
+    return false;
+  }
+  if (/^(?:she\s*\/\s*her|he\s*\/\s*him|they\s*\/\s*them|she|her|he|him|they|them)$/i.test(name.trim())) {
+    return false;
+  }
+  if (
+    /^(?:(?:senior|sr\.?|junior|jr\.?|lead|principal|staff|technical|chief|head|founding)\s+)*(?:(?:software|ios|android|backend|frontend|full[ -]?stack|data|product|engineering)\s+)*(?:engineer|developer|recruiter|sourcer|manager|director|architect|designer|scientist|analyst|consultant|specialist)$/i.test(
+      name.trim(),
+    )
+  ) {
     return false;
   }
   if (/^[·•]\s*\d/.test(name) || /^(\d+\+?\s+)?connections?$/i.test(name)) {

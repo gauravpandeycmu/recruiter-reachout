@@ -34,9 +34,12 @@ export type GmailSendStage =
 
 export type GmailSendStageLogger = (stage: GmailSendStage, detail?: Record<string, unknown>) => void;
 
+export type GmailBodyFillMode = "html" | "plain";
+
 export interface GmailPlaywrightAdapter {
   openCompose(): Promise<void>;
-  fillCompose(input: GmailComposeInput): Promise<void>;
+  /** Returns whether the body was filled as HTML or fell back to plain text. */
+  fillCompose(input: GmailComposeInput): Promise<GmailBodyFillMode>;
   ensureStreakTrackingOn(): Promise<void>;
   sendNow(onStage?: GmailSendStageLogger): Promise<void>;
   scheduleSend(scheduleFor: Date): Promise<void>;
@@ -354,7 +357,7 @@ export function createGmailPlaywrightAdapter(page: Page): GmailPlaywrightAdapter
       await page.waitForTimeout(400);
     },
 
-    async fillCompose(input: GmailComposeInput): Promise<void> {
+    async fillCompose(input: GmailComposeInput): Promise<GmailBodyFillMode> {
       await dismissGmailBlockers(page);
       const toField = page.locator('input[aria-label="To recipients"], textarea[name="to"], input[name="to"]').first();
       await toField.waitFor({ state: "visible", timeout: 15000 });
@@ -373,6 +376,7 @@ export function createGmailPlaywrightAdapter(page: Page): GmailPlaywrightAdapter
       await bodyField.evaluate((el) => {
         (el as HTMLElement).focus();
       });
+      let bodyMode: GmailBodyFillMode = "plain";
       // Prefer HTML for signature formatting. Gmail Trusted Types often blocks
       // innerHTML/insertHTML — try clipboard write + paste shortcut, then plain text.
       if (input.htmlBody?.trim()) {
@@ -412,7 +416,9 @@ export function createGmailPlaywrightAdapter(page: Page): GmailPlaywrightAdapter
           }, input.htmlBody)
           .catch(() => false);
 
-        if (!inserted) {
+        if (inserted) {
+          bodyMode = "html";
+        } else {
           // Clipboard API + Cmd/Ctrl+V often bypasses Trusted Types in Chromium.
           try {
             await page.evaluate(async (html) => {
@@ -431,15 +437,20 @@ export function createGmailPlaywrightAdapter(page: Page): GmailPlaywrightAdapter
             await page.keyboard.press(process.platform === "darwin" ? "Meta+V" : "Control+V");
             await page.waitForTimeout(300);
             const hasContent = await bodyField.evaluate((el) => (el.textContent ?? "").trim().length > 10);
-            if (!hasContent) {
+            if (hasContent) {
+              bodyMode = "html";
+            } else {
               await bodyField.fill(input.textBody);
+              bodyMode = "plain";
             }
           } catch {
             await bodyField.fill(input.textBody);
+            bodyMode = "plain";
           }
         }
       } else {
         await bodyField.fill(input.textBody);
+        bodyMode = "plain";
       }
 
       if (input.resumePath) {
@@ -457,6 +468,7 @@ export function createGmailPlaywrightAdapter(page: Page): GmailPlaywrightAdapter
         }
         await page.waitForTimeout(1500);
       }
+      return bodyMode;
     },
 
     async ensureStreakTrackingOn(): Promise<void> {
@@ -650,8 +662,8 @@ export function createGmailPlaywrightAdapter(page: Page): GmailPlaywrightAdapter
         stage("compose_open_done", { to: input.to });
 
         stage("fill_start", { to: input.to, subject: input.subject });
-        await this.fillCompose(input);
-        stage("fill_done", { to: input.to });
+        const bodyMode = await this.fillCompose(input);
+        stage("fill_done", { to: input.to, bodyMode });
 
         stage("streak_start", { to: input.to });
         await this.ensureStreakTrackingOn();

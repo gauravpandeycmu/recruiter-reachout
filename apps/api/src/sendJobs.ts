@@ -161,22 +161,40 @@ export function globalSendGapMs(): number {
   return gapMsFromMinutes(defaultGapMinutes());
 }
 
-/** Earliest time another send may start after the last completed send. */
+/** Stable, restart-safe human pacing. Stability matters because the API polls this repeatedly. */
+export function completedSendGapMs(jobId: string): number {
+  const base = globalSendGapMs();
+  const jitter = Math.min(4_000, Math.max(0, Number(process.env.GLOBAL_SEND_JITTER_SECONDS ?? 4) * 1_000));
+  if (jitter === 0) return base;
+  let hash = 2166136261;
+  for (const char of jobId) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  const offset = (Math.abs(hash) % (jitter * 2 + 1)) - jitter;
+  return Math.max(1_000, base + offset);
+}
+
+/** Earliest time another send may start after the last completed send.
+ * The configured cadence is start-to-start, so Gmail execution time is not
+ * added again. Older records retain the conservative completion fallback. */
 export function nextClaimAllowedAt(store: Store): Date | undefined {
   let latest = 0;
+  let latestJobId = "";
   for (const job of store.listSendJobs()) {
     if (job.status !== "completed") {
       continue;
     }
-    const touched = new Date(job.updatedAt || job.createdAt).getTime();
+    const touched = new Date(job.claimedAt || job.updatedAt || job.createdAt).getTime();
     if (Number.isFinite(touched) && touched > latest) {
       latest = touched;
+      latestJobId = job.id;
     }
   }
   if (!latest) {
     return undefined;
   }
-  return new Date(latest + globalSendGapMs());
+  return new Date(latest + completedSendGapMs(latestJobId));
 }
 
 export function claimNextSendJob(store: Store, now = new Date()): SendJob | undefined {
@@ -200,6 +218,7 @@ export function claimNextSendJob(store: Store, now = new Date()): SendJob | unde
   const claimed = store.upsertSendJob({
     ...due,
     status: "in_progress",
+    claimedAt: now.toISOString(),
     updatedAt: now.toISOString(),
   });
   audit("send.claimed", {

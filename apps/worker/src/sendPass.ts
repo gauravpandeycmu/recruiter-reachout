@@ -158,7 +158,13 @@ export async function runSendPass(input: {
         if (stage === "streak_done" || stage === "send_clicked" || stage === "send_click_ambiguous") {
           input.apiClient.touchSendJob(jobToSend.id).catch(() => {});
         }
-        input.log(`Send stage [${stage}] ${jobToSend.to}${detail?.reason ? ` — ${detail.reason}` : ""}`);
+        const extras = [
+          detail?.reason ? String(detail.reason) : "",
+          detail?.bodyMode ? `body=${detail.bodyMode}` : "",
+        ]
+          .filter(Boolean)
+          .join("; ");
+        input.log(`Send stage [${stage}] ${jobToSend.to}${extras ? ` — ${extras}` : ""}`);
         audit("worker.send.stage", {
           ...jobAuditBase(jobToSend),
           attempt: attemptNumber,
@@ -173,7 +179,9 @@ export async function runSendPass(input: {
   let outcome = await attempt(job, 1);
   let retried = false;
   if (outcome.status === "error" && isSafeClosedBrowserRetry(outcome.reason)) {
-    input.log(`Gmail browser died before Send — relaunching and retrying job ${job.id} once…`);
+    input.log(
+      `Gmail browser died before Send — relaunching and retrying job ${job.id} once (stage=${lastStage ?? "n/a"}, sendClicked=${sendClicked})…`,
+    );
     audit("worker.send.retry", {
       ...base,
       reason: outcome.reason,
@@ -196,7 +204,7 @@ export async function runSendPass(input: {
     if (/waitForTimeout/i.test(outcome.reason) || sendClicked) {
       // Send already clicked; page teardown during settle used to trigger a re-send.
       input.log(
-        `Gmail page closed after Send for job ${job.id} (stage=${lastStage}, sendClicked=${sendClicked}) — treating as sent (not retrying).`,
+        `Gmail page closed after Send for job ${job.id} (stage=${lastStage ?? "n/a"}, sendClicked=${sendClicked}, reason=${outcome.reason}) — treating as sent (not retrying).`,
       );
       audit("worker.send.assume_sent_after_click", {
         ...base,
@@ -207,7 +215,7 @@ export async function runSendPass(input: {
       outcome = { status: "sent" };
     } else {
       input.log(
-        `Gmail browser closed during send for job ${job.id} (${outcome.reason}) — not retrying. Check Gmail Sent before manual retry.`,
+        `Gmail browser closed during send for job ${job.id} (stage=${lastStage ?? "n/a"}, sendClicked=${sendClicked}): ${outcome.reason} — not retrying. Check Gmail Sent before manual retry.`,
       );
       audit("worker.send.no_retry_closed", {
         ...base,

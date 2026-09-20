@@ -11,6 +11,7 @@ import {
   isChromiumProfileLocked,
   markChromiumExitClean,
   prepareChromiumUserDataDir,
+  resolveEffectiveHeadless,
   resolveLaunchChannel,
 } from "../src/browserContext.js";
 
@@ -38,6 +39,44 @@ describe("buildExtensionArgs", () => {
     expect(resolveLaunchChannel({ userDataDir: "/tmp/x", extensionPaths: [extPath] })).toBe("chromium");
     expect(resolveLaunchChannel({ userDataDir: "/tmp/x", channel: "chrome", extensionPaths: [extPath] })).toBe("chromium");
     expect(resolveLaunchChannel({ userDataDir: "/tmp/x", channel: "chrome" })).toBe("chrome");
+  });
+});
+
+describe("resolveEffectiveHeadless", () => {
+  it("defaults to headless when no extensions are loaded", () => {
+    expect(resolveEffectiveHeadless({ userDataDir: "/tmp/x" })).toBe(true);
+    expect(resolveEffectiveHeadless({ userDataDir: "/tmp/x", headless: false })).toBe(false);
+  });
+
+  it("forces headed when extensions are present and allowHeadlessExtensions is off (Gmail/Streak)", () => {
+    const extPath = process.cwd();
+    expect(
+      resolveEffectiveHeadless({
+        userDataDir: "/tmp/gmail",
+        headless: true,
+        extensionPaths: [extPath],
+      }),
+    ).toBe(false);
+  });
+
+  it("allows headless extensions when explicitly opted in (Apollo/SalesQL finder)", () => {
+    const extPath = process.cwd();
+    expect(
+      resolveEffectiveHeadless({
+        userDataDir: "/tmp/finder",
+        headless: true,
+        allowHeadlessExtensions: true,
+        extensionPaths: [extPath],
+      }),
+    ).toBe(true);
+    expect(
+      resolveEffectiveHeadless({
+        userDataDir: "/tmp/finder",
+        headless: false,
+        allowHeadlessExtensions: true,
+        extensionPaths: [extPath],
+      }),
+    ).toBe(false);
   });
 });
 

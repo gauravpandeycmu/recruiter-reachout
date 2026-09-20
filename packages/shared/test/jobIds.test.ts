@@ -63,13 +63,13 @@ describe("extractJobIds", () => {
 });
 
 describe("collectJobLinkTexts", () => {
-  it("returns only the job ID — never the role title for numeric IDs", () => {
+  it("links the role title and leaves a numeric job ID as plain text", () => {
     const texts = collectJobLinkTexts({
       jobUrl: "https://jobs.acme.com/778812",
-      emailBody: "Hi Jane,\n\nReaching out about 778812.",
+      emailBody: "Hi Jane,\n\nReaching out about the Software Engineer role at Acme (778812).",
       roleTitle: "Software Engineer",
     });
-    expect(texts).toEqual(["778812"]);
+    expect(texts).toEqual(["Software Engineer"]);
   });
 
   it("still uses labeled IDs from the job description", () => {

@@ -77,3 +77,89 @@ export function compactSendChecklist(rows: SendProgressRow[]): SendProgressRow[]
   const end = Math.min(rows.length, Math.max(focus + 3, start + 5));
   return rows.slice(start, end);
 }
+
+/**
+ * Prefer live queue rows; when Send-now archived the batch, synthesize missing
+ * rows from the session snapshot so the home-feed progress panel never goes blank.
+ */
+export function buildSendProgressRowsFromSession(
+  queue: Array<{
+    id: string;
+    candidateId: string;
+    status: string;
+    scheduledFor: string;
+    failureReason?: string;
+  }>,
+  session:
+    | {
+        people: Array<{
+          queueItemId: string;
+          candidateId: string;
+          fullName: string;
+        }>;
+        startedAt: string;
+      }
+    | null
+    | undefined,
+  activeCandidateId?: string,
+  intervalMinutes = 0.5,
+): SendProgressRow[] {
+  if (!session?.people.length) {
+    return buildSendProgressRows(
+      queue,
+      queue.map((item) => ({ id: item.candidateId, fullName: item.candidateId })),
+      activeCandidateId,
+    );
+  }
+  const byId = new Map(queue.map((item) => [item.id, item]));
+  const byCandidate = new Map(queue.map((item) => [item.candidateId, item]));
+  const startedMs = new Date(session.startedAt).getTime();
+  const spacingMs = Math.max(1 / 60, intervalMinutes) * 60_000;
+  return session.people.map((person, index) => {
+    const live = byId.get(person.queueItemId) ?? byCandidate.get(person.candidateId);
+    if (live) {
+      return {
+        id: live.id,
+        candidateId: live.candidateId,
+        name: person.fullName,
+        status: resolveQueueProgressStatus(live, activeCandidateId, live.candidateId),
+        scheduledFor: live.scheduledFor,
+      };
+    }
+    const scheduledFor = new Date(
+      (Number.isFinite(startedMs) ? startedMs : Date.now()) + index * spacingMs,
+    ).toISOString();
+    return {
+      id: person.queueItemId,
+      candidateId: person.candidateId,
+      name: person.fullName,
+      status:
+        activeCandidateId === person.candidateId
+          ? "sending"
+          : ("scheduled" as const),
+      scheduledFor,
+    };
+  });
+}
+
+/** Human remaining time until a scheduled slot (or "now" when due/overdue). */
+export function formatSendEta(scheduledFor: string, nowMs = Date.now()): string {
+  const at = new Date(scheduledFor).getTime();
+  if (!Number.isFinite(at)) {
+    return "soon";
+  }
+  const delta = at - nowMs;
+  if (delta <= 15_000) {
+    return "now";
+  }
+  if (delta < 60_000) {
+    return `~${Math.max(20, Math.round(delta / 10_000) * 10)} sec`;
+  }
+  const minutes = Math.max(1, Math.round(delta / 60_000));
+  if (minutes < 60) {
+    return `~${minutes} min`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const rem = minutes % 60;
+  return rem === 0 ? `~${hours}h` : `~${hours}h ${rem}m`;
+}

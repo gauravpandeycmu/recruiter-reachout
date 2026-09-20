@@ -2,6 +2,32 @@ import { describe, expect, it, vi } from "vitest";
 import { runFinderChain } from "../src/finderChain.js";
 
 describe("runFinderChain", () => {
+  it("recovers a timed-out browser provider and keeps a later successful result", async () => {
+    let releaseSalesql!: (value: { status: "error"; message: string; provider: "salesql" }) => void;
+    const stalledSalesql = new Promise<{ status: "error"; message: string; provider: "salesql" }>((resolve) => {
+      releaseSalesql = resolve;
+    });
+    const onProviderTimeout = vi.fn(() => {
+      releaseSalesql({ status: "error", message: "aborted by recovery", provider: "salesql" });
+    });
+
+    const outcome = await runFinderChain({
+      steps: [
+        { id: "salesql", timeoutMs: 5, canUse: () => true, run: () => stalledSalesql },
+        {
+          id: "getprospect",
+          canUse: () => true,
+          run: async () => ({ status: "found", email: "chris@openai.com", provider: "getprospect" }),
+        },
+      ],
+      company: "OpenAI",
+      onProviderTimeout,
+    });
+
+    expect(onProviderTimeout).toHaveBeenCalledWith("salesql");
+    expect(outcome).toMatchObject({ status: "found", email: "chris@openai.com", provider: "getprospect" });
+  });
+
   it("reports every provider execution, including misses before a later find", async () => {
     const onLookup = vi.fn();
     await runFinderChain({
@@ -188,5 +214,29 @@ describe("runFinderChain", () => {
       steps: [{ id: "apollo", canUse: () => false, run: async () => ({ status: "found", email: "x@y.com", provider: "apollo" }) }],
     });
     expect(outcome).toBeUndefined();
+  });
+
+  it("prefers the last miss over a prior dry_run when nothing found", async () => {
+    const outcome = await runFinderChain({
+      steps: [
+        { id: "salesql", canUse: () => true, run: async () => ({ status: "dry_run", provider: "salesql" }) },
+        { id: "apollo", canUse: () => true, run: async () => ({ status: "not_found", provider: "apollo" }) },
+      ],
+    });
+    expect(outcome).toMatchObject({ status: "not_found", provider: "apollo" });
+  });
+
+  it("returns Hunter quota message when forced and only Hunter is denied", async () => {
+    const outcome = await runFinderChain({
+      required: true,
+      steps: [
+        { id: "hunter", canUse: () => false, run: async () => ({ status: "found", email: "x@y.com", provider: "hunter" }) },
+      ],
+    });
+    expect(outcome).toMatchObject({
+      status: "error",
+      provider: "hunter",
+      message: expect.stringMatching(/Hunter monthly quota exhausted/i),
+    });
   });
 });

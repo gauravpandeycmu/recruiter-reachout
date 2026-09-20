@@ -17,6 +17,7 @@ import {
   setOutreachContent,
 } from "../src/services.js";
 import { Store } from "../src/store.js";
+import { ensureCompanyCopy } from "./helpers/httpApp.js";
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -39,6 +40,7 @@ describe("company-block + claim + hibernate work integration", () => {
     process.env.DOMAIN_DAILY_SEND_LIMIT = "20";
     process.env.GLOBAL_SEND_GAP_MINUTES = "4";
     process.env.DEFAULT_SCHEDULE_INTERVAL_MINUTES = "4";
+    process.env.GLOBAL_SEND_JITTER_SECONDS = "0";
 
     store.setGmailAccount({
       id: "me@example.com",
@@ -66,6 +68,7 @@ describe("company-block + claim + hibernate work integration", () => {
   });
 
   async function seed(name: string, email: string, company: string) {
+    ensureCompanyCopy(store, company);
     return store.upsertCandidate(
       createCandidate({
         fullName: name,
@@ -127,6 +130,73 @@ describe("company-block + claim + hibernate work integration", () => {
       "2030-06-01T15:00:00.000Z",
       "2030-06-01T15:04:00.000Z",
       "2030-06-01T15:08:00.000Z",
+    ]);
+  });
+
+  it("adds a new company after the live queue tail using the global gap", async () => {
+    const a = await seed("Ada", "ada@acme.com", "Acme");
+    const b = await seed("Ben", "ben@acme.com", "Acme");
+    const start = "2030-06-01T15:00:00.000Z";
+    await scheduleSends(store, {
+      candidateIds: [a.id, b.id],
+      startAt: start,
+      intervalMinutes: 4,
+      mode: "schedule",
+    });
+
+    const c = await seed("Cara", "cara@beta.com", "Beta");
+    const appended = await scheduleSends(store, {
+      candidateIds: [c.id],
+      // Deliberately stale: appendToQueue must use the server's current tail.
+      startAt: "2030-06-01T14:00:00.000Z",
+      intervalMinutes: 4,
+      mode: "schedule",
+      appendToQueue: true,
+    });
+
+    expect(appended.jobs.map((job) => job.scheduledFor)).toEqual([
+      "2030-06-01T15:08:00.000Z",
+    ]);
+  });
+
+  it("rejects add-to-queue when there is no live scheduled queue", async () => {
+    const candidate = await seed("Nora", "nora@beta.com", "Beta");
+    await expect(
+      scheduleSends(store, {
+        candidateIds: [candidate.id],
+        intervalMinutes: 4,
+        mode: "schedule",
+        appendToQueue: true,
+      }),
+    ).rejects.toThrow("no scheduled emails");
+  });
+
+  it("resumes a paused batch at the end of the live queue", async () => {
+    const live = await seed("Lena", "lena@acme.com", "Acme");
+    await scheduleSends(store, {
+      candidateIds: [live.id],
+      startAt: "2030-06-01T15:00:00.000Z",
+      intervalMinutes: 4,
+      mode: "schedule",
+    });
+    const pausedPerson = await seed("Pia", "pia@beta.com", "Beta");
+    const original = await scheduleSends(store, {
+      candidateIds: [pausedPerson.id],
+      startAt: "2030-06-01T18:00:00.000Z",
+      intervalMinutes: 4,
+      mode: "schedule",
+    });
+    const queueItemId = original.queued[0]!.id;
+    await pausePendingSendBatch(store, { queueItemIds: [queueItemId] });
+
+    const resumed = await resumePausedSendBatch(store, {
+      queueItemIds: [queueItemId],
+      startAt: "2030-06-01T14:00:00.000Z",
+      intervalMinutes: 4,
+      appendToQueue: true,
+    });
+    expect(resumed.jobs.map((job) => job.scheduledFor)).toEqual([
+      "2030-06-01T15:04:00.000Z",
     ]);
   });
 
@@ -471,8 +541,8 @@ describe("company-block + claim + hibernate work integration", () => {
       .sort((a, b) => a.scheduledFor.localeCompare(b.scheduledFor));
     expect(notionAfter.map((item) => item.scheduledFor)).toEqual([
       tomorrow8.toISOString(),
+      new Date(tomorrow8.getTime() + 30_000).toISOString(),
       new Date(tomorrow8.getTime() + 60_000).toISOString(),
-      new Date(tomorrow8.getTime() + 2 * 60_000).toISOString(),
     ]);
   });
 
@@ -507,6 +577,35 @@ describe("company-block + claim + hibernate work integration", () => {
     const t0 = Date.parse(result.jobs[0]!.scheduledFor!);
     const t1 = Date.parse(result.jobs[1]!.scheduledFor!);
     expect(t1 - t0).toBe(4 * 60_000);
+  });
+
+  it("delays a scheduled company until an active send-now batch has finished", async () => {
+    process.env.GLOBAL_SEND_GAP_SECONDS = "30";
+    const active = [
+      await seed("Ada", "ada@alpha.com", "Alpha"),
+      await seed("Ben", "ben@alpha.com", "Alpha"),
+      await seed("Cara", "cara@alpha.com", "Alpha"),
+    ];
+    const sendNow = await scheduleSends(store, {
+      candidateIds: active.map((candidate) => candidate.id),
+      startAt: new Date().toISOString(),
+      intervalMinutes: 0.5,
+      mode: "send_now",
+    });
+    const claimed = await claimNextSendJob(store, new Date(Date.now() + 1_000));
+    expect(claimed?.status).toBe("in_progress");
+
+    const later = await seed("Drew", "drew@beta.com", "Beta");
+    const scheduled = await scheduleSends(store, {
+      candidateIds: [later.id],
+      startAt: new Date().toISOString(),
+      intervalMinutes: 0.5,
+      mode: "schedule",
+    });
+
+    const activeLast = Math.max(...sendNow.jobs.map((job) => Date.parse(job.scheduledFor!)));
+    expect(Date.parse(scheduled.jobs[0]!.scheduledFor!)).toBeGreaterThanOrEqual(activeLast + 30_000);
+    expect(scheduled.shifted.length).toBeGreaterThan(0);
   });
 
   it("two companies both wanting 8am — second starts only after first block finishes", async () => {
@@ -633,16 +732,14 @@ describe("company-block + claim + hibernate work integration", () => {
     completeSendJob(store, first!.id, { success: true });
     pinCompleted(first!.id, "2030-08-04T08:00:05.000Z");
 
-    // 1s before gap elapses — blocked
-    expect(claimNextSendJob(store, new Date("2030-08-04T08:04:04.000Z"))).toBeUndefined();
-    const second = claimNextSendJob(store, new Date("2030-08-04T08:04:05.000Z"));
+    // Cadence is measured from the previous start, not from Gmail completion.
+    const second = claimNextSendJob(store, new Date("2030-08-04T08:04:00.000Z"));
     expect(second?.candidateId).toBe(a2.id);
     completeSendJob(store, second!.id, { success: true });
     pinCompleted(second!.id, "2030-08-04T08:04:10.000Z");
 
-    // Beta still not claimable until its slot AND gap
-    expect(claimNextSendJob(store, new Date("2030-08-04T08:08:00.000Z"))).toBeUndefined();
-    const third = claimNextSendJob(store, new Date("2030-08-04T08:08:10.000Z"));
+    // Beta becomes claimable at its packed slot and start-to-start gap.
+    const third = claimNextSendJob(store, new Date("2030-08-04T08:08:00.000Z"));
     expect(third?.candidateId).toBe(b1.id);
   });
 
@@ -703,7 +800,7 @@ describe("company-block + claim + hibernate work integration", () => {
 
     const peek = getPendingWorkerWork(store);
     expect(peek.hasInProgressSend).toBe(false);
-    expect(peek.nextClaimAllowedAt).toBe("2030-08-07T08:04:30.000Z");
+    expect(peek.nextClaimAllowedAt).toBe("2030-08-07T08:04:00.000Z");
     expect(peek.nextSendDue?.candidateId).toBe(b.id);
   });
 

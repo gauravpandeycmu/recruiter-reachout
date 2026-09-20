@@ -175,7 +175,7 @@ describe("clearJobrightContactResultCard", () => {
       locator: vi.fn(() => fakeInvisible()),
       reload: vi.fn(async () => {}),
     };
-    expect(await clearJobrightContactResultCard(page as never)).toBe(false);
+    expect(await clearJobrightContactResultCard(page as never)).toBe("absent");
     expect(page.reload).not.toHaveBeenCalled();
   });
 
@@ -204,7 +204,7 @@ describe("clearJobrightContactResultCard", () => {
       locator: vi.fn(() => close),
       reload: vi.fn(async () => {}),
     };
-    expect(await clearJobrightContactResultCard(page as never)).toBe(true);
+    expect(await clearJobrightContactResultCard(page as never)).toBe("closed");
     expect(close.click).toHaveBeenCalled();
     expect(page.reload).not.toHaveBeenCalled();
   });
@@ -231,7 +231,7 @@ describe("clearJobrightContactResultCard", () => {
       locator: vi.fn(() => close),
       reload: vi.fn(async () => {}),
     };
-    expect(await clearJobrightContactResultCard(page as never)).toBe(true);
+    expect(await clearJobrightContactResultCard(page as never)).toBe("reloaded");
     expect(page.reload).toHaveBeenCalled();
   });
 });

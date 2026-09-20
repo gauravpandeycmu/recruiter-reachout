@@ -28,24 +28,31 @@ export type CompanyBlock = {
 
 /** UI schedule presets top out at 12m; anything beyond this is treated as corrupt stretch (~50m bug). */
 export const MAX_HEALTHY_INTERVAL_MINUTES = 12;
-export const DEFAULT_SEND_INTERVAL_MINUTES = 1;
+/** Public APIs still express spacing in minutes; 0.5 is the 30-second default. */
+export const DEFAULT_SEND_INTERVAL_MINUTES = 0.5;
 
 function companyKey(company: string): string {
   return company.replace(/\s+/g, " ").trim().toLowerCase() || "unknown";
 }
 
 export function defaultGapMinutes(intervalMinutes?: number): number {
-  const fromEnv = Number(
-    process.env.GLOBAL_SEND_GAP_MINUTES ?? process.env.DEFAULT_SCHEDULE_INTERVAL_MINUTES ?? DEFAULT_SEND_INTERVAL_MINUTES,
-  );
-  if (Number.isFinite(fromEnv) && fromEnv >= 1) {
-    return Math.round(fromEnv);
+  // Seconds is the current setting and must win when an old installation still
+  // carries DEFAULT_SCHEDULE_INTERVAL_MINUTES=1. The former order silently
+  // overrode the configured 30-second cadence with that legacy one-minute value.
+  const seconds = Number(process.env.GLOBAL_SEND_GAP_SECONDS);
+  if (Number.isFinite(seconds) && seconds >= 1) {
+    return seconds / 60;
   }
-  return Math.max(1, Math.round(intervalMinutes ?? DEFAULT_SEND_INTERVAL_MINUTES));
+  const legacyMinutes = process.env.GLOBAL_SEND_GAP_MINUTES ?? process.env.DEFAULT_SCHEDULE_INTERVAL_MINUTES;
+  const fromEnv = Number(legacyMinutes);
+  if (legacyMinutes !== undefined && Number.isFinite(fromEnv) && fromEnv > 0) {
+    return fromEnv;
+  }
+  return Math.max(1 / 60, intervalMinutes ?? DEFAULT_SEND_INTERVAL_MINUTES);
 }
 
 export function gapMsFromMinutes(minutes: number): number {
-  return Math.max(60_000, Math.round(minutes) * 60_000);
+  return Math.max(1_000, Math.round(minutes * 60_000));
 }
 
 export function buildCompanyBlocks(slots: BlockSlot[]): CompanyBlock[] {
@@ -120,8 +127,8 @@ export function packNewCompanyBlock(input: {
   gapMinutes?: number;
   now?: Date;
 }): { scheduledForById: Map<string, string>; shifted: ShiftedSlot[]; startAt: string } {
-  const intervalMinutes = Math.max(1, Math.round(input.intervalMinutes));
-  const gapMinutes = Math.max(1, Math.round(input.gapMinutes ?? defaultGapMinutes(intervalMinutes)));
+  const intervalMinutes = Math.max(1 / 60, input.intervalMinutes);
+  const gapMinutes = Math.max(1 / 60, input.gapMinutes ?? defaultGapMinutes(intervalMinutes));
   const intervalMs = intervalMinutes * 60_000;
   const gapMs = gapMsFromMinutes(gapMinutes);
   const company = input.newSlots[0]?.company ?? "Batch";
@@ -250,9 +257,9 @@ export function rebalanceCompanyBlocks(input: {
   now?: Date;
   serializeAll?: boolean;
 }): { scheduledForById: Map<string, string>; shifted: ShiftedSlot[] } {
-  const gapMinutes = Math.max(1, Math.round(input.gapMinutes ?? defaultGapMinutes(input.intervalMinutes)));
+  const gapMinutes = Math.max(1 / 60, input.gapMinutes ?? defaultGapMinutes(input.intervalMinutes));
   const gapMs = gapMsFromMinutes(gapMinutes);
-  const intervalMinutes = Math.max(1, Math.round(input.intervalMinutes ?? gapMinutes));
+  const intervalMinutes = Math.max(1 / 60, input.intervalMinutes ?? gapMinutes);
   const configuredIntervalMs = intervalMinutes * 60_000;
   const nowMs = (input.now ?? new Date()).getTime();
   const serializeAll = Boolean(input.serializeAll);

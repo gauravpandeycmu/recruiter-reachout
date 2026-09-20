@@ -428,4 +428,61 @@ describe("runSendPass", () => {
       expect.objectContaining({ success: false }),
     );
   });
+
+  it("logs fill_done bodyMode from stage details and heartbeats after streak_done", async () => {
+    const job = baseJob();
+    vi.mocked(executeSendJob).mockImplementation(async ({ onStage }) => {
+      onStage?.("fill_done", { bodyMode: "plain" });
+      onStage?.("streak_done");
+      onStage?.("send_clicked");
+      return { status: "sent" };
+    });
+    const logs: string[] = [];
+    const apiClient = {
+      fetchNextSendJob: vi.fn().mockResolvedValue(job),
+      fetchSendJob: vi.fn().mockResolvedValue(job),
+      reportWorkerStatus: vi.fn().mockResolvedValue(undefined),
+      reportSendResult: vi.fn().mockResolvedValue(undefined),
+      touchSendJob: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await runSendPass({
+      apiClient: apiClient as never,
+      getPage: async () => fakePage,
+      log: (message) => logs.push(message),
+    });
+
+    expect(logs.some((line) => /Send stage \[fill_done\].*body=plain/.test(line))).toBe(true);
+    expect(apiClient.touchSendJob).toHaveBeenCalledWith(job.id);
+  });
+
+  it("includes stage and sendClicked in closed-browser assume-sent logs", async () => {
+    const job = baseJob();
+    vi.mocked(executeSendJob).mockImplementation(async ({ onStage }) => {
+      onStage?.("send_clicked");
+      return {
+        status: "error",
+        reason: "page.waitForTimeout: Target page, context or browser has been closed",
+      };
+    });
+    const logs: string[] = [];
+    const apiClient = {
+      fetchNextSendJob: vi.fn().mockResolvedValue(job),
+      fetchSendJob: vi.fn().mockResolvedValue(job),
+      reportWorkerStatus: vi.fn().mockResolvedValue(undefined),
+      reportSendResult: vi.fn().mockResolvedValue(undefined),
+      touchSendJob: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const result = await runSendPass({
+      apiClient: apiClient as never,
+      getPage: async () => fakePage,
+      log: (message) => logs.push(message),
+    });
+
+    expect(result).toEqual({ result: "worked", jobId: job.id, outcome: "sent" });
+    expect(
+      logs.some((line) => /treating as sent/i.test(line) && /sendClicked=true/.test(line) && /stage=/.test(line)),
+    ).toBe(true);
+  });
 });

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SendJob } from "@recruiter/shared";
-import { globalSendGapMs, isPendingSendJobDue, nextClaimAllowedAt } from "../src/sendJobs.js";
+import { completedSendGapMs, globalSendGapMs, isPendingSendJobDue, nextClaimAllowedAt } from "../src/sendJobs.js";
 import { Store } from "../src/store.js";
 
 /**
@@ -64,7 +64,7 @@ describe("nextClaimAllowedAt", () => {
     store.upsertSendJob(baseJob({ id: "done-late", to: "b@acme.com", status: "completed", updatedAt: later }));
 
     const gate = nextClaimAllowedAt(store);
-    expect(gate?.toISOString()).toBe(new Date(new Date(later).getTime() + globalSendGapMs()).toISOString());
+    expect(gate?.toISOString()).toBe(new Date(new Date(later).getTime() + completedSendGapMs("done-late")).toISOString());
   });
 
   it("a worker-FAILED send does not extend the gate — only completed sends cool down the pipe", async () => {
@@ -79,7 +79,26 @@ describe("nextClaimAllowedAt", () => {
     );
 
     const gate = nextClaimAllowedAt(store);
-    expect(gate?.toISOString()).toBe(new Date(new Date(completedAt).getTime() + globalSendGapMs()).toISOString());
+    expect(gate?.toISOString()).toBe(new Date(new Date(completedAt).getTime() + completedSendGapMs("done")).toISOString());
+  });
+
+  it("does not add Gmail execution time on top of the configured cadence", async () => {
+    const store = await freshStore();
+    const startedAt = "2026-07-10T15:00:00.000Z";
+    const completedAt = "2026-07-10T15:00:18.000Z";
+    store.upsertSendJob(
+      baseJob({ id: "slow-gmail", status: "completed", claimedAt: startedAt, updatedAt: completedAt }),
+    );
+    expect(nextClaimAllowedAt(store)?.getTime()).toBe(
+      new Date(startedAt).getTime() + completedSendGapMs("slow-gmail"),
+    );
+  });
+
+  it("uses stable human jitter around the configured gap", () => {
+    const gap = completedSendGapMs("stable-job");
+    expect(completedSendGapMs("stable-job")).toBe(gap);
+    expect(gap).toBeGreaterThanOrEqual(globalSendGapMs() - 4_000);
+    expect(gap).toBeLessThanOrEqual(globalSendGapMs() + 4_000);
   });
 });
 

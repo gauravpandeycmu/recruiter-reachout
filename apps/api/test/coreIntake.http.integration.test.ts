@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createCandidate, flushWake, startHttpApp, type HttpApp } from "./helpers/httpApp.js";
+import { createCandidate, ensureCompanyCopy, flushWake, startHttpApp, type HttpApp } from "./helpers/httpApp.js";
 import { __resetWorkerSupervisorForTests, __setWorkerSupervisorTestHooks } from "../src/workerSupervisor.js";
 
 describe("core intake HTTP integration", () => {
@@ -272,6 +272,7 @@ describe("core intake HTTP integration", () => {
 
   it("add-person appends to a scheduled company batch", async () => {
     app = await startHttpApp();
+    ensureCompanyCopy(app.store, "Linear");
     const seed = app.store.upsertCandidate(
       createCandidate({
         fullName: "First Recruiter",

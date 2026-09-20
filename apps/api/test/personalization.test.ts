@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  buildGeneratedEmailSubject,
   buildPersonalizationPrompt,
   buildRepairPrompt,
   classifyRecipientAudience,
@@ -7,6 +8,7 @@ import {
   clampLinkedInSubject,
   generateCompanyEmailContent,
   parseGeneratedContent,
+  sanitizeRoleTitle,
   validateGeneratedEmail,
 } from "../src/personalization.js";
 import { extractJobIds } from "@recruiter/shared";
@@ -17,6 +19,34 @@ const sample = {
   body: "Hi {firstName},\n\nI'd love to chat about opportunities at your team.\n\nBest,\nGaurav",
   createdAt: new Date().toISOString(),
 };
+
+describe("sanitizeRoleTitle", () => {
+  it("strips Job Application prefixes and trailing company names", () => {
+    expect(sanitizeRoleTitle("Job Application for Backend Engineer at GitLab", "GitLab")).toBe(
+      "Backend Engineer",
+    );
+    expect(sanitizeRoleTitle("the Job Application for Software Engineer", "Acme")).toBe(
+      "Software Engineer",
+    );
+    expect(
+      sanitizeRoleTitle(
+        "Backend Engineer, AI Engineering: Duo Chat at GitLab",
+        "GitLab",
+      ),
+    ).toBe("Backend Engineer, AI Engineering: Duo Chat");
+  });
+});
+
+describe("buildGeneratedEmailSubject", () => {
+  it("keeps only the role and Carnegie Mellon suffix", () => {
+    expect(buildGeneratedEmailSubject("Job Application for Software Engineer at Justworks", "Justworks")).toBe(
+      "Software Engineer - Carnegie Mellon Grad",
+    );
+    expect(buildGeneratedEmailSubject("Backend Engineer - Acme", "Acme")).toBe(
+      "Backend Engineer - Carnegie Mellon Grad",
+    );
+  });
+});
 
 describe("generateCompanyEmailContent", () => {
   const originalApiKey = process.env.GEMINI_API_KEY;
@@ -76,7 +106,7 @@ describe("generateCompanyEmailContent", () => {
     const result = await generateCompanyEmailContent({ company: "Acme", samples: [sample] });
 
     expect(result).toEqual({
-      subject: "Quick note, {firstName}",
+      subject: "Software Engineer - Carnegie Mellon Grad",
       body: "Hi {firstName}, Acme looks great.",
       linkedinSubject: "Acme role",
       linkedinMessage:
@@ -120,7 +150,7 @@ describe("generateCompanyEmailContent", () => {
 
     const result = await generateCompanyEmailContent({ company: "Acme", samples: [sample] });
 
-    expect(result.subject).toBe("Quick note, {firstName}");
+    expect(result.subject).toBe("Software Engineer - Carnegie Mellon Grad");
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -136,7 +166,7 @@ describe("generateCompanyEmailContent", () => {
     const result = await generateCompanyEmailContent({ company: "Acme", samples: [sample] });
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(result.subject).toBe("Quick note, {firstName}");
+    expect(result.subject).toBe("Software Engineer - Carnegie Mellon Grad");
     expect(result.warnings).toBeUndefined();
 
     const secondCallBody = JSON.parse((fetchMock.mock.calls[1] as [string, { body: string }])[1].body) as {
@@ -219,6 +249,20 @@ describe("buildPersonalizationPrompt", () => {
     expect(prompt).toContain("without claiming database-internals experience");
   });
 
+  it("strips Job Application prefixes from the role shown to the model", () => {
+    const prompt = buildPersonalizationPrompt({
+      company: "GitLab",
+      samples: [sample],
+      roleTitle: "Job Application for Backend Engineer, AI Engineering: Duo Chat at GitLab",
+      linkedinPost: "We're hiring for engineering openings.",
+      passionate: true,
+      customise: true,
+    });
+    expect(prompt).toContain("Role applying for: Backend Engineer, AI Engineering: Duo Chat");
+    expect(prompt).not.toContain("Role applying for: Job Application");
+    expect(prompt).toContain('Never say "Job Application for');
+  });
+
   it("requires mentioning a detected job ID early in the hook", () => {
     const prompt = buildPersonalizationPrompt({
       company: "Acme",
@@ -228,7 +272,8 @@ describe("buildPersonalizationPrompt", () => {
     });
     expect(prompt).toContain("== JOB / REQ ID (required) ==");
     expect(prompt).toContain("Detected ID(s): 778812");
-    expect(prompt).toContain("Put the primary ID in the HOOK");
+    expect(prompt).toContain("Never put the ID in the subject");
+    expect(prompt).toContain("in parentheses immediately after the role mention");
   });
 
   it("tells the model not to paste the job URL — only mention the ID", () => {
@@ -361,7 +406,7 @@ describe("buildPersonalizationPrompt", () => {
     expect(prompt).toContain("Exactly one ask at the end");
     expect(prompt).toContain("omit 'I look forward to hearing from you'");
     expect(prompt).toContain('"what roles are available"');
-    expect(prompt).toContain("at most one relevant credential");
+    expect(prompt).toContain('"<exact role> - Carnegie Mellon Grad"');
   });
 
   it("writes differently for recruiters and hiring managers", () => {
@@ -459,6 +504,31 @@ describe("buildPersonalizationPrompt", () => {
 describe("validateGeneratedEmail", () => {
   const samples = [sample];
 
+  it("flags Job Application wording in the body", () => {
+    const issues = validateGeneratedEmail(
+      {
+        subject: "Backend Engineer - Carnegie Mellon Grad",
+        body: "Hi {firstName},\n\nI wanted to reach out regarding the Job Application for Backend Engineer at GitLab.\n\nThanks",
+      },
+      samples,
+      { company: "GitLab", roleTitle: "Backend Engineer", passionate: true },
+    );
+    expect(issues.join(" ").toLowerCase()).toContain("job application");
+  });
+
+  it("strips Job Application wording without touching consider my application for", () => {
+    const scrub = (value: string) =>
+      value.replace(/\b(?:the\s+)?job\s+application(?:\s+form)?\s+for\s+/gi, "");
+    const raw =
+      "I saw your post about the engineering roles you're hiring for and wanted to reach out about the Job Application for Backend Engineer, AI Engineering: Duo Chat at GitLab role at Gitlab (8698314002).";
+    const scrubbed = scrub(raw);
+    expect(scrubbed).toContain("about Backend Engineer, AI Engineering: Duo Chat");
+    expect(scrubbed.toLowerCase()).not.toContain("job application");
+    expect(scrub("Please consider my application for this role.")).toBe(
+      "Please consider my application for this role.",
+    );
+  });
+
   it("accepts a short human email that keeps the token", () => {
     expect(
       validateGeneratedEmail({ subject: "Quick note, {firstName}", body: "Hi {firstName}, short and sweet." }, samples),
@@ -481,12 +551,12 @@ describe("validateGeneratedEmail", () => {
     expect(issues.join(" ")).toContain("110 words or fewer");
   });
 
-  it("enforces the actual 60-character email subject limit", () => {
+  it("does not truncate an exact role merely to fit the old 60-character limit", () => {
     const issues = validateGeneratedEmail(
-      { subject: `${"Software Engineer ".repeat(4)}{firstName}`, body: "Hi {firstName}, short and specific." },
+      { subject: `${"Senior Software Engineer ".repeat(3)}- Carnegie Mellon Grad`, body: "Hi {firstName}, short and specific." },
       samples,
     );
-    expect(issues.join(" ")).toContain("under 60 characters");
+    expect(issues.join(" ")).not.toContain("60 characters");
   });
 
   it("flags the stock look-forward closing in default cold outreach", () => {

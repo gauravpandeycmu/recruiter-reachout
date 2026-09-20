@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   buildSendProgressRows,
+  buildSendProgressRowsFromSession,
   compactSendChecklist,
+  formatSendEta,
   localYmd,
 } from "./sendProgress";
 
@@ -120,5 +122,46 @@ describe("compactSendChecklist", () => {
     );
     expect(rows.filter((row) => row.status === "paused")).toHaveLength(8);
     expect(compactSendChecklist(rows)).toEqual(rows);
+  });
+});
+
+describe("buildSendProgressRowsFromSession", () => {
+  it("keeps every session person even when the live queue only has some rows", () => {
+    const rows = buildSendProgressRowsFromSession(
+      [
+        {
+          id: "q1",
+          candidateId: "c1",
+          status: "sent",
+          scheduledFor: "2026-09-12T20:00:00.000Z",
+        },
+      ],
+      {
+        startedAt: "2026-09-12T20:00:00.000Z",
+        people: [
+          { queueItemId: "q1", candidateId: "c1", fullName: "Ada" },
+          { queueItemId: "q2", candidateId: "c2", fullName: "Ben" },
+        ],
+      },
+      "c2",
+      1,
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ name: "Ada", status: "sent" });
+    expect(rows[1]).toMatchObject({ name: "Ben", status: "sending", id: "q2" });
+  });
+});
+
+describe("formatSendEta", () => {
+  it("reports now when the slot is due or overdue", () => {
+    expect(formatSendEta("2026-09-12T20:00:00.000Z", Date.parse("2026-09-12T20:00:10.000Z"))).toBe("now");
+  });
+
+  it("reports remaining minutes for near-term slots", () => {
+    expect(formatSendEta("2026-09-12T20:12:00.000Z", Date.parse("2026-09-12T20:00:00.000Z"))).toBe("~12 min");
+  });
+
+  it("reports seconds for the new thirty-second pacing", () => {
+    expect(formatSendEta("2026-09-12T20:00:32.000Z", Date.parse("2026-09-12T20:00:00.000Z"))).toBe("~30 sec");
   });
 });

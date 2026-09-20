@@ -28,7 +28,7 @@ import type {
 
 export type { WeatherCondition, WeatherSnapshot };
 
-const FIXED_SEND_INTERVAL_MINUTES = 1;
+const FIXED_SEND_INTERVAL_MINUTES = 0.5;
 
 export interface UpcomingSendView {
   queueItemId: string;
@@ -270,7 +270,7 @@ export function applyBatchPreviewEdits(input: {
   linkedinSubject?: string;
   linkedinMessage?: string;
   sourceCandidateId: string;
-}): Promise<{ companyContent: CompanyContent; updatedCandidates: number }> {
+}): Promise<{ companyContent: CompanyContent; updatedCandidates: number; jobsUpdated?: number }> {
   return request("/api/batch-preview-edits", {
     method: "POST",
     body: JSON.stringify(input),
@@ -290,6 +290,12 @@ export function removeCandidate(id: string): Promise<RecruiterCandidate> {
 
 export function clearActiveCandidates(): Promise<{ archived: RecruiterCandidate[] }> {
   return request<{ archived: RecruiterCandidate[] }>("/api/candidates/active", { method: "DELETE" });
+}
+
+export function clearActiveEmailNotFoundCandidates(): Promise<{ archived: RecruiterCandidate[] }> {
+  return request<{ archived: RecruiterCandidate[] }>("/api/candidates/active/email-not-found", {
+    method: "DELETE",
+  });
 }
 
 export function reactivateCandidates(candidateIds: string[]): Promise<{ reactivated: RecruiterCandidate[] }> {
@@ -392,6 +398,7 @@ export interface ScheduleSendsInput {
   schedules?: Array<{ candidateId: string; scheduledFor: string }>;
   mode?: "send_now" | "schedule";
   resumeId?: string;
+  appendToQueue?: boolean;
 }
 
 export function scheduleSends(input: ScheduleSendsInput): Promise<{
@@ -464,6 +471,7 @@ export function resumePausedSends(input: {
   queueItemIds: string[];
   startAt?: string;
   resumeId?: string;
+  appendToQueue?: boolean;
 }): Promise<{ resumed: number; jobs: Array<{ id: string; candidateId: string }> }> {
   return request("/api/send-queue/resume-paused", {
     method: "POST",
@@ -477,6 +485,15 @@ export function rescheduleQueuedSend(input: {
   sendNow?: boolean;
 }): Promise<UpcomingSendView | undefined> {
   return request("/api/send-queue/reschedule", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function sendAllScheduledNow(input: {
+  queueItemIds: string[];
+}): Promise<{ moved: number; upcoming: UpcomingSendView[] }> {
+  return request("/api/send-queue/send-all-now", {
     method: "POST",
     body: JSON.stringify(input),
   });

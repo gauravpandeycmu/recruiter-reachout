@@ -58,6 +58,17 @@ describe("startup orphan heal + superseded paused duplicates", () => {
   });
 
   function seedReady(name: string, company: string, email: string) {
+    const now = new Date().toISOString();
+    store.upsertCompanyContent({
+      id: `content-${company.toLowerCase()}`,
+      company: company.toLowerCase(),
+      companyDisplayName: company,
+      subject: "Generated note, {firstName}",
+      body: "Hi {firstName},\n\nGenerated company-specific copy.",
+      source: "generated",
+      createdAt: now,
+      updatedAt: now,
+    });
     return store.upsertCandidate(
       createCandidate({
         fullName: name,
@@ -359,6 +370,16 @@ describe("startup orphan heal resilience (un-buildable rows)", () => {
       }),
     );
     const now = new Date().toISOString();
+    store.upsertCompanyContent({
+      id: "content-no-resume",
+      company: "noresumeco",
+      companyDisplayName: "NoResumeCo",
+      subject: "Generated note, {firstName}",
+      body: "Hi {firstName},\n\nGenerated company-specific copy.",
+      source: "generated",
+      createdAt: now,
+      updatedAt: now,
+    });
     const queue = store.upsertSendQueueItem({
       id: randomUUID(),
       candidateId: person.id,

@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, resolve } from "node:path";
 import type {
+  CandidateStatus,
   Campaign,
   CompanyContent,
   EmailSample,
@@ -38,7 +39,7 @@ import { applyBounce, parseBounceMessage, parseGmailMessageText } from "./bounce
 import { assertCanSend } from "./sendGate.js";
 import { withKeyLock } from "./asyncLock.js";
 import type { Store } from "./store.js";
-import { generateCompanyEmailContent, GENERATION_BUDGET_MS, type GenerationProgressStep } from "./personalization.js";
+import { buildGeneratedEmailSubject, generateCompanyEmailContent, GENERATION_BUDGET_MS, sanitizeRoleTitle, type GenerationProgressStep } from "./personalization.js";
 import { normalizeJobPostingUrl, resolveJobDescriptionFromUrl } from "./jobPosting.js";
 import { createLinkedInProfileEnrichJob } from "./linkedinProfileEnrichJobs.js";
 import { hasPendingLinkedInMessageTask } from "./linkedinMessaging.js";
@@ -237,6 +238,12 @@ function saveOneBulkCandidate(store: Store, candidate: Partial<RecruiterCandidat
       };
     }
     if (hasContactHistory(store, existing.id)) {
+      const reactivatedStatus: CandidateStatus =
+        existing.status === "bounced" || existing.status === "do_not_contact"
+          ? existing.status
+          : existing.email
+            ? "email_guessed"
+            : "new";
       const reactivated = store.updateCandidate(existing.id, {
         ...candidate,
         linkedinUrl: preferLinkedInUrl(existing.linkedinUrl, candidate.linkedinUrl),
@@ -245,9 +252,14 @@ function saveOneBulkCandidate(store: Store, candidate: Partial<RecruiterCandidat
         profilePhotoUrl: candidate.profilePhotoUrl || existing.profilePhotoUrl,
         isActive: true,
         archivedAt: undefined,
-        // Preserve the sent/contact history and known address, but let this
-        // person participate in a fresh Send batch when explicitly re-added.
-        status: existing.email ? existing.status : "new",
+        // Contact history lives in immutable events / completed jobs. The
+        // active-card status belongs to this new batch, so an old sent/opened/
+        // clicked status must not make a deliberately re-added person look as
+        // though they were already sent in the current batch.
+        status: reactivatedStatus,
+        customSubject: undefined,
+        customBody: undefined,
+        lastError: undefined,
         ...(!existing.email
           ? {
               discoveryAttempts: 0,
@@ -282,7 +294,10 @@ function saveOneBulkCandidate(store: Store, candidate: Partial<RecruiterCandidat
       profilePhotoUrl: candidate.profilePhotoUrl || existing.profilePhotoUrl,
       isActive: true,
       archivedAt: undefined,
-      status: existing.email ? existing.status : "new",
+      status: existing.email ? "email_guessed" : "new",
+      customSubject: undefined,
+      customBody: undefined,
+      lastError: undefined,
       ...(startsFresh
         ? {
             discoveryAttempts: 0,
@@ -315,6 +330,30 @@ function saveOneBulkCandidate(store: Store, candidate: Partial<RecruiterCandidat
 export async function clearActiveCandidates(store: Store): Promise<{ archived: RecruiterCandidate[] }> {
   const archived = store.archiveActiveCandidates();
   await store.save();
+  return { archived };
+}
+
+/**
+ * Archive active recruiters parked at email_not_found (UI: "No email found").
+ * Does not hard-delete; history / reactivation stay available. Leaves pending
+ * lookups and anyone with an email untouched.
+ */
+export async function clearActiveEmailNotFoundCandidates(
+  store: Store,
+): Promise<{ archived: RecruiterCandidate[] }> {
+  const archived: RecruiterCandidate[] = [];
+  for (const candidate of store.listActiveCandidates()) {
+    if (candidate.status !== "email_not_found") {
+      continue;
+    }
+    const removed = store.archiveCandidate(candidate.id);
+    if (removed) {
+      archived.push(removed);
+    }
+  }
+  if (archived.length > 0) {
+    await store.save();
+  }
   return { archived };
 }
 
@@ -569,7 +608,7 @@ export async function generateContentForCompany(
       .filter((title): title is string => Boolean(title));
 
   let jobDescription = options.jobDescription?.trim() || undefined;
-  let roleTitle = options.roleTitle?.trim() || undefined;
+  let roleTitle = sanitizeRoleTitle(options.roleTitle, company) || undefined;
   const jobUrl = normalizeJobPostingUrl(options.jobUrl);
   const existing = store.getCompanyContent(companyKey);
   const cachedContext = existing?.generationContext;
@@ -580,7 +619,7 @@ export async function generateContentForCompany(
   if (!jobDescription && jobUrl && cachedJobUrl === jobUrl && cachedContext?.jobDescription?.trim()) {
     jobDescription = cachedContext.jobDescription.trim();
     if (!roleTitle && cachedContext.roleTitle?.trim()) {
-      roleTitle = cachedContext.roleTitle.trim();
+      roleTitle = sanitizeRoleTitle(cachedContext.roleTitle, company) || undefined;
     }
   }
   // Link-only: download the posting and extract a JD before the email LLM call.
@@ -608,7 +647,7 @@ export async function generateContentForCompany(
       // The fetched posting is authoritative. The UI can still hold the prior
       // company's role title while a user replaces only the job link.
       if (extracted.roleTitle) {
-        roleTitle = extracted.roleTitle;
+        roleTitle = sanitizeRoleTitle(extracted.roleTitle, company) || undefined;
       }
     } catch (error) {
       jobLinkWarning = error instanceof Error ? error.message : "Could not read the job posting link.";
@@ -701,7 +740,10 @@ export function resolveContentForCandidate(store: Store, candidate: RecruiterCan
   const base = companyContent
     ? {
         id: companyContent.id,
-        subject: companyContent.subject,
+        subject:
+          companyContent.source === "generated" && ctx?.roleTitle
+            ? buildGeneratedEmailSubject(ctx.roleTitle, companyContent.companyDisplayName ?? candidate.company)
+            : companyContent.subject,
         body: companyContent.body,
         footer: fallback?.footer,
         resumes: fallback?.resumes,
@@ -743,6 +785,12 @@ export function assertCandidateHasSendableCopy(store: Store, candidate: Recruite
   if (companyKey && store.getCompanyContent(companyKey)) {
     return;
   }
+  audit("send.blocked_missing_copy", {
+    candidateId: candidate.id,
+    company: candidate.company,
+    hasCustomSubject: Boolean(customSubject),
+    hasCustomBody: Boolean(customBody),
+  });
   throw new Error(
     "Generate outreach for this company before sending (or save a custom subject and body for this recipient).",
   );
@@ -1032,10 +1080,10 @@ export async function recordProviderLookup(
   await store.save();
 }
 
-/** After this many failed lookups (not_found or error), a candidate is parked in
- * "email_not_found" and excluded from automatic discovery, so the worker never
- * loops forever burning Jobright lookups on a profile that keeps failing. */
-export const MAX_DISCOVERY_ATTEMPTS = 3;
+/** One complete provider-chain attempt per explicit request. A user can always
+ * clear/requeue the row manually, but automation must never repeat Jobright or
+ * the Finder chain on its own. */
+export const MAX_DISCOVERY_ATTEMPTS = 1;
 
 /** A claimed-but-never-resolved discovery candidate (worker crash mid-lookup)
  *  is reclaimable after this — longer than the worker's own discovery hard
@@ -1045,7 +1093,12 @@ export const MAX_DISCOVERY_ATTEMPTS = 3;
 const DISCOVERY_CLAIM_STALE_MS = 6 * 60 * 1000;
 
 function isEligibleForDiscovery(candidate: RecruiterCandidate, cutoffMs: number, stage?: "jobright" | "finder"): boolean {
-  if (candidate.email || candidate.status === "email_not_found" || !candidate.linkedinUrl?.trim()) {
+  if (
+    candidate.email ||
+    candidate.status === "email_not_found" ||
+    (candidate.discoveryAttempts ?? 0) >= MAX_DISCOVERY_ATTEMPTS ||
+    !candidate.linkedinUrl?.trim()
+  ) {
     return false;
   }
   if (stage && (candidate.discoveryStage ?? "jobright") !== stage) return false;
@@ -1059,7 +1112,12 @@ function isEligibleForDiscovery(candidate: RecruiterCandidate, cutoffMs: number,
  *  "eligible to claim" made hasDiscovery flip false mid-lookup and hibernate the
  *  process with orphaned claims (Jobright/SalesQL then never finish). */
 export function needsDiscoveryLookup(candidate: RecruiterCandidate): boolean {
-  return !candidate.email && candidate.status !== "email_not_found" && Boolean(candidate.linkedinUrl?.trim());
+  return (
+    !candidate.email &&
+    candidate.status !== "email_not_found" &&
+    (candidate.discoveryAttempts ?? 0) < MAX_DISCOVERY_ATTEMPTS &&
+    Boolean(candidate.linkedinUrl?.trim())
+  );
 }
 
 /** Read-only: is there discovery work outstanding (waiting OR currently claimed)?
@@ -1136,7 +1194,7 @@ export async function recordDiscoveryResult(store: Store, candidateId: string, i
     report.discoveryStage === "jobright" &&
     report.status !== "found" &&
     report.status !== "dry_run" &&
-    store.getDiscoverySettings().salesqlAutoFallback;
+    (store.getDiscoverySettings().salesqlAutoFallback || isFinderForce(candidate.forceProvider));
   if (stagedJobrightFallback) {
     await incrementProviderUsage(store, "jobright");
     patch.discoveryStage = "finder";
@@ -1147,9 +1205,9 @@ export async function recordDiscoveryResult(store: Store, candidateId: string, i
     return updated;
   }
   // A forced SalesQL check is consumed by a conclusive attempt (found or not_found).
-  // On a transient error, leave it set so the worker retries via SalesQL again
-  // instead of silently falling back to the normal Jobright-first chain.
-  if (report.status === "found" || report.status === "not_found") {
+  // Every non-dry-run result consumes this explicit lookup request. There are
+  // no automatic cross-cycle retries; users can deliberately queue it again.
+  if (report.status !== "dry_run") {
     patch.forceProvider = undefined;
   }
   if (report.status === "found") {
@@ -1216,31 +1274,19 @@ export async function recordDiscoveryResult(store: Store, candidateId: string, i
     } else {
       await incrementProviderUsage(store, "jobright");
     }
-    // A user-forced Finder check ("Look up via Finder") concluding not_found
-    // is a deliberate one-shot action — park immediately, same as before. But
-    // an AUTOMATIC Finder not_found (reached via the ordinary Jobright ->
-    // Finder fallback chain) used to park on the very first miss too,
-    // skipping the shared attempts budget entirely — asymmetric with
-    // Jobright, which gets MAX_DISCOVERY_ATTEMPTS tries. Both providers now
-    // share the same budget unless the check was explicitly forced.
     if (attempts >= MAX_DISCOVERY_ATTEMPTS || isFinderForce(candidate.forceProvider)) {
       patch.status = "email_not_found";
-      patch.lastError =
-        isFinderForce(candidate.forceProvider)
-          ? report.message ?? defaultMessage
-          : `${report.message ?? defaultMessage} (gave up after ${attempts} attempts; clear the error to retry.)`;
+      patch.lastError = report.message ?? defaultMessage;
+      patch.discoveryStage = undefined;
     } else {
       patch.lastError = report.message ?? defaultMessage;
       if (report.discoveryStage === "finder") patch.discoveryStage = "jobright";
     }
   } else if (report.status === "error") {
-    // Transient/infra failures (a logged-out session, timeout, UI change) are
-    // not evidence the candidate is unfindable, so they don't spend the
-    // limited not_found retry budget — leave discoveryAttempts untouched so
-    // the worker keeps retrying next pass instead of eventually giving up on
-    // a candidate that may never have actually been hard to find.
-    patch.lastError = report.message ?? "Jobright automation error.";
-    if (report.discoveryStage === "finder") patch.discoveryStage = "finder";
+    const provider = report.provider ? discoveryProviderLabel(report.provider) : "Email lookup";
+    patch.lastError = `${provider} could not complete this lookup: ${report.message ?? "Unknown automation error."} Use Check again to retry.`;
+    patch.discoveryAttempts = MAX_DISCOVERY_ATTEMPTS;
+    patch.discoveryStage = undefined;
     // A real overlay credit can still be spent on a path that ends in
     // "error" (e.g. Access/Reveal was clicked but the result failed to parse
     // before the hard timeout fired) — count it, or the local usage counter
@@ -1280,14 +1326,17 @@ export async function requestDiscovery(
   if (!candidate.linkedinUrl?.trim()) {
     throw new Error("Candidate needs a LinkedIn URL before discovery can run.");
   }
+  const inFlight = Boolean(candidate.discoveryClaimedAt);
+  const neverChecked = (candidate.discoveryAttempts ?? 0) === 0 && !candidate.lastDiscoveryAttemptAt;
+  const continueWithFinder = options.forceSalesql || !neverChecked || candidate.discoveryStage === "finder";
   const updated = store.updateCandidate(candidateId, {
     status: candidate.status === "email_not_found" ? "new" : candidate.status,
-    discoveryAttempts: 0,
-    lastDiscoveryAttemptAt: undefined,
+    discoveryAttempts: inFlight ? candidate.discoveryAttempts : 0,
+    lastDiscoveryAttemptAt: inFlight ? candidate.lastDiscoveryAttemptAt : neverChecked ? undefined : candidate.lastDiscoveryAttemptAt,
     lastError: undefined,
-    discoveryClaimedAt: undefined,
-    discoveryStage: options.forceSalesql ? "finder" : "jobright",
-    forceProvider: options.forceSalesql ? "salesql" : undefined,
+    discoveryClaimedAt: inFlight ? candidate.discoveryClaimedAt : undefined,
+    discoveryStage: inFlight ? (candidate.discoveryStage ?? "jobright") : continueWithFinder ? "finder" : "jobright",
+    forceProvider: options.forceSalesql ? "salesql" : continueWithFinder ? "finder" : undefined,
   });
   if (!updated) {
     throw new Error("Candidate not found.");
@@ -1303,15 +1352,33 @@ export async function requestSalesqlSweep(store: Store): Promise<{ queued: numbe
     .filter((candidate) => !candidate.email && Boolean(candidate.linkedinUrl?.trim()));
   const candidateIds: string[] = [];
   for (const candidate of targets) {
-    store.updateCandidate(candidate.id, {
-      status: candidate.status === "email_not_found" ? "new" : candidate.status,
-      discoveryAttempts: 0,
-      lastDiscoveryAttemptAt: undefined,
-      lastError: undefined,
-      discoveryClaimedAt: undefined,
-      discoveryStage: "finder",
-      forceProvider: "finder",
-    });
+    const inFlight = Boolean(candidate.discoveryClaimedAt);
+    const inFlightStage = candidate.discoveryStage ?? "jobright";
+    if (inFlight) {
+      // Do not release/reassign a live claim. Doing so lets the parallel queue
+      // claim the same person while Jobright is still running; its late result
+      // can then overwrite or park the Finder run. A Jobright claimant gets a
+      // durable handoff request, while an existing Finder claimant is already
+      // traversing the complete provider chain.
+      store.updateCandidate(candidate.id, {
+        forceProvider: "finder",
+        discoveryStage: inFlightStage,
+      });
+    } else {
+      const neverChecked = (candidate.discoveryAttempts ?? 0) === 0 && !candidate.lastDiscoveryAttemptAt;
+      store.updateCandidate(candidate.id, {
+        status: candidate.status === "email_not_found" ? "new" : candidate.status,
+        discoveryAttempts: 0,
+        lastDiscoveryAttemptAt: neverChecked ? undefined : candidate.lastDiscoveryAttemptAt,
+        lastError: undefined,
+        discoveryClaimedAt: undefined,
+        // "Check all remaining" continues prior Jobright misses through the
+        // fallback providers. A genuinely untouched profile still receives its
+        // first (free) Jobright lookup instead of skipping it.
+        discoveryStage: neverChecked ? "jobright" : "finder",
+        forceProvider: neverChecked ? undefined : "finder",
+      });
+    }
     candidateIds.push(candidate.id);
   }
   await store.save();
@@ -1544,7 +1611,7 @@ export async function selectResume(store: Store, resumeId: string): Promise<Outr
 export async function applyBatchPreviewEdits(
   store: Store,
   input: { company: string; subject: string; body: string; linkedinSubject?: string; linkedinMessage?: string; sourceCandidateId: string },
-): Promise<{ companyContent: CompanyContent; updatedCandidates: number }> {
+): Promise<{ companyContent: CompanyContent; updatedCandidates: number; jobsUpdated: number }> {
   const subjectText = input.subject.trim();
   const bodyText = input.body.trim();
   if (!subjectText || !bodyText) {
@@ -1593,8 +1660,15 @@ export async function applyBatchPreviewEdits(
     store.updateCandidate(candidate.id, { customSubject: undefined, customBody: undefined });
     updatedCandidates += 1;
   }
+
+  // Queue rows are immutable delivery snapshots. Editing the active batch must
+  // never rewrite an older Send-now or scheduled batch for the same company.
+  // Scheduled-mail editing has its own explicit endpoint, scoped to the jobs
+  // the user selected on the Scheduled page.
+  const jobsUpdated = 0;
+
   await store.save();
-  return { companyContent, updatedCandidates };
+  return { companyContent, updatedCandidates, jobsUpdated };
 }
 
 function personalizeToTemplate(text: string, candidate: RecruiterCandidate): string {
@@ -1692,8 +1766,11 @@ export function applyTestModeRecipientOverride(rendered: RenderedEmail, store: S
  */
 export function applyTestModeToClaimedSendJob(store: Store, job: SendJob): SendJob {
   const testMode = getTestModeStatus(store);
-  if (!testMode.enabled || !testMode.recipient) {
+  if (!testMode.enabled) {
     return job;
+  }
+  if (!testMode.recipient) {
+    throw new Error("TEST_MODE is enabled but no test recipient is configured. Set one in Setup.");
   }
   const alreadyRedirected = job.to.trim().toLowerCase() === testMode.recipient.toLowerCase();
   const alreadyTagged = job.subject.startsWith("[TEST MODE] ");
@@ -1720,12 +1797,15 @@ export function applyClaimTimeRecipient(store: Store, job: SendJob): SendJob {
   }
   const candidate = store.listCandidates().find((row) => row.id === job.candidateId);
   const email = candidate?.email?.trim().toLowerCase();
-  if (!email || !isValidEmail(email) || job.to.trim().toLowerCase() === email) {
+  const subject = job.subject.replace(/^(?:\[TEST MODE\]\s*)+/i, "");
+  if (!email || !isValidEmail(email)) {
     return job;
   }
+  if (job.to.trim().toLowerCase() === email && job.subject === subject) return job;
   return store.upsertSendJob({
     ...job,
     to: email,
+    subject,
     updatedAt: new Date().toISOString(),
   });
 }
@@ -2013,6 +2093,27 @@ function applyScheduledForUpdates(
   }
 }
 
+/**
+ * First safe slot after the live scheduled-email queue. Recomputed on the
+ * server at submit time so concurrent scheduling cannot use a stale UI tail.
+ */
+function scheduledQueueAppendStart(store: Store, now = new Date()): Date | undefined {
+  const liveScheduledTimes = store
+    .listSendJobs()
+    .filter(
+      (job) =>
+        job.mode === "schedule" &&
+        (job.status === "pending" || job.status === "in_progress") &&
+        Boolean(job.queueItemId),
+    )
+    .map((job) => new Date(job.scheduledFor ?? "").getTime())
+    .filter((value) => Number.isFinite(value));
+  if (liveScheduledTimes.length === 0) {
+    return undefined;
+  }
+  return new Date(Math.max(...liveScheduledTimes, now.getTime()) + globalSendGapMs());
+}
+
 /** Fix colliding or pathologically stretched company blocks on the *active* pending queue (not paused). */
 export function rebalancePendingCompanyBlocks(
   store: Store,
@@ -2109,7 +2210,11 @@ function supersedeStaleQueueForCandidates(store: Store, candidateIds: Set<string
 
 export async function scheduleSends(
   store: Store,
-  input: ExplicitScheduleInput & { mode?: "send_now" | "schedule"; resumeId?: string },
+  input: ExplicitScheduleInput & {
+    mode?: "send_now" | "schedule";
+    resumeId?: string;
+    appendToQueue?: boolean;
+  },
 ) {
   const rosterIds =
     input.candidateIds?.length
@@ -2125,14 +2230,23 @@ export async function scheduleSends(
 
   // No jitter when packing against other companies — times must be exact and serializable.
   // Within-company and between-company spacing both honor the global Gmail gap.
-  const requestedInterval = Math.max(1, Math.round(input.intervalMinutes ?? defaultGapMinutes()));
+  const requestedInterval = Math.max(1 / 60, input.intervalMinutes ?? defaultGapMinutes());
   const gapMinutes = defaultGapMinutes(requestedInterval);
   const intervalMinutes = Math.max(requestedInterval, gapMinutes);
   const mode: SendJobMode = input.mode === "send_now" ? "send_now" : "schedule";
+  if (input.appendToQueue && mode !== "schedule") {
+    throw new Error("Add to queue is only available for scheduled emails.");
+  }
+  const appendStart = input.appendToQueue ? scheduledQueueAppendStart(store) : undefined;
+  if (input.appendToQueue && !appendStart) {
+    throw new Error("There are no scheduled emails to add after.");
+  }
   // Send-now must start at wall-clock now — never honor a stale/past startAt from the UI.
   const effectiveStartAt =
     mode === "send_now"
       ? new Date()
+      : appendStart
+        ? appendStart
       : input.startAt
         ? new Date(input.startAt)
         : new Date();
@@ -2284,6 +2398,11 @@ export async function scheduleSends(
       });
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
+      audit("schedule.job_create_failed", {
+        candidateId: item.candidateId,
+        queueItemId: item.id,
+        reason,
+      });
       jobFailures.push({ candidateId: item.candidateId, queueItemId: item.id, reason });
       store.upsertSendQueueItem({
         ...item,
@@ -2392,7 +2511,7 @@ export function guessFullNameFromLinkedInUrl(url: string | undefined): string | 
 
 /**
  * Add one person (known email) onto an existing company schedule — appends after the
- * last slot using the product's fixed one-minute spacing. Optional LinkedIn URL queues a photo enrich.
+ * last slot using the product's fixed 30-second spacing. Optional LinkedIn URL queues a photo enrich.
  */
 export async function addPersonToScheduledBatch(
   store: Store,
@@ -2553,6 +2672,13 @@ export async function addPersonToScheduledBatch(
 }
 
 export function nextSendJob(store: Store) {
+  const testMode = getTestModeStatus(store);
+  if (testMode.enabled && !testMode.recipient) {
+    // Fail before claimNextSendJob marks anything in_progress. This is a
+    // last-resort guard for corrupted/legacy settings; the Setup API already
+    // prevents enabling test mode without a destination.
+    throw new Error("TEST_MODE is enabled but no test recipient is configured. Set one in Setup.");
+  }
   const job = claimNextSendJob(store);
   if (!job) {
     return undefined;
@@ -2705,13 +2831,18 @@ export async function resumePausedSendBatch(
     startAt?: string;
     intervalMinutes?: number;
     resumeId?: string;
+    appendToQueue?: boolean;
   },
 ): Promise<{ resumed: number; jobs: SendJob[] }> {
   const queueItemIds = [...new Set(input.queueItemIds.map((id) => id.trim()).filter(Boolean))];
-  const requestedInterval = Math.max(1, Math.round(input.intervalMinutes ?? defaultGapMinutes()));
+  const requestedInterval = Math.max(1 / 60, input.intervalMinutes ?? defaultGapMinutes());
   const gapMinutes = defaultGapMinutes(requestedInterval);
   const intervalMinutes = Math.max(requestedInterval, gapMinutes);
-  const startAt = input.startAt ? new Date(input.startAt) : new Date();
+  const appendStart = input.appendToQueue ? scheduledQueueAppendStart(store) : undefined;
+  if (input.appendToQueue && !appendStart) {
+    throw new Error("There are no scheduled emails to add after.");
+  }
+  const startAt = appendStart ?? (input.startAt ? new Date(input.startAt) : new Date());
   if (Number.isNaN(startAt.getTime())) {
     throw new Error("Pick a valid start time.");
   }
@@ -2895,6 +3026,148 @@ export async function rescheduleQueuedSend(
   );
 }
 
+/**
+ * Move every requested scheduled delivery into the send-now lane as one
+ * ordered batch. Delivery snapshots are deliberately kept byte-for-byte:
+ * recipient, personalized subject/body, tracking HTML, and resume attachment
+ * must remain the versions the user reviewed on Scheduled.
+ */
+export async function sendScheduledBatchNow(
+  store: Store,
+  input: { queueItemIds?: string[] } = {},
+): Promise<{ moved: number; upcoming: ReturnType<typeof listUpcomingSends> }> {
+  return withKeyLock("__send_all_scheduled__", async () => {
+    const requestedIds = input.queueItemIds?.length
+      ? new Set(input.queueItemIds.map((id) => id.trim()).filter(Boolean))
+      : undefined;
+    const queueItems = store
+      .listSendQueue()
+      .filter((item) => item.status === "scheduled" || item.status === "queued")
+      .filter((item) => !requestedIds || requestedIds.has(item.id))
+      .sort((a, b) => {
+        const byTime = a.scheduledFor.localeCompare(b.scheduledFor);
+        return byTime !== 0 ? byTime : a.createdAt.localeCompare(b.createdAt);
+      });
+    if (queueItems.length === 0) {
+      throw new Error("There are no scheduled emails to send.");
+    }
+    if (requestedIds && queueItems.length !== requestedIds.size) {
+      throw new Error("The schedule changed. Refresh and try Send all again.");
+    }
+
+    const prepared = queueItems.map((item) => {
+      const jobs = store.listSendJobs().filter((job) => job.queueItemId === item.id);
+      const live = jobs.filter((job) => job.status === "pending" || job.status === "in_progress");
+      if (live.length > 1) {
+        throw new Error(`Duplicate delivery jobs found for ${item.email}. Nothing was changed.`);
+      }
+      if (live[0]?.status === "in_progress") {
+        throw new Error(`${item.email} is already sending. Wait for it to finish, then try again.`);
+      }
+      const job =
+        live[0] ??
+        [...jobs]
+          .filter((entry) => entry.status === "failed")
+          .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))[0];
+      if (!job) {
+        const completed = jobs.some((entry) => entry.status === "completed");
+        throw new Error(
+          completed
+            ? `${item.email} has already been sent.`
+            : `${item.email} is missing its saved delivery copy. Nothing was changed.`,
+        );
+      }
+      if (job.mode !== "schedule") {
+        throw new Error("The schedule changed. Refresh and try Send all again.");
+      }
+      if (!job.to || !job.subject || (!job.textBody && !job.htmlBody)) {
+        throw new Error(`${item.email} has incomplete saved email content. Nothing was changed.`);
+      }
+      if (!job.resumePath || !job.resumeFileName) {
+        throw new Error(`${item.email} has no saved resume attachment. Nothing was changed.`);
+      }
+      return { item, job, version: job.updatedAt };
+    });
+
+    const firstAt = nextSendNowAt(store);
+    const gapMs = globalSendGapMs();
+    const planned = prepared.map((entry, index) => ({
+      ...entry,
+      scheduledFor: new Date(firstAt.getTime() + index * gapMs).toISOString(),
+    }));
+
+    // Validate every recipient before mutating anything. A validation failure
+    // leaves the entire Scheduled queue untouched.
+    for (const entry of planned) {
+      await validateSendCandidate(store, entry.item.candidateId, entry.job.to, {
+        scheduledFor: entry.scheduledFor,
+        excludeJobId: entry.job.id,
+        skipPacing: true,
+      });
+      try {
+        await access(entry.job.resumePath!);
+      } catch {
+        throw new Error(
+          `${entry.item.email}'s saved resume attachment is no longer available. Nothing was changed.`,
+        );
+      }
+    }
+
+    // The validation above awaits session checks. Re-read every row after it so
+    // a worker claim or edit that raced us causes a clean all-or-nothing abort.
+    for (const entry of planned) {
+      const freshItem = store.getSendQueueItem(entry.item.id);
+      const freshJob = store.getSendJob(entry.job.id);
+      if (
+        !freshItem ||
+        (freshItem.status !== "scheduled" && freshItem.status !== "queued") ||
+        !freshJob ||
+        freshJob.status !== entry.job.status ||
+        freshJob.mode !== "schedule" ||
+        freshJob.updatedAt !== entry.version
+      ) {
+        throw new Error("The schedule changed while Send all was preparing. Refresh and try again.");
+      }
+    }
+
+    const nowIso = new Date().toISOString();
+    for (const entry of planned) {
+      store.upsertSendQueueItem({
+        ...entry.item,
+        status: "scheduled",
+        scheduledFor: entry.scheduledFor,
+        failureReason: undefined,
+        updatedAt: nowIso,
+      });
+      // Only operational fields change. All delivery fields stay frozen.
+      store.upsertSendJob({
+        ...entry.job,
+        mode: "send_now",
+        scheduledFor: entry.scheduledFor,
+        status: "pending",
+        failureReason: undefined,
+        updatedAt: nowIso,
+      });
+      store.archiveCandidate(entry.item.candidateId);
+    }
+
+    await store.save();
+    audit("schedule.send_all_now", {
+      moved: planned.length,
+      firstAt: planned[0]?.scheduledFor,
+      lastAt: planned.at(-1)?.scheduledFor,
+      queueItemIds: planned.map((entry) => entry.item.id),
+    });
+    const movedIds = new Set(planned.map((entry) => entry.item.id));
+    return {
+      moved: planned.length,
+      upcoming: listUpcomingSends(store)
+        .filter((entry) => movedIds.has(entry.queueItemId))
+        .sort((a, b) => a.scheduledFor.localeCompare(b.scheduledFor)),
+    };
+  });
+}
+
 async function rescheduleQueuedSendLocked(
   store: Store,
   input: {
@@ -3053,7 +3326,7 @@ export async function rescheduleCompanyBatch(
     throw new Error("Scheduled send not found.");
   }
 
-  const intervalMinutes = 1;
+  const intervalMinutes = DEFAULT_SEND_INTERVAL_MINUTES;
 
   for (const item of items) {
     const inProgress = store
@@ -3626,7 +3899,8 @@ export async function scheduleToday(store: Store) {
   // different companies. Repack through the same company-block packer the
   // explicit Schedule flow uses so different companies are always serialized
   // with a real gap between them instead of firing at the same instant.
-  const intervalMinutes = Math.max(1, Math.round(60 / settings.perHourCap));
+  // The user-selected pacing is global and fixed; the daily cap still limits total volume.
+  const intervalMinutes = DEFAULT_SEND_INTERVAL_MINUTES;
   const gapMinutes = defaultGapMinutes(intervalMinutes);
   const candidatesById = new Map(store.listCandidates().map((c) => [c.id, c]));
   const byCompany = new Map<string, SendQueueItem[]>();

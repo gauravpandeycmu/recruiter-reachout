@@ -11,7 +11,13 @@ import {
   stripTestModePrefix,
   summarizeUpcomingSends,
   filterScheduledTabItems,
+  nextScheduledQueueStart,
+  formatScheduledSendAllEstimate,
+  listSendNowUpcoming,
+  shouldPreserveSendNowTrackingOnClearList,
   buildSendSessionFromUpcoming,
+  mergeSendSessions,
+  clampRecipientPage,
   deriveBatchScheduleTiming,
   formatCompanyBlockShiftMessage,
   discoveryStatusLabel,
@@ -288,7 +294,8 @@ describe("summarizeUpcomingSends", () => {
     );
     expect(summary?.nextName).toBe("Steph");
     expect(summary?.nextTime).toBe("2026-07-15T01:25:00.000Z");
-    expect(summary?.peopleLabel).toBe("2 people scheduled");
+    expect(summary?.peopleLabel).toBe("1 person scheduled");
+    expect(summary?.nextCompany).toBe("Notion");
     expect(summary?.dueNow).toBe(false);
   });
 
@@ -360,12 +367,13 @@ describe("summarizeUpcomingSends", () => {
     );
 
     expect(summary).toEqual({
-      peopleLabel: "3 people scheduled",
+      peopleLabel: "2 people scheduled",
       companiesLabel: "2 companies",
       nextTime: "2026-07-11T10:00:00.000Z",
       nextSlotPeople: 2,
       nextSlotCompanies: ["Acme", "Beta"],
       nextName: "Jane",
+      nextCompany: "Acme",
       dueNow: false,
     });
   });
@@ -605,6 +613,19 @@ describe("filterScheduledTabItems", () => {
   });
 });
 
+describe("shouldPreserveSendNowTrackingOnClearList", () => {
+  it("keeps tracking while Send now is active or a session exists", () => {
+    expect(shouldPreserveSendNowTrackingOnClearList("now", null)).toBe(true);
+    expect(shouldPreserveSendNowTrackingOnClearList(null, { people: [{ id: "1" }] })).toBe(true);
+    expect(shouldPreserveSendNowTrackingOnClearList("later", null)).toBe(false);
+    expect(shouldPreserveSendNowTrackingOnClearList(null, null)).toBe(false);
+    expect(shouldPreserveSendNowTrackingOnClearList(null, { people: [] })).toBe(false);
+    expect(
+      listSendNowUpcoming([{ jobMode: "send_now" }, { jobMode: "schedule" }, {}]),
+    ).toHaveLength(1);
+  });
+});
+
 describe("buildSendSessionFromUpcoming", () => {
   it("snapshots recipients and strips test-mode subject prefix", () => {
     const session = buildSendSessionFromUpcoming(
@@ -626,6 +647,36 @@ describe("buildSendSessionFromUpcoming", () => {
     expect(session.people[0]?.fullName).toBe("Ada");
     expect(session.subject).toBe("Hello Ada");
     expect(session.body).toBe("Body text");
+  });
+});
+
+describe("mergeSendSessions", () => {
+  it("keeps the first batch and appends a later batch without duplicate queue rows", () => {
+    const first = buildSendSessionFromUpcoming("Acme", [
+      upcoming({ queueItemId: "q1", candidateId: "c1", fullName: "Ada", scheduledFor: "2030-01-01T12:00:00.000Z" }),
+    ], { subject: "Saved Acme subject", body: "Saved Acme body" });
+    const next = buildSendSessionFromUpcoming("Beta", [
+      upcoming({ queueItemId: "q1", candidateId: "c1", fullName: "Ada", scheduledFor: "2030-01-01T12:00:00.000Z" }),
+      upcoming({ queueItemId: "q2", candidateId: "c2", fullName: "Ben", company: "Beta", scheduledFor: "2030-01-01T12:00:30.000Z" }),
+    ], { subject: "Edited Beta subject", body: "Edited Beta body" });
+    const merged = mergeSendSessions(first, next);
+    expect(merged.company).toBe("Send now batches");
+    expect(merged.people.map((person) => person.queueItemId)).toEqual(["q1", "q2"]);
+    expect(merged.subject).toBe("Edited Beta subject");
+    expect(merged.body).toBe("Edited Beta body");
+    expect(merged.startedAt).toBe(first.startedAt);
+  });
+});
+
+describe("clampRecipientPage", () => {
+  it("stays on the current page when removing one person mid-list", () => {
+    expect(clampRecipientPage(1, 10, 5)).toBe(1);
+    expect(clampRecipientPage(1, 9, 5)).toBe(1);
+  });
+
+  it("clamps down only when the current page no longer exists", () => {
+    expect(clampRecipientPage(1, 5, 5)).toBe(0);
+    expect(clampRecipientPage(2, 6, 5)).toBe(1);
   });
 });
 
@@ -655,6 +706,38 @@ describe("deriveBatchScheduleTiming", () => {
     );
     expect(timing.useNowPreset).toBe(true);
     expect(timing.intervalMinutes).toBe(8);
+  });
+});
+
+describe("nextScheduledQueueStart", () => {
+  it("places the next batch one fixed interval after the latest live send", () => {
+    const next = nextScheduledQueueStart(
+      [
+        { scheduledFor: "2030-01-15T15:00:00.000Z", jobStatus: "pending" },
+        { scheduledFor: "2030-01-15T15:04:30.000Z", jobStatus: "pending" },
+        { scheduledFor: "2030-01-15T18:00:00.000Z", jobStatus: "failed" },
+      ],
+      new Date("2030-01-15T14:00:00.000Z"),
+      0.5,
+    );
+    expect(next?.toISOString()).toBe("2030-01-15T15:05:00.000Z");
+  });
+
+  it("is unavailable when no live scheduled send exists", () => {
+    expect(
+      nextScheduledQueueStart(
+        [{ scheduledFor: "2030-01-15T15:00:00.000Z", jobStatus: "failed" }],
+        new Date("2030-01-15T14:00:00.000Z"),
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("formatScheduledSendAllEstimate", () => {
+  it("includes the final delivery rather than only measuring slot span", () => {
+    expect(formatScheduledSendAllEstimate(1)).toBe("under 1 min");
+    expect(formatScheduledSendAllEstimate(8)).toBe("about 4 min");
+    expect(formatScheduledSendAllEstimate(17)).toBe("about 9 min");
   });
 });
 

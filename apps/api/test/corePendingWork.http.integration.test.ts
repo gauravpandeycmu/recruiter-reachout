@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createCandidate, startHttpApp, type HttpApp } from "./helpers/httpApp.js";
+import { createCandidate, ensureCompanyCopy, startHttpApp, type HttpApp } from "./helpers/httpApp.js";
 
 /**
  * GET /api/automation/pending-work — hibernation decisions. Must reclaim aged
@@ -13,6 +13,7 @@ describe("core pending-work HTTP integration", () => {
   });
 
   function seedReady(name: string, company: string, email: string) {
+    ensureCompanyCopy(app.store, company);
     return app.store.upsertCandidate(
       createCandidate({
         fullName: name,

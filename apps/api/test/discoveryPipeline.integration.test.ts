@@ -23,9 +23,11 @@ const {
   incrementProviderUsage,
   getProviderUsageCount,
   markDiscoveryProviderUnavailable,
+  requestSalesqlSweep,
 } = await import("../src/services.js");
 const { claimNextSendJob } = await import("../src/sendJobs.js");
 const { Store } = await import("../src/store.js");
+const { ensureCompanyCopy } = await import("./helpers/httpApp.js");
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -61,6 +63,9 @@ describe("discovery -> send pipeline (TEST_MODE integration)", () => {
       mimeType: "application/pdf",
       dataBase64: Buffer.from("%PDF-1.4\nfake test pdf").toString("base64"),
     });
+    ensureCompanyCopy(store, "Acme");
+    ensureCompanyCopy(store, "Snowflake");
+    ensureCompanyCopy(store, "Beta Corp");
   });
 
   afterEach(async () => {
@@ -211,7 +216,33 @@ describe("discovery -> send pipeline (TEST_MODE integration)", () => {
       discoveryStage: "finder",
     });
     expect(completed.discoveryAttempts).toBe(1);
-    expect(completed.discoveryStage).toBe("jobright");
+    expect(completed.discoveryStage).toBeUndefined();
+    expect(completed.status).toBe("email_not_found");
+  });
+
+  it("hands an in-flight Jobright miss to Finder when a manual full-chain sweep is requested", async () => {
+    const candidate = store.upsertCandidate(
+      createCandidate({ fullName: "Manual Handoff", company: "Acme", linkedinUrl: "https://linkedin.com/in/manual-handoff" }),
+    );
+    const claimed = nextDiscoveryCandidate(store, new Date(), "jobright");
+    expect(claimed?.id).toBe(candidate.id);
+    const claimedAt = claimed?.discoveryClaimedAt;
+
+    await requestSalesqlSweep(store);
+    const queued = store.listCandidates().find((item) => item.id === candidate.id)!;
+    expect(queued.discoveryClaimedAt).toBe(claimedAt);
+    expect(queued.discoveryStage ?? "jobright").toBe("jobright");
+    expect(queued.forceProvider).toBe("finder");
+    expect(nextDiscoveryCandidate(store, new Date(), "finder")).toBeUndefined();
+
+    const handedOff = await recordDiscoveryResult(store, candidate.id, {
+      status: "not_found",
+      provider: "jobright",
+      discoveryStage: "jobright",
+    });
+    expect(handedOff.discoveryStage).toBe("finder");
+    expect(handedOff.discoveryAttempts ?? 0).toBe(0);
+    expect(nextDiscoveryCandidate(store, new Date(), "finder")?.id).toBe(candidate.id);
   });
 
   it("keeps Jobright misses out of Finder when automatic fallback is off", async () => {
@@ -266,8 +297,8 @@ describe("discovery -> send pipeline (TEST_MODE integration)", () => {
 
     const released = store.listCandidates().find((c) => c.id === candidate.id);
     expect(released?.discoveryClaimedAt).toBeUndefined();
-    // Claim released and candidate still eligible (transient error keeps it in the pool).
-    expect(nextDiscoveryCandidate(store)?.id).toBe(candidate.id);
+    // Claim released, but a technical failure waits for an explicit retry.
+    expect(nextDiscoveryCandidate(store)).toBeUndefined();
   });
 
   it("reclaims a discovery candidate whose claim went stale (worker crashed mid-lookup)", async () => {

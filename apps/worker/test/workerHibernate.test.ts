@@ -4,8 +4,19 @@ import {
   msUntilWake,
   planBrowserActions,
   shouldKeepLinkedInMessagingWarm,
+  shouldPrioritizeEmailDiscovery,
   shouldSelfExit,
 } from "../src/workerHibernate.js";
+
+describe("email discovery priority", () => {
+  it("gives queued lookup work the next browser turn", () => {
+    expect(shouldPrioritizeEmailDiscovery({ hasDiscovery: true, hasInProgressSend: false })).toBe(true);
+  });
+
+  it("never interrupts an email that is already being sent", () => {
+    expect(shouldPrioritizeEmailDiscovery({ hasDiscovery: true, hasInProgressSend: true })).toBe(false);
+  });
+});
 
 describe("LinkedIn message warm window", () => {
   it("keeps either live LinkedIn browser path warm before expiry", () => {
@@ -170,7 +181,7 @@ describe("decideHibernation", () => {
     expect(d.needDiscovery).toBe(true);
   });
 
-  it("defers discovery during the Gmail send warmup window", () => {
+  it("keeps discovery running during the Gmail send warmup window", () => {
     const d = decideHibernation({
       nextDueAt: "2030-06-01T12:05:00.000Z",
       now,
@@ -180,11 +191,11 @@ describe("decideHibernation", () => {
       maxSleepMs: 60_000,
     });
     expect(d.needGmail).toBe(true);
-    expect(d.needDiscovery).toBe(false);
-    expect(d.reason).toMatch(/send window/i);
+    expect(d.needDiscovery).toBe(true);
+    expect(d.reason).toMatch(/send window \+ discovery work/i);
   });
 
-  it("wakes Gmail (not discovery) in the send window even with capture queued", () => {
+  it("reports both Gmail and queued background work in the send window", () => {
     const d = decideHibernation({
       nextDueAt: "2030-06-01T12:05:00.000Z",
       now,
@@ -193,7 +204,7 @@ describe("decideHibernation", () => {
       maxSleepMs: 60_000,
     });
     expect(d.needGmail).toBe(true);
-    expect(d.needDiscovery).toBe(false);
+    expect(d.needDiscovery).toBe(true);
   });
 
   it("keeps Gmail open while a send is in_progress even if next due is far", () => {
@@ -492,12 +503,12 @@ describe("planBrowserActions (Chromium open/close)", () => {
       maxSleepMs: 60_000,
       hasDiscoveryWork: true,
     });
-    // Send window: open Gmail, close discovery.
+    // Send window: open Gmail and keep isolated Jobright discovery alive.
     expect(planBrowserActions(warmup, { gmailOpen: false, discoveryOpen: true })).toEqual({
       openGmail: true,
       closeGmail: false,
       openDiscovery: false,
-      closeDiscovery: true,
+      closeDiscovery: false,
     });
 
     const after = decideHibernation({

@@ -759,4 +759,39 @@ describe("schedule flow integration", () => {
     expect(result.jobs).toHaveLength(0);
     expect(result.jobFailures?.[0]?.reason).toMatch(/resume was not found/i);
   });
+
+  it("fails job creation when company outreach was never generated (stub-only content)", async () => {
+    // Global Setup stub exists from beforeEach, but no company content and no custom copy.
+    const candidate = store.upsertCandidate(
+      createCandidate({
+        fullName: "Stub Only",
+        firstName: "Stub",
+        company: "NeverGenerated Co",
+        email: "stub@nevergenerated.co",
+        emailCandidates: [
+          {
+            email: "stub@nevergenerated.co",
+            pattern: "first",
+            confidence: "high",
+            reason: "test",
+          },
+        ],
+        status: "email_guessed",
+      }),
+    );
+    expect(store.getCompanyContent("nevergenerated co")).toBeUndefined();
+
+    const result = await scheduleSends(store, {
+      candidateIds: [candidate.id],
+      startAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+      intervalMinutes: 12,
+      mode: "schedule",
+    });
+
+    expect(result.jobs).toHaveLength(0);
+    expect(result.jobFailures?.[0]?.reason).toMatch(/Generate outreach/i);
+    const queueItem = store.listSendQueue().find((item) => item.candidateId === candidate.id);
+    expect(queueItem?.status).toBe("failed");
+    expect(queueItem?.failureReason).toMatch(/Generate outreach/i);
+  });
 });

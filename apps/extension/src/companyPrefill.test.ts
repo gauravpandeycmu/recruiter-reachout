@@ -44,13 +44,13 @@ describe("pickExtensionCompanyPrefill", () => {
     ).toBe("Amazon Web Services (AWS)");
   });
 
-  it("reuses the sticky company on a people-search batch", () => {
+  it("prefers the live people-search company over a stale saved company", () => {
     expect(
       pickExtensionCompanyPrefill({
         pageMode: "search",
         parsedCompany: "OpenAI",
         stickyCompany: "Anthropic",
       }),
-    ).toBe("Anthropic");
+    ).toBe("OpenAI");
   });
 });

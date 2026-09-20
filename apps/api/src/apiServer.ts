@@ -73,6 +73,7 @@ import {
   updatePendingSendJobContent,
   updateScheduledCompanyBatch,
   rescheduleQueuedSend,
+  sendScheduledBatchNow,
   rescheduleCompanyBatch,
   retryFailedSends,
   getSetupSessionStatus,
@@ -85,6 +86,7 @@ import {
   assignCandidateToJob,
   checkCandidateStatuses,
   clearActiveCandidates,
+  clearActiveEmailNotFoundCandidates,
   removeActiveCandidate,
   removeActiveCandidatesMatching,
   reactivateCandidates,
@@ -314,6 +316,11 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
 
     if (req.method === "DELETE" && url.pathname === "/api/candidates/active") {
       sendJson(res, 200, await clearActiveCandidates(store));
+      return;
+    }
+
+    if (req.method === "DELETE" && url.pathname === "/api/candidates/active/email-not-found") {
+      sendJson(res, 200, await clearActiveEmailNotFoundCandidates(store));
       return;
     }
 
@@ -892,12 +899,14 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
         startAt?: string;
         intervalMinutes?: number;
         resumeId?: string;
+        appendToQueue?: boolean;
       };
       const result = await resumePausedSendBatch(store, {
         queueItemIds: body.queueItemIds ?? [],
         startAt: body.startAt,
         intervalMinutes: body.intervalMinutes,
         resumeId: body.resumeId,
+        appendToQueue: body.appendToQueue,
       });
       if (result.resumed > 0) {
         maybeWakeNow();
@@ -921,6 +930,22 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
         maybeWakeNow();
       }
       sendJson(res, 200, result);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/send-queue/send-all-now") {
+      const body = (await readJsonAudited(req, "http.body", { method: req.method, path: url.pathname })) as {
+        queueItemIds?: string[];
+      };
+      try {
+        const result = await sendScheduledBatchNow(store, { queueItemIds: body.queueItemIds });
+        if (result.moved > 0) {
+          maybeWakeNow();
+        }
+        sendJson(res, 200, result);
+      } catch (error) {
+        sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      }
       return;
     }
 

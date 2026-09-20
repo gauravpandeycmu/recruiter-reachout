@@ -621,6 +621,8 @@ export interface SendJob {
   resumeFileName?: string;
   resumeMimeType?: string;
   failureReason?: string;
+  /** First instant this attempt was claimed. Used for start-to-start pacing. */
+  claimedAt?: string;
   createdAt: string;
   updatedAt: string;
 }

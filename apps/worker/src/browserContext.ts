@@ -245,6 +245,19 @@ export function resolveLaunchChannel(options: LaunchPersistentContextOptions): s
 }
 
 /**
+ * Effective headless flag for launch. Extensions default to headed (Gmail/Streak);
+ * callers may opt in with allowHeadlessExtensions after live verification.
+ */
+export function resolveEffectiveHeadless(options: LaunchPersistentContextOptions): boolean {
+  const extensionArgs = buildExtensionArgs(options.extensionPaths ?? []);
+  const requestedHeadless = options.headless ?? true;
+  if (extensionArgs.length > 0 && !options.allowHeadlessExtensions) {
+    return false;
+  }
+  return requestedHeadless;
+}
+
+/**
  * Launches a persistent, dedicated browser profile. You log in by hand once
  * (headed, i.e. headless: false) so the session cookies persist in
  * userDataDir; every subsequent automated run reuses that already-trusted
@@ -259,7 +272,13 @@ export async function launchPersistentBrowserContext(options: LaunchPersistentCo
   const channel = resolveLaunchChannel(options);
   prepareChromiumUserDataDir(options.userDataDir);
   const requestedHeadless = options.headless ?? true;
-  const headless = extensionArgs.length > 0 && !options.allowHeadlessExtensions ? false : requestedHeadless;
+  const headless = resolveEffectiveHeadless(options);
+  if (extensionArgs.length > 0 && requestedHeadless && !options.allowHeadlessExtensions && !headless) {
+    // eslint-disable-next-line no-console -- launch helper has no worker log hook
+    console.warn(
+      `[browserContext] requested headless=true with extensions but allowHeadlessExtensions is off — launching headed (profile=${options.userDataDir})`,
+    );
+  }
 
   const context = await chromium.launchPersistentContext(options.userDataDir, {
     channel,

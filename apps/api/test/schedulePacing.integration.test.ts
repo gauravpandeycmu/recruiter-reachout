@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createCandidate, listUpcomingSends, scheduleSends, setOutreachContent, saveResume } from "../src/services.js";
 import { Store } from "../src/store.js";
+import { ensureCompanyCopy } from "./helpers/httpApp.js";
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -15,6 +16,7 @@ describe("schedule pacing integration", () => {
     directory = await mkdtemp(join(tmpdir(), "recruiter-schedule-pacing-"));
     store = new Store(join(directory, "store.sqlite"));
     await store.load();
+    ensureCompanyCopy(store, "Acme");
 
     process.env.GOOGLE_CLIENT_ID = "client-id";
     process.env.GOOGLE_CLIENT_SECRET = "client-secret";
@@ -52,6 +54,7 @@ describe("schedule pacing integration", () => {
   });
 
   async function seedReadyCandidate(name: string, company: string, email: string) {
+    ensureCompanyCopy(store, company);
     return store.upsertCandidate(
       createCandidate({
         fullName: name,

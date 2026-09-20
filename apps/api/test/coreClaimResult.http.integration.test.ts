@@ -38,7 +38,10 @@ describe("bulletproof claim + send-result HTTP", () => {
     // Gap still active → no second claim.
     expect((await app.fetchJson("/api/automation/next-send", { expectStatus: 404 })).status).toBe(404);
 
-    pinCompletedAt(app, first.id, new Date(Date.now() - globalSendGapMs() - 1_000).toISOString());
+    // Clear the maximum configured +4s human jitter as well as the base gap.
+    const priorStart = new Date(Date.now() - globalSendGapMs() - 5_000).toISOString();
+    pinCompletedAt(app, first.id, priorStart);
+    app.store.upsertSendJob({ ...app.store.getSendJob(first.id)!, claimedAt: priorStart });
     await app.store.save();
 
     const second = await app.fetchJson<{ candidateId: string }>("/api/automation/next-send", {

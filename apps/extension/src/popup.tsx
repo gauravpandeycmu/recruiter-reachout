@@ -220,13 +220,15 @@ function Popup() {
 
       if (/linkedin\.com\/search\/results\/people/i.test(tab.url)) {
         setPageMode("search");
-        const saved = prefillCompany(
-          {
-            pageMode: "search",
-            parsedCompany: undefined,
-          },
-          { ignoreEdits: true },
-        );
+        setCompanyTouched(false);
+        let parsedCompany: string | undefined;
+        try {
+          const response = await collectFromTab(tab.id, { prepareLazyLoad: false });
+          parsedCompany = response.companySuggestion?.trim();
+        } catch {
+          // Search capture itself can still run when the user presses save.
+        }
+        const saved = prefillCompany({ pageMode: "search", parsedCompany }, { ignoreEdits: true });
         setStatus(
           saved
             ? `Ready to save visible profiles for ${saved}.`

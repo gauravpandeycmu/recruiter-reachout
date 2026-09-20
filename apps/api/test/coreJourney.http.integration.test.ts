@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createCandidate, flushWake, startHttpApp, type HttpApp } from "./helpers/httpApp.js";
+import { createCandidate, ensureCompanyCopy, flushWake, startHttpApp, type HttpApp } from "./helpers/httpApp.js";
 import { __resetWorkerSupervisorForTests, __setWorkerSupervisorTestHooks } from "../src/workerSupervisor.js";
 
 /**
@@ -15,6 +15,7 @@ describe("core add→discover→schedule→send HTTP journey", () => {
 
   it("happy path: bulk intake, discover email, schedule, send success under TEST_MODE", async () => {
     app = await startHttpApp({ autoEnsureWorker: true });
+    ensureCompanyCopy(app.store, "JourneyCo");
 
     __resetWorkerSupervisorForTests();
     let spawns = 0;
@@ -97,6 +98,7 @@ describe("core add→discover→schedule→send HTTP journey", () => {
 
   it("edge path: discover miss → force SalesQL found → pause remaining → resume later → send", async () => {
     app = await startHttpApp({ autoEnsureWorker: true });
+    ensureCompanyCopy(app.store, "EdgeJourney");
     const a = app.store.upsertCandidate(
       createCandidate({
         fullName: "Edge A",

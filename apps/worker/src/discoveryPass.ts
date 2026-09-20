@@ -241,6 +241,12 @@ export async function runDiscoveryPass(deps: DiscoveryPassDeps): Promise<Discove
               }
             }
           : undefined,
+        recoverFinderPage: deps.recoverSalesqlPage
+          ? async (provider) => {
+              await deps.recoverSalesqlPage!();
+              log(`Recovered Finder page after ${discoveryProviderLabel(provider)} timed out; continuing with the next source.`);
+            }
+          : undefined,
         log: (message) => {
           const overlay: import("@recruiter/shared").FinderProvider | undefined = /trying Apollo/i.test(message)
             ? "apollo"

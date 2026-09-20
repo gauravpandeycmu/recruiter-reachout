@@ -58,7 +58,7 @@ describe("claimNextSendJob due-slot gating", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
-  it("waits until scheduledFor for send_now jobs (staggered 4-minute Send-now gaps)", async () => {
+  it("waits until scheduledFor for send_now jobs (staggered send-now cadence)", async () => {
     const directory = await mkdtemp(join(tmpdir(), "recruiter-claim-now-"));
     const store = new Store(join(directory, "store.sqlite"));
     await store.load();
@@ -299,7 +299,9 @@ describe("claimNextSendJob due-slot gating", () => {
 
   it("blocks claims until global gap after a completed send", async () => {
     const prev = process.env.GLOBAL_SEND_GAP_MINUTES;
+    const prevJitter = process.env.GLOBAL_SEND_JITTER_SECONDS;
     process.env.GLOBAL_SEND_GAP_MINUTES = "6";
+    process.env.GLOBAL_SEND_JITTER_SECONDS = "0";
     const directory = await mkdtemp(join(tmpdir(), "recruiter-claim-gap-"));
     const store = new Store(join(directory, "store.sqlite"));
     await store.load();
@@ -325,6 +327,7 @@ describe("claimNextSendJob due-slot gating", () => {
     expect(claimNextSendJob(store, new Date("2026-07-10T14:06:00.000Z"))?.id).toBe("next");
 
     process.env.GLOBAL_SEND_GAP_MINUTES = prev;
+    process.env.GLOBAL_SEND_JITTER_SECONDS = prevJitter;
     await rm(directory, { recursive: true, force: true });
   });
 

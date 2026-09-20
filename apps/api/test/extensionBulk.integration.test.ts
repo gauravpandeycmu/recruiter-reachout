@@ -88,6 +88,12 @@ describe("extension bulk save integration", () => {
     ]);
     const id = first?.savedCandidateId ?? "";
     store.addEvent(createEvent(id, "send"));
+    store.updateCandidate(id, {
+      status: "sent",
+      customSubject: "Old role",
+      customBody: "Old batch body",
+      lastError: "Old batch error",
+    });
     store.archiveCandidate(id);
     await store.save();
 
@@ -104,6 +110,10 @@ describe("extension bulk save integration", () => {
     expect(second?.savedCandidateId).toBe(id);
     expect(store.listActiveCandidates()).toHaveLength(1);
     expect(store.listActiveCandidates()[0]?.email).toBe("previously.sent@apple.com");
+    expect(store.listActiveCandidates()[0]?.status).toBe("email_guessed");
+    expect(store.listActiveCandidates()[0]?.customSubject).toBeUndefined();
+    expect(store.listActiveCandidates()[0]?.customBody).toBeUndefined();
+    expect(store.listActiveCandidates()[0]?.lastError).toBeUndefined();
     expect(store.listEvents().filter((event) => event.candidateId === id && event.type === "send")).toHaveLength(1);
   });
 

@@ -51,6 +51,53 @@ describe("core preview edits + candidate PATCH HTTP", () => {
     expect(benPreview.body.textBody).not.toContain("Hi Ada,");
   });
 
+  it("re-freezes pending send jobs when company preview edits are saved", async () => {
+    app = await startHttpApp();
+    const { scheduleSends } = await import("../src/services.js");
+    const ada = seedReady(app, "Ada Lovelace", "JobCo", "ada@job.co");
+    const ben = seedReady(app, "Ben Pipeline", "JobCo", "ben@job.co");
+    await scheduleSends(app.store, {
+      candidateIds: [ada.id, ben.id],
+      startAt: new Date().toISOString(),
+      intervalMinutes: 12,
+      mode: "schedule",
+    });
+    const before = app.store.listSendJobs().filter((job) => job.status === "pending");
+    expect(before).toHaveLength(2);
+    expect(before.some((job) => job.textBody.includes("Thank you"))).toBe(false);
+
+    // Seed stale frozen copy (what Send now would have captured before an edit).
+    for (const job of before) {
+      app.store.upsertSendJob({
+        ...job,
+        subject: `Stale for ${job.candidateId}`,
+        textBody: "Hi there,\n\nThank you for your time.\n",
+        htmlBody: "<p>Hi there,</p><p>Thank you for your time.</p>",
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    await app.store.save();
+
+    const saved = await app.fetchJson<{ jobsUpdated: number }>("/api/batch-preview-edits", {
+      method: "POST",
+      body: JSON.stringify({
+        company: "JobCo",
+        subject: "Hello Ada — JobCo",
+        body: "Hi Ada,\n\nJust checking in — no thank-you line.",
+        sourceCandidateId: ada.id,
+      }),
+      expectStatus: 200,
+    });
+    expect(saved.body.jobsUpdated).toBe(0);
+
+    const jobs = app.store.listSendJobs().filter((job) => job.status === "pending");
+    expect(jobs).toHaveLength(2);
+    for (const job of jobs) {
+      expect(job.textBody).toContain("Thank you");
+      expect(job.textBody).not.toContain("Just checking in");
+    }
+  });
+
   it("PATCH cannot set discoveryClaimedAt or status, and a late found report keeps a pasted email", async () => {
     app = await startHttpApp();
     const bulk = await app.fetchJson<{ results: Array<{ savedCandidateId?: string }> }>("/api/candidates/bulk", {

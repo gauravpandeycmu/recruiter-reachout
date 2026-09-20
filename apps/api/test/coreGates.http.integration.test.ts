@@ -171,11 +171,11 @@ describe("core send gates + analytics HTTP", () => {
   it("updating outreach copy is what the next preview renders", async () => {
     app = await startHttpApp();
     const person = seedReady(app, "Copy Check", "CopyCo", "copy@copy.co");
-    await app.fetchJson("/api/content", {
-      method: "POST",
+    await app.fetchJson(`/api/candidates/${person.id}`, {
+      method: "PATCH",
       body: JSON.stringify({
-        subject: "Hello {firstName} from CopyCo",
-        body: "Unique body line for Copy Check.",
+        customSubject: "Hello {firstName} from CopyCo",
+        customBody: "Unique body line for Copy Check.",
       }),
       expectStatus: 200,
     });

@@ -27,7 +27,7 @@ describe("streakRingMetrics", () => {
 });
 
 describe("resolveBestOutreachStreak", () => {
-  it("uses max of current and longest send streaks (not goal-met longest)", () => {
+  it("uses max of current and longest goal streaks", () => {
     expect(resolveBestOutreachStreak(2, 8)).toBe(8);
     expect(resolveBestOutreachStreak(5, 3)).toBe(5);
     expect(resolveBestOutreachStreak(0, 0)).toBe(0);

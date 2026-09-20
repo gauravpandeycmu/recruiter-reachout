@@ -74,9 +74,9 @@ export function extractJobIds(jobDescription?: string): string[] {
 }
 
 /**
- * Collect the single job/req ID phrase to hyperlink onto the job posting URL.
- * Returns at most one ID so the email body never gets the same link repeated.
- * Role titles are used only when the posting ID is a long ATS UUID (Ashby, etc.).
+ * Collect the single phrase to hyperlink onto the job posting URL.
+ * Prefer the role title whenever it is present in the prose, leaving any job ID
+ * beside it as plain text. Returns at most one phrase so links never repeat.
  */
 export function collectJobLinkTexts(options: {
   jobUrl?: string;
@@ -89,6 +89,10 @@ export function collectJobLinkTexts(options: {
   const fromBodyLabeled = extractJobIds(options.emailBody);
   const roleTitle = options.roleTitle?.trim();
   const bodyLower = options.emailBody?.toLowerCase() ?? "";
+
+  if (options.jobUrl && roleTitle && bodyLower.includes(roleTitle.toLowerCase())) {
+    return [roleTitle];
+  }
 
   const preferRoleTitleForUuid = (id?: string): string[] | undefined => {
     if (!id || !isOpaqueAtsJobId(id) || !roleTitle) {

@@ -159,7 +159,7 @@ describe("discovery claim isolation HTTP", () => {
     expect(pending.body.hasDiscovery).toBe(false);
   });
 
-  it("worker claim → transient error releases the claim so the next pass can retry", async () => {
+  it("worker claim → technical error releases the claim without an automatic retry", async () => {
     app = await startHttpApp();
     const id = await seedNeedsLookup("Timeout Path", "timeout-path-claim");
 
@@ -181,8 +181,7 @@ describe("discovery claim isolation HTTP", () => {
     expect(errored.body.discoveryClaimedAt).toBeFalsy();
     expect(claimedAt(id)).toBeFalsy();
 
-    const retry = await app.fetchJson<{ id: string }>("/api/automation/next-discovery", { expectStatus: 200 });
-    expect(retry.body.id).toBe(id);
+    await app.fetchJson("/api/automation/next-discovery", { expectStatus: 404 });
   });
 
   it("Look up now / SalesQL sweep queue work without claiming", async () => {
@@ -205,11 +204,12 @@ describe("discovery claim isolation HTTP", () => {
     expect(sweep.body.candidateIds).toContain(id);
     expect(claimedAt(id)).toBeUndefined();
 
-    const worker = await app.fetchJson<{ id: string; forceProvider?: string }>("/api/automation/next-discovery", {
+    const worker = await app.fetchJson<{ id: string; forceProvider?: string; discoveryStage?: string }>("/api/automation/next-discovery", {
       expectStatus: 200,
     });
     expect(worker.body.id).toBe(id);
-    expect(worker.body.forceProvider).toBe("finder");
+    expect(worker.body.forceProvider).toBeUndefined();
+    expect(worker.body.discoveryStage).toBe("jobright");
   });
 
   it("Look up now after a stolen claim releases it so the worker can look them up immediately", async () => {

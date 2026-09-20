@@ -14,6 +14,7 @@ import {
 } from "../src/services.js";
 import { globalSendGapMs } from "../src/sendJobs.js";
 import { Store } from "../src/store.js";
+import { ensureCompanyCopy } from "./helpers/httpApp.js";
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -25,6 +26,8 @@ describe("addPersonToScheduledBatch", () => {
     directory = await mkdtemp(join(tmpdir(), "recruiter-add-person-"));
     store = new Store(join(directory, "store.sqlite"));
     await store.load();
+    ensureCompanyCopy(store, "Acme");
+    ensureCompanyCopy(store, "SeatGeek");
 
     process.env.GOOGLE_CLIENT_ID = "client-id";
     process.env.GOOGLE_CLIENT_SECRET = "client-secret";
