@@ -7,6 +7,7 @@ This file is for **setup only**. Read it and [`docs/SETUP.md`](docs/SETUP.md) be
 - Never commit `.env`, `client_secret*.json`, SQLite files, resumes, or Playwright profile dirs.
 - Leave the owner’s **local** `.env` alone unless they asked you to edit it. GitHub copies must use `.env.example` with empty values.
 - Do not print API keys in chat or logs.
+- A clone’s first API boot creates an empty local SQLite file under `apps/api/data/` (gitignored). Do not copy someone else’s database into a fresh clone.
 
 ## Start the app so it stays up
 

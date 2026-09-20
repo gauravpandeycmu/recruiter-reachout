@@ -30,4 +30,14 @@ describe("Grove analytics layout", () => {
     expect(mainSource).toContain('className="svg-endpoint"');
     expect(mainSource).not.toContain("Cumulative companies");
   });
+
+  it("plants grove trees from daily goal-met streak, not any-outreach sendStreak", () => {
+    expect(mainSource).toContain("streak={analytics.goalProgress.streak}");
+    expect(mainSource).toContain("bestStreak={analytics.usage.longestStreak}");
+    expect(mainSource).toContain("resolveGroveUnlockDays");
+    expect(mainSource).toContain("analytics.goalProgress.streak");
+    expect(mainSource).toContain("analytics.usage.longestStreak");
+    expect(mainSource).not.toContain("streak={analytics.goalProgress.sendStreak}");
+    expect(mainSource).not.toContain("bestStreak={analytics.goalProgress.longestSendStreak}");
+  });
 });

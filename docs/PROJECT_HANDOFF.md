@@ -136,11 +136,12 @@ Persisted: `localStorage` key `recruiter-reachout.active-tab`.
 ### Grove (Analytics tab)
 
 - **3D Streak Grove** — `StreakGrove3D.tsx` (Three.js); SVG fallback. Details: `apps/web/GROVE3D.md`.
-- Trees ≈ outreach `sendStreak` (days in a row with schedule **or** send activity).
+- Planted trees = consecutive days the **daily company goal** was met (`goalProgress.streak`). Field-guide unlocks are sticky (`resolveGroveUnlockDays` + `grove-goal-unlock-days.v3`) so a later streak reset does not uproot collected species.
+- A first-run clone is a **bare meadow**: 0 planted streak trees, 0 send events, 0 companies touched. Decorative foothill pines in the 3D scene are scenery, not plantings.
 - Daily goal editor; celebration toast (dancing cat) when company goal met.
 - **Useful:** cumulative scheduled-companies climb, 14-day trend, company leaderboard, health warnings (elsewhere / cards).
-- **Fun zone:** usage stats (Jobright / SalesQL / Gemini / captures), hourly **schedule-click** chart, queue donuts, **streak ring** (“Keep the grove growing”) — dual SVG ring current vs best; **Nudge / health panel removed** from this slot.
-- Fun stats use `goalProgress.sendStreak` / `longestSendStreak` (not legacy goal-met `usage.longestStreak` alone).
+- **Fun zone:** usage stats (Jobright / SalesQL / Gemini / captures), hourly **schedule-click** chart, queue donuts, **streak ring** (“Keep the grove growing”).
+- `goalProgress.sendStreak` / `longestSendStreak` are outreach-activity days (any schedule or send). They do **not** plant Grove trees.
 
 ### History
 
@@ -174,18 +175,18 @@ Persisted: `localStorage` key `recruiter-reachout.active-tab`.
 - `goalProgress.streak` = consecutive days the **company goal** was met.
 - Celebration: `shouldCelebrate` when met and not yet celebrated today → cat toast + `celebrateToday`.
 
-### Outreach / Grove streak (`sendStreak`)
+### Outreach activity streak (`sendStreak`)
 
 - An **activity day** = Gmail `type: "send"` event **OR** any active queue item whose `createdAt` falls that local day (`collectOutreachActivityDates`).
-- `activityToday`, `sendStreak`, `longestSendStreak` drive Grove tree count and Send-tab streak copy.
-- Copy intent: one tree per day in a row you **schedule or send**.
+- `activityToday`, `sendStreak`, `longestSendStreak` measure days with any schedule-or-send action.
+- Grove **trees** and field-guide unlocks use the company-goal streak (`goalProgress.streak` / `usage.longestStreak`), not this activity streak.
 
 ### Do not conflate
 
 | Concept | Fields | Basis |
 |---------|--------|--------|
-| Company goal + goal streak | `sentToday`, `dailySendGoal`, `goalProgress.streak` | Distinct companies scheduled that day |
-| Outreach / Grove streak | `sendStreak`, `longestSendStreak`, `activityToday` | Any schedule-or-send activity that day |
+| Company goal + goal streak / Grove trees | `sentToday`, `dailySendGoal`, `goalProgress.streak`, `usage.longestStreak` | Distinct companies scheduled that day; consecutive goal-met days plant trees |
+| Outreach activity streak | `sendStreak`, `longestSendStreak`, `activityToday` | Any schedule-or-send activity that day |
 | Motivation level | `motivation.*` | Lifetime **send events** milestone ladder |
 
 ### Client date gotcha

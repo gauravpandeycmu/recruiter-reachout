@@ -27,6 +27,58 @@ describe("analytics", () => {
     expect(toOffsetYmd("2026-07-10T02:30:00.000Z", 0)).toBe("2026-07-10");
   });
 
+  it("a brand-new sqlite is a shareable first-run: no people, mail, companies, or grove days", async () => {
+    const store = await freshStore();
+    expect(store.listCandidates()).toEqual([]);
+    expect(store.listEvents()).toEqual([]);
+    expect(store.listSendQueue()).toEqual([]);
+    expect(store.listSendJobs()).toEqual([]);
+    expect(store.listJobs()).toEqual([]);
+    expect(store.listCompanyContent()).toEqual([]);
+    expect(store.listEmailSamples()).toEqual([]);
+    expect(store.getAnalyticsGoalSettings()).toMatchObject({
+      dailySendGoal: 5,
+      goalMetDates: [],
+    });
+
+    const summary = buildAnalyticsSummary(store, "2026-09-20", { tzOffsetMinutes: 0 });
+    expect(summary.today).toMatchObject({ sent: 0, discovered: 0, companiesReached: 0 });
+    expect(summary.week).toMatchObject({ sent: 0, discovered: 0, companiesReached: 0 });
+    expect(summary.allTime).toMatchObject({
+      sent: 0,
+      discovered: 0,
+      collected: 0,
+      companiesTouched: 0,
+      recruitersContacted: 0,
+    });
+    expect(summary.funnel).toMatchObject({ collected: 0, emailFound: 0, sent: 0 });
+    expect(summary.activeBatch).toMatchObject({
+      total: 0,
+      readyToSend: 0,
+      pendingDiscovery: 0,
+      notFound: 0,
+    });
+    expect(summary.companies).toEqual([]);
+    expect(summary.goalProgress).toMatchObject({
+      sentToday: 0,
+      goal: 5,
+      met: false,
+      streak: 0,
+      sendStreak: 0,
+      longestSendStreak: 0,
+      activityToday: false,
+      shouldCelebrate: false,
+    });
+    expect(summary.goalProgress.goalMetDates).toEqual([]);
+    expect(summary.usage.longestStreak).toBe(0);
+    expect(summary.usage.profilesSaved).toBe(0);
+    expect(summary.usage.companiesGenerated).toBe(0);
+    expect(summary.usage.geminiCalls).toBe(0);
+    expect(summary.motivation.title).toBe("Bare meadow");
+    // Dashboard grove trees use the goal-met streak, not sendStreak.
+    expect(Math.max(summary.goalProgress.streak, summary.usage.longestStreak)).toBe(0);
+  });
+
   it("buckets sends and discoveries using client timezone offset", async () => {
     const store = await freshStore();
     const candidate = store.upsertCandidate(
@@ -796,6 +848,35 @@ describe("analytics", () => {
     expect(summary.goalProgress.sentToday).toBe(0);
     // ...but the streak is preserved through yesterday (grace day), not reset to 0.
     expect(summary.goalProgress.streak).toBe(3);
+  });
+
+  it("does not plant a grove day until the default daily company goal is met", async () => {
+    const store = await freshStore();
+    const candidate = store.upsertCandidate(
+      createCandidate({ fullName: "One Company", email: "one@acme.com", company: "Acme" }),
+    );
+    store.upsertSendQueueItem({
+      id: "q-one-company",
+      candidateId: candidate.id,
+      email: "one@acme.com",
+      confidence: "high",
+      status: "scheduled",
+      scheduledFor: "2026-09-20T18:00:00.000Z",
+      createdAt: "2026-09-20T12:00:00.000Z",
+      updatedAt: "2026-09-20T12:00:00.000Z",
+      attempts: 0,
+    });
+
+    const summary = buildAnalyticsSummary(store, "2026-09-20", { tzOffsetMinutes: 0 });
+    expect(summary.goal.dailySendGoal).toBe(5);
+    expect(summary.goalProgress.sentToday).toBe(1);
+    expect(summary.goalProgress.met).toBe(false);
+    expect(summary.goalProgress.sendStreak).toBe(1);
+    expect(summary.goalProgress.streak).toBe(0);
+    expect(summary.usage.longestStreak).toBe(0);
+    expect(summary.allTime.sent).toBe(0);
+    expect(summary.allTime.companiesTouched).toBe(0);
+    expect(Math.max(summary.goalProgress.streak, summary.usage.longestStreak)).toBe(0);
   });
 
   it("counts consecutive goal-met days from schedule data even when goalMetDates was never persisted", async () => {

@@ -266,15 +266,15 @@ function persistUnlockDays(days: number): void {
 }
 
 /**
- * Sticky unlock progress = best streak days you’ve ever reached.
+ * Sticky unlock progress = best daily-goal streak days you’ve ever reached.
  * Species themselves are always derived from the current planting sequence for that day count
  * (never a frozen id list — that broke when the random sequence changed).
  */
-export function resolveGroveUnlockDays(sendStreak: number, longestSendStreak: number): number {
+export function resolveGroveUnlockDays(goalStreak: number, longestGoalStreak: number): number {
   const fromServer = Math.max(
     0,
-    Math.floor(sendStreak) || 0,
-    Math.floor(longestSendStreak) || 0,
+    Math.floor(goalStreak) || 0,
+    Math.floor(longestGoalStreak) || 0,
   );
   const best = Math.max(fromServer, readStoredUnlockDays());
   persistUnlockDays(best);

@@ -7,8 +7,9 @@ import { createCandidate } from "../src/services.js";
 import { Store } from "../src/store.js";
 
 /**
- * Integration coverage for send-streak stats that drive the Streak Grove
- * field-guide unlocks (best of current + longest streak).
+ * Outreach-activity streaks (`sendStreak`) vs Grove trees.
+ * Dashboard trees / field-guide unlocks use the daily *goal-met* streak
+ * (`goalProgress.streak` / `usage.longestStreak`), not sendStreak.
  */
 describe("streak grove analytics integration", () => {
   const dirs: string[] = [];
@@ -42,6 +43,17 @@ describe("streak grove analytics integration", () => {
       attempts: 0,
     });
   }
+
+  it("starts with zero goal and send streaks on an empty database", async () => {
+    const store = await freshStore();
+    const summary = buildAnalyticsSummary(store, "2026-09-20", { tzOffsetMinutes: 0 });
+    expect(summary.goalProgress.streak).toBe(0);
+    expect(summary.usage.longestStreak).toBe(0);
+    expect(summary.goalProgress.sendStreak).toBe(0);
+    expect(summary.goalProgress.longestSendStreak).toBe(0);
+    expect(summary.allTime.sent).toBe(0);
+    expect(summary.allTime.companiesTouched).toBe(0);
+  });
 
   it("exposes current and longest send streaks for unlock days", async () => {
     const store = await freshStore();
@@ -82,15 +94,14 @@ describe("streak grove analytics integration", () => {
     expect(summary.goalProgress.sendStreak).toBe(2);
     expect(summary.goalProgress.longestSendStreak).toBe(3);
 
-    // Unlock days on the client = max(current, longest) → 3.
-    const unlockDays = Math.max(
-      summary.goalProgress.sendStreak,
-      summary.goalProgress.longestSendStreak,
-    );
-    expect(unlockDays).toBe(3);
+    // Activity-streak best remains 3 after a gap. Grove unlocks use goal streak instead.
+    expect(
+      Math.max(summary.goalProgress.sendStreak, summary.goalProgress.longestSendStreak),
+    ).toBe(3);
+    expect(Math.max(summary.goalProgress.streak, summary.usage.longestStreak)).toBe(0);
   });
 
-  it("counts schedule-click days toward the send streak used by the grove", async () => {
+  it("counts schedule-click days toward the send streak", async () => {
     const store = await freshStore();
     const candidate = store.upsertCandidate(
       createCandidate({ fullName: "Scheduler", email: "sched@acme.com", company: "Acme" }),

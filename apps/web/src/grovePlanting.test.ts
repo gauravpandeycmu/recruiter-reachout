@@ -197,6 +197,13 @@ describe("resolveGroveUnlockDays sticky storage", () => {
     localStorage.clear();
   });
 
+  it("first visit with empty storage and zero streaks unlocks nothing", async () => {
+    const { resolveGroveUnlockDays } = await import("./groveTreeGuide");
+    expect(resolveGroveUnlockDays(0, 0)).toBe(0);
+    expect(plantedSpeciesForDays(0).size).toBe(0);
+    expect(localStorage.getItem("recruiter-reachout.grove-goal-unlock-days.v3")).toBe("0");
+  });
+
   it("persists the best streak days and never shrinks", async () => {
     const { resolveGroveUnlockDays } = await import("./groveTreeGuide");
     expect(resolveGroveUnlockDays(2, 2)).toBe(2);

@@ -120,6 +120,14 @@ Chrome → `chrome://extensions` → Developer mode → Load unpacked → `apps/
 
 Real open/click tracking needs a public HTTPS URL. See the relay section in [`README.md`](../README.md). Skip until you need tracking.
 
+## First-run product state
+
+A clone starts empty. The first API boot creates a gitignored SQLite file with no people, companies, send history, or goal days. Analytics is a **bare meadow** (0 sends, 0 companies). Grove plants a tree only after you meet the daily company goal — not on the first schedule click, and not from someone else’s local database.
+
+Do **not** copy `apps/api/data/` from another machine if you want that clean start. Grove also keeps a small sticky unlock count in the browser; a brand-new browser profile is empty.
+
+TEST MODE can preview grove species in the field guide without saving them. The 3D meadow still has no planted streak trees until the daily goal is met (unless you use the TEST MODE streak preview).
+
 ## Sanity checks
 
 - [ ] `.env` exists locally and is **not** staged for git
