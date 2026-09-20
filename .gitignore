@@ -4,13 +4,16 @@ dist
 *.log
 *.tsbuildinfo
 
-# Local IDE / agent config
+# Local IDE / agent config (keep committed Cursor rules so clones get setup guidance)
 .claude
-.cursor
+.cursor/*
+!.cursor/rules/
+!.cursor/rules/**
 
 # Secrets and environment
 .env
 .env.*
+!.env.example
 client_secret*.json
 apps/api/.env
 apps/web/.env

@@ -1,7 +1,7 @@
 #!/bin/bash
 set -u
 
-ROOT="/Users/gaurav/Desktop/Sem_3/Recruiter Reachout"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOG="/tmp/rr-keep-dev-up.log"
 API_PID_FILE="/tmp/rr-api-dev.pid"
 WEB_PID_FILE="/tmp/rr-web-dev.pid"

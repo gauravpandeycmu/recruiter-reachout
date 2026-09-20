@@ -5,9 +5,7 @@ import "../src/loadEnv.js";
 import { resolve } from "node:path";
 import { launchPersistentBrowserContext } from "../src/browserContext.js";
 
-const SALESQL_EXTENSION_PATH =
-  process.env.SALESQL_EXTENSION_PATH ??
-  "/Users/gaurav/Library/Application Support/Google/Chrome/Default/Extensions/lbdglhhdbgnknbdifhanfholehojlkgg/1.2.81_0";
+const SALESQL_EXTENSION_PATH = process.env.SALESQL_EXTENSION_PATH;
 const SALESQL_USER_DATA_DIR = process.env.SALESQL_USER_DATA_DIR ?? resolve(process.cwd(), "data/salesql-profile");
 const LINKEDIN_URL = process.env.SALESQL_EXPLORE_LINKEDIN_URL ?? "https://www.linkedin.com/in/ephinjose/";
 
@@ -51,7 +49,7 @@ async function main(): Promise<void> {
     userDataDir: SALESQL_USER_DATA_DIR,
     channel: "chrome",
     headless: false,
-    extensionPaths: [SALESQL_EXTENSION_PATH],
+    extensionPaths: SALESQL_EXTENSION_PATH ? [SALESQL_EXTENSION_PATH] : [],
   });
 
   const page = context.pages()[0] ?? (await context.newPage());

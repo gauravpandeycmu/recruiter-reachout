@@ -23,6 +23,7 @@ import {
   discoveryStatusLabel,
   peekNextDiscoveryCandidate,
   trackedSendQueueIdsAreOrphaned,
+  resolveGenerationModes,
 } from "./sendHelpers.js";
 import { parseDatetimeLocal } from "./scheduleTime.js";
 
@@ -55,6 +56,13 @@ describe("resumeTint", () => {
     expect(tint.bg).toMatch(/^#/);
     expect(tint.border).toMatch(/^#/);
     expect(tint.accent).toMatch(/^#/);
+  });
+});
+
+describe("resolveGenerationModes", () => {
+  it("always customises experience for the role and optionally adds company passion", () => {
+    expect(resolveGenerationModes(true)).toEqual({ passionate: true, customise: true });
+    expect(resolveGenerationModes(false)).toEqual({ passionate: false, customise: true });
   });
 });
 

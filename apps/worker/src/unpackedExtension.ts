@@ -1,5 +1,61 @@
 import { cpSync, existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
+
+/** Chrome "User Data" roots for this OS (may not exist yet). */
+export function chromeUserDataDirs(): string[] {
+  if (process.platform === "win32") {
+    const local = process.env.LOCALAPPDATA?.trim();
+    return local ? [resolve(local, "Google", "Chrome", "User Data")] : [];
+  }
+  if (process.platform === "darwin") {
+    return [resolve(homedir(), "Library/Application Support/Google/Chrome")];
+  }
+  return [
+    resolve(homedir(), ".config/google-chrome"),
+    resolve(homedir(), ".config/chromium"),
+  ];
+}
+
+/** Default profile folder for an extension id (version dir may sit underneath). */
+export function chromeDefaultExtensionPath(extensionId: string): string {
+  const root = chromeUserDataDirs()[0] ?? resolve(homedir(), "Library/Application Support/Google/Chrome");
+  return resolve(root, "Default", "Extensions", extensionId);
+}
+
+function latestVersionDir(extensionRoot: string): string | undefined {
+  if (!existsSync(extensionRoot)) {
+    return undefined;
+  }
+  if (existsSync(resolve(extensionRoot, "manifest.json"))) {
+    return extensionRoot;
+  }
+  const newest = readdirSync(extensionRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort(compareExtensionVersions)
+    .at(-1);
+  if (!newest) {
+    return undefined;
+  }
+  const full = resolve(extensionRoot, newest);
+  return existsSync(resolve(full, "manifest.json")) ? full : undefined;
+}
+
+/** Search Default + Profile N under each OS Chrome user-data dir. */
+export function findInstalledChromeExtension(extensionId: string): string | undefined {
+  for (const chromeRoot of chromeUserDataDirs()) {
+    if (!existsSync(chromeRoot)) continue;
+    const profiles = readdirSync(chromeRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && (entry.name === "Default" || entry.name.startsWith("Profile ")))
+      .map((entry) => resolve(chromeRoot, entry.name, "Extensions", extensionId));
+    for (const root of profiles) {
+      const found = latestVersionDir(root);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
 
 function compareExtensionVersions(a: string, b: string): number {
   const parse = (value: string) =>
@@ -20,11 +76,12 @@ function compareExtensionVersions(a: string, b: string): number {
 }
 
 function resolveInstalledExtension(source: string): string | undefined {
-  if (existsSync(source)) {
+  if (existsSync(resolve(source, "manifest.json"))) {
     return source;
   }
 
-  const versionsDir = dirname(source);
+  // Either the Chrome extension-id folder, or a missing version dir whose parent holds versions.
+  const versionsDir = existsSync(source) ? source : dirname(source);
   if (!existsSync(versionsDir)) {
     return undefined;
   }

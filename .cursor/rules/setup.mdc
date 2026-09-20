@@ -1,0 +1,11 @@
+---
+description: First-run setup, secrets, and how to keep the app running
+alwaysApply: true
+---
+
+Before install, `.env`, login browsers, or `npm run dev`: read `AGENTS.md` and `docs/SETUP.md`.
+
+- Never commit `.env` or API keys. Do not wipe the local `.env` for GitHub.
+- Start the stack with `npm run dev:terminal` so Cursor agent shells cannot kill it (macOS Terminal.app / Windows Command Prompt).
+- Resumes stay in Setup UI (`apps/api/data/resumes/` is gitignored).
+- Chrome extensions (SalesQL, Apollo, Streak) install in Google Chrome; Playwright copies them. Streak also: `npm run install:streak -w @recruiter/worker`.

@@ -8,7 +8,8 @@
 Point new sessions at this file first:
 
 ```text
-Read docs/PROJECT_HANDOFF.md, then continue from the user’s latest ask.
+Read AGENTS.md and docs/SETUP.md for install/env/login.
+Read docs/PROJECT_HANDOFF.md for product behavior, then continue from the user’s latest ask.
 ```
 
 Also useful: root `README.md` (run/env), `apps/web/GROVE3D.md` (Three.js grove), `validation/manual-checks.md`.
@@ -42,6 +43,16 @@ Root: npm workspaces (`package.json`). Version **2.0.0** across packages.
 ---
 
 ## Run locally
+
+**Setup (clone, keys, Chrome extensions, Setup-tab logins):** [`docs/SETUP.md`](SETUP.md) and [`AGENTS.md`](../AGENTS.md).
+
+On macOS, keep the stack alive in Terminal.app (not a Cursor agent shell):
+
+```bash
+npm run dev:terminal
+```
+
+Or:
 
 ```bash
 npm install

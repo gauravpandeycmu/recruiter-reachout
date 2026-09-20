@@ -1,19 +1,15 @@
 import { createWriteStream, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import { execFileSync } from "node:child_process";
 import { findRepoRoot } from "./paths.js";
+import { chromeDefaultExtensionPath, chromeUserDataDirs } from "./unpackedExtension.js";
 
 /** Streak Email Tracking for Gmail — chrome web store id jcgpgjhaendighananonflfmjjefjjlp */
 export const STREAK_EXTENSION_ID = "jcgpgjhaendighananonflfmjjefjjlp";
 
-const DEFAULT_EXTENSION_PATH = resolve(
-  homedir(),
-  "Library/Application Support/Google/Chrome/Default/Extensions",
-  STREAK_EXTENSION_ID,
-);
+const DEFAULT_EXTENSION_PATH = chromeDefaultExtensionPath(STREAK_EXTENSION_ID);
 
 export function streakExtensionCacheDir(): string {
   return resolve(findRepoRoot(), "apps/worker/data/streak-extension");
@@ -84,18 +80,19 @@ function latestVersionDir(extensionRoot: string): string | undefined {
 
 /** Search Default + Profile N Chrome profiles for an installed Streak copy. */
 export function findInstalledStreakExtension(): string | undefined {
-  const chromeRoot = resolve(homedir(), "Library/Application Support/Google/Chrome");
-  if (!existsSync(chromeRoot)) {
-    return undefined;
-  }
-  const profiles = readdirSync(chromeRoot, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && (entry.name === "Default" || entry.name.startsWith("Profile ")))
-    .map((entry) => resolve(chromeRoot, entry.name, "Extensions", STREAK_EXTENSION_ID));
+  for (const chromeRoot of chromeUserDataDirs()) {
+    if (!existsSync(chromeRoot)) {
+      continue;
+    }
+    const profiles = readdirSync(chromeRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && (entry.name === "Default" || entry.name.startsWith("Profile ")))
+      .map((entry) => resolve(chromeRoot, entry.name, "Extensions", STREAK_EXTENSION_ID));
 
-  for (const root of profiles) {
-    const found = latestVersionDir(root);
-    if (found) {
-      return found;
+    for (const root of profiles) {
+      const found = latestVersionDir(root);
+      if (found) {
+        return found;
+      }
     }
   }
   return undefined;

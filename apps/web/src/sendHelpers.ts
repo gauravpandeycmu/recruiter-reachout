@@ -510,3 +510,12 @@ export function clampRecipientPage(page: number, totalCount: number, pageSize: n
   const pageCount = Math.max(1, Math.ceil(Math.max(0, totalCount) / size));
   return Math.min(Math.max(0, page), pageCount - 1);
 }
+
+/**
+ * Role-aware evidence selection is now the baseline rather than a separate
+ * advanced mode. The remaining control only decides whether to add the warmer,
+ * company-specific interest paragraph.
+ */
+export function resolveGenerationModes(passionate: boolean): { passionate: boolean; customise: true } {
+  return { passionate, customise: true };
+}

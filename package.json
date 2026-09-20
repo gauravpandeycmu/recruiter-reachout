@@ -9,10 +9,14 @@
   ],
   "scripts": {
     "dev": "concurrently -n api,web,worker -c blue,green,magenta \"npm run dev -w @recruiter/api\" \"npm run dev -w @recruiter/web\" \"npm run dev -w @recruiter/worker\"",
+    "dev:terminal": "node scripts/dev-in-terminal.mjs",
     "build": "npm run build -ws",
     "typecheck": "npm run typecheck -ws",
     "test": "npm run build -w @recruiter/shared && npm run test -ws --if-present",
     "lint": "npm run typecheck"
+  },
+  "engines": {
+    "node": ">=22"
   },
   "devDependencies": {
     "@types/node": "latest",

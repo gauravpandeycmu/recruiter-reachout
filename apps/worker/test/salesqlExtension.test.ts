@@ -27,6 +27,22 @@ describe("salesqlExtension", () => {
     expect(existsSync(join(cacheDir, "manifest.json"))).toBe(true);
   });
 
+  it("picks the newest version when pointed at the Chrome extension-id folder", async () => {
+    const root = await mkdtemp(join(tmpdir(), "salesql-id-"));
+    const older = join(root, "1.3.0_0");
+    const newer = join(root, "1.4.2_0");
+    const cacheDir = await mkdtemp(join(tmpdir(), "salesql-cache-"));
+    dirs.push(root, cacheDir);
+    await mkdir(older, { recursive: true });
+    await mkdir(newer, { recursive: true });
+    await writeFile(join(older, "manifest.json"), JSON.stringify({ version: "1.3.0" }));
+    await writeFile(join(newer, "manifest.json"), JSON.stringify({ version: "1.4.2" }));
+
+    const result = prepareSalesqlExtension(root, cacheDir);
+    expect(result).toBe(cacheDir);
+    expect(JSON.parse(await readFile(join(cacheDir, "manifest.json"), "utf8")).version).toBe("1.4.2");
+  });
+
   it("uses the newest installed extension version when configured version is stale", async () => {
     const root = await mkdtemp(join(tmpdir(), "salesql-root-"));
     const version141 = join(root, "1.4.1_0");

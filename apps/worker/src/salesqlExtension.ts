@@ -1,9 +1,9 @@
 import { cpSync, existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { findRepoRoot } from "./paths.js";
+import { chromeDefaultExtensionPath, findInstalledChromeExtension } from "./unpackedExtension.js";
 
-const DEFAULT_EXTENSION_PATH =
-  "/Users/gaurav/Library/Application Support/Google/Chrome/Default/Extensions/lbdglhhdbgnknbdifhanfholehojlkgg/1.3.0_0";
+export const SALESQL_EXTENSION_ID = "lbdglhhdbgnknbdifhanfholehojlkgg";
 
 /** Stable unpacked copy Playwright can load via --load-extension (see Playwright chrome-extensions docs). */
 export function salesqlExtensionCacheDir(): string {
@@ -29,11 +29,11 @@ function compareExtensionVersions(a: string, b: string): number {
 }
 
 function resolveInstalledSalesqlExtension(source: string): string | undefined {
-  if (existsSync(source)) {
+  if (existsSync(resolve(source, "manifest.json"))) {
     return source;
   }
 
-  const versionsDir = dirname(source);
+  const versionsDir = existsSync(source) ? source : dirname(source);
   if (!existsSync(versionsDir)) {
     return undefined;
   }
@@ -61,7 +61,11 @@ function readExtensionVersion(extensionDir: string): string | undefined {
  * Google Chrome no longer honors --load-extension; Playwright's bundled Chromium does.
  */
 export function prepareSalesqlExtension(envPath?: string, cacheDir = salesqlExtensionCacheDir()): string {
-  const configuredSource = (envPath?.trim() || DEFAULT_EXTENSION_PATH).trim();
+  const configuredSource = (
+    envPath?.trim() ||
+    findInstalledChromeExtension(SALESQL_EXTENSION_ID) ||
+    chromeDefaultExtensionPath(SALESQL_EXTENSION_ID)
+  ).trim();
   const source = resolveInstalledSalesqlExtension(configuredSource);
   if (!source) {
     if (existsSync(resolve(cacheDir, "manifest.json"))) {
@@ -82,8 +86,6 @@ export function prepareSalesqlExtension(envPath?: string, cacheDir = salesqlExte
 
   return cacheDir;
 }
-
-export const SALESQL_EXTENSION_ID = "lbdglhhdbgnknbdifhanfholehojlkgg";
 
 export function salesqlPopupUrl(): string {
   return `chrome-extension://${SALESQL_EXTENSION_ID}/popup.html`;

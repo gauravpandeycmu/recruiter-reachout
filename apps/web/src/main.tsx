@@ -6,6 +6,7 @@ import {
   toDatetimeLocalValue,
 } from "./scheduleTime";
 import { createRoot, type Root } from "react-dom/client";
+import { createPortal } from "react-dom";
 import type {
   AnalyticsSummary,
   CompanyHistorySummary,
@@ -90,6 +91,7 @@ import {
   discoveryStatusLabel,
   peekNextDiscoveryCandidate,
   trackedSendQueueIdsAreOrphaned,
+  resolveGenerationModes,
   type SendSession,
 } from "./sendHelpers";
 import { appDataPollKey, shouldApplyPollResult, workerStatusPollKey } from "./pollKeys";
@@ -1264,6 +1266,7 @@ function App() {
   const [groveTempUnit, setGroveTempUnit] = useState<TempUnit>(() => readTempUnit());
   const [themePref, setThemePref] = useState<ThemePreference>(() => readThemePreference());
   const [powerMode, setPowerMode] = useState<PowerMode>(() => readPowerMode());
+  const [sendGuideOpen, setSendGuideOpen] = useState(false);
   const [goalDraft, setGoalDraft] = useState("20");
   const [showCatToast, setShowCatToast] = useState(false);
   const celebratedDateRef = useRef<string | null>(null);
@@ -1292,8 +1295,7 @@ function App() {
   const [jobDescription, setJobDescription] = useState("");
   const [jobUrl, setJobUrl] = useState("");
   const [linkedinPost, setLinkedinPost] = useState("");
-  const [passionate, setPassionate] = useState(false);
-  const [customise, setCustomise] = useState(false);
+  const [passionate, setPassionate] = useState(true);
   const [workerStatus, setWorkerStatus] = useState<WorkerStatusView>();
   const [salesqlAutoFallback, setSalesqlAutoFallback] = useState(false);
   const [setupSessions, setSetupSessions] = useState<SetupSessionStatus | undefined>(() => readStoredSessionStatus());
@@ -1693,11 +1695,11 @@ function App() {
     setJobDescription("");
   }, [batchCompany]);
 
-  // Passionate toggle is user-controlled. Only reset when switching companies.
+  // Company-specific warmth is the default. Role-aware experience framing is
+  // always enabled in resolveGenerationModes rather than exposed as a second mode.
   // Never clear it from generation/refresh — that was turning it off after generate.
   useEffect(() => {
-    setPassionate(false);
-    setCustomise(false);
+    setPassionate(true);
   }, [batchCompany]);
 
   useEffect(() => {
@@ -1705,10 +1707,6 @@ function App() {
       setPassionate(true);
     }
   }, [batchContent?.id, batchContent?.updatedAt, batchContent?.generationContext?.passionate]);
-
-  useEffect(() => {
-    if (batchContent?.generationContext?.customise === true) setCustomise(true);
-  }, [batchContent?.id, batchContent?.updatedAt, batchContent?.generationContext?.customise]);
 
   useEffect(() => {
     const ctx = batchContent?.generationContext;
@@ -3671,8 +3669,7 @@ function App() {
     const hasLinkedin = Boolean(linkedinPost.trim());
     const hasJdContext = Boolean(jobDescription.trim()) || willFetchFromLink;
     // Capture before any async work — never let refresh/effects clear the user's choice.
-    const wantPassionate = passionate;
-    const wantCustomise = customise;
+    const { passionate: wantPassionate, customise: wantCustomise } = resolveGenerationModes(passionate);
     const steps: Array<{ id: string; label: string }> = [];
     if (willFetchFromLink) {
       steps.push({ id: "fetch", label: "Downloading job posting" });
@@ -4532,34 +4529,6 @@ function App() {
           </div>
           <section className="send-layout">
           <section className="panel batch-panel">
-            {displayCandidates.length === 0 && !showSendProgress ? (
-              <div className="empty-state">
-                <h2>No recruiters in batch yet</h2>
-                <p className="empty-state-lead">
-                  Start from LinkedIn, bring people into the app, then we’ll help you find emails, generate outreach,
-                  and send in a paced batch.
-                </p>
-                <ol>
-                  <li>
-                    Open LinkedIn and use the <strong>Recruiter Reachout</strong> extension on either:
-                    <ul>
-                      <li>a single recruiter profile → <strong>Add this person</strong></li>
-                      <li>a people search results page → <strong>Save all visible</strong></li>
-                    </ul>
-                  </li>
-                  <li>Or enter a company above and click <strong>Find US recruiters</strong> to auto-capture a batch.</li>
-                  <li>New people appear here and email lookup starts automatically in the background.</li>
-                  <li>Once emails are found, review the drafts, choose a resume, then use <strong>Send now</strong> or schedule a batch.</li>
-                </ol>
-                <p className="hint">
-                  Tip: if you used <strong>Remove all</strong>, those recruiters were archived. Save them again from the
-                  extension to reactivate them.
-                </p>
-                <p className="hint">
-                  Local setup reminder: keep the dashboard and API running so the extension can talk to the app.
-                </p>
-              </div>
-            ) : (
               <>
                 <div className="batch-header">
                   <div>
@@ -4582,7 +4551,7 @@ function App() {
                         ))}
                       </select>
                     ) : (
-                      <h2>{batchCompany ?? "Unknown company"}</h2>
+                      <h2>{batchCompany ?? "New batch"}</h2>
                     )}
                   </div>
                   <div className="batch-progress">
@@ -4604,13 +4573,24 @@ function App() {
                           Remove not found ({notFoundCount})
                         </button>
                       )}
-                      <button type="button" className="subtle-danger" onClick={() => void clearSendList()}>
-                        Remove all
-                      </button>
+                      {displayCandidates.length > 0 && (
+                        <button type="button" className="subtle-danger" onClick={() => void clearSendList()}>
+                          Remove all
+                        </button>
+                      )}
                     </div>
                   </div>
                   <div className="recipients-pager">
                     <div className="list recipients-list" style={{ ["--recipient-page-size" as string]: RECIPIENT_PAGE_SIZE }}>
+                      {pagedCandidates.length === 0 && (
+                        <div className="candidate candidate-empty-row">
+                          <span className="empty-recipient-dot" aria-hidden="true" />
+                          <span>
+                            <strong>No recruiters added yet</strong>
+                            <small>Use Find recruiters above or add people from LinkedIn.</small>
+                          </span>
+                        </div>
+                      )}
                       {pagedCandidates.map((candidate) => {
                         const chip = candidateChip(candidate, activeLookupId);
                         return (
@@ -4860,13 +4840,8 @@ function App() {
                       </span>
                       <span>
                         Passionate about the company
-                        <small>Warmer, slightly longer — genuine fondness for what they build.</small>
+                        <small>Adds a specific, natural reason you care about the work. Your experience is always tailored to the role.</small>
                       </span>
-                    </button>
-                    <button type="button" className={`passion-toggle${customise ? " on" : ""}`}
-                      aria-pressed={customise} onClick={() => setCustomise(on => !on)}>
-                      <span className="passion-toggle-switch" aria-hidden="true"><span className="passion-toggle-knob" /></span>
-                      <span>Customise<small>Frame your experience around the job.</small></span>
                     </button>
                     </div>
                   </div>
@@ -4944,7 +4919,9 @@ function App() {
                       ? "Generating…"
                       : batchContent
                         ? `Regenerate outreach for ${batchCompany}`
-                        : `Generate outreach for ${batchCompany}`}
+                        : batchCompany
+                          ? `Generate outreach for ${batchCompany}`
+                          : "Generate outreach"}
                   </button>
                   {(state?.emailSamples ?? []).length === 0 && (
                     <p className="warning">No sample emails yet — add a few in Setup so generation can match your voice.</p>
@@ -5200,7 +5177,6 @@ function App() {
                   </p>
                 </div>
               </>
-            )}
           </section>
 
           <section className="panel detail-panel preview-panel">
@@ -5547,10 +5523,104 @@ function App() {
                   </div>
               </>
             ) : (
-              <p className="hint">Select a recipient from the batch to inspect and edit the outreach.</p>
+              <div className="preview-card empty-outreach-preview">
+                <div className="preview-content">
+                  <p className="hint">To: select a recruiter</p>
+                  <div className="preview-html editable-mail-preview">
+                    <p className="eyebrow">Email · click anywhere to edit</p>
+                    <input className="editable-preview-subject" value="Role - Carnegie Mellon Grad" disabled readOnly />
+                    <textarea
+                      className="editable-preview-body"
+                      value={"Hi [First name],\n\nYour personalized email will appear here after generation.\n\nI've attached my resume and would appreciate your consideration."}
+                      disabled
+                      readOnly
+                      rows={5}
+                    />
+                  </div>
+                  <div className="resume-picker">
+                    <p className="eyebrow">Resume attachment</p>
+                    {resumes.length === 0 ? (
+                      <p className="warning">No resume uploaded — add one in Setup.</p>
+                    ) : (
+                      <div className="resume-picker-options" role="listbox" aria-label="Choose resume">
+                        {resumes.map((resume) => {
+                          const tintIndex = resumeTintIndex(resume.id);
+                          const resumeSelected = selectedResumeId === resume.id;
+                          return (
+                            <button
+                              type="button"
+                              key={resume.id}
+                              role="option"
+                              aria-selected={resumeSelected}
+                              className={`resume-picker-option tint-${tintIndex}${resumeSelected ? " selected" : ""}`}
+                              onClick={() => void chooseResume(resume.id)}
+                            >
+                              <strong>{resume.nickname}</strong>
+                              <small>{resume.fileName}</small>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                  <div className="linkedin-section-divider" aria-hidden="true" />
+                  <div className="linkedin-draft-card">
+                    <div className="linkedin-draft-heading">
+                      <div><p className="eyebrow">LinkedIn message</p><strong>Subject and message, ready to paste</strong></div>
+                    </div>
+                    <input className="linkedin-subject-input" value="LinkedIn subject" disabled readOnly />
+                    <textarea value="Your personalized LinkedIn message will appear here." disabled readOnly rows={3} />
+                    <div className="linkedin-send-row">
+                      <div className="linkedin-availability"><span className="chip muted">Not checked</span></div>
+                      <button type="button" className="primary compact" disabled>Send on LinkedIn</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
             )}
           </section>
         </section>
+        {createPortal(<div className={`send-help-edge${sendGuideOpen ? " open" : ""}`}>
+          <button
+            type="button"
+            className="send-help-edge-tab"
+            aria-expanded={sendGuideOpen}
+            aria-controls="send-help-edge-panel"
+            onClick={() => setSendGuideOpen((open) => !open)}
+          >
+            {sendGuideOpen ? "Close guide" : "How to add recruiters"}
+          </button>
+          <button
+            type="button"
+            className="send-help-edge-scrim"
+            aria-label="Close the Send page guide"
+            tabIndex={sendGuideOpen ? 0 : -1}
+            onClick={() => setSendGuideOpen(false)}
+          />
+          <aside className="send-help-edge-panel" id="send-help-edge-panel" aria-hidden={!sendGuideOpen}>
+            <div className="send-help-edge-head">
+              <p className="eyebrow">Quick guide</p>
+              <h2>Adding recruiters</h2>
+              <p className="hint">Choose the quickest flow for where you already are.</p>
+            </div>
+            <div className="send-help-edge-steps">
+              <section>
+                <span>1</span>
+                <div><strong>Find recruiters from this page</strong><p>Enter a company under Find recruiters, choose how many LinkedIn result pages to scan, and click <b>Find US recruiters</b>. Matching people are added to this batch.</p></div>
+              </section>
+              <section>
+                <span>2</span>
+                <div><strong>Add one person from LinkedIn</strong><p>Open their LinkedIn profile, click the Recruiter Reachout extension, confirm the company, and choose <b>Add this person</b>.</p></div>
+              </section>
+              <section>
+                <span>3</span>
+                <div><strong>Add several people from LinkedIn</strong><p>On a LinkedIn people-search page, filter by the company or include the recruiter role and company in the search. Open the extension and choose <b>Save all visible</b>.</p></div>
+              </section>
+              <section className="send-help-email-step"><span>4</span><div><strong>Email lookup and provider limits</strong><p>Jobright runs first automatically and is unlimited. If it does not find an email, <b>Check all remaining</b> tries the other providers. Those services have monthly credit limits, so use the fallback lookup when it is worth spending those credits.</p></div></section>
+              <section className="send-help-compact-step"><span>5</span><div><strong>Generate and send</strong><p>Add the job information, generate, review, and send now or schedule.</p></div></section>
+            </div>
+          </aside>
+        </div>, document.body)}
         </section>
       )}
 
