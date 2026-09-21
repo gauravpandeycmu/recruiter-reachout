@@ -2,9 +2,13 @@ import { describe, expect, it } from "vitest";
 import { isScheduleForNow } from "./sendHelpers";
 import {
   atLocalHour,
+  formatFriendlyWhen,
+  listScheduleTimeSlots,
   nextMondayAt,
   nextOccurrence,
+  normalizeDatetimeLocalValue,
   parseDatetimeLocal,
+  roundToScheduleMinuteStep,
   shiftBatchToNewStart,
   toDatetimeLocalValue,
 } from "./scheduleTime";
@@ -94,5 +98,27 @@ describe("scheduleTime", () => {
   it("keeps today when today is Monday before the target hour", () => {
     const now = new Date(2026, 6, 13, 7, 0, 0, 0);
     expect(toDatetimeLocalValue(nextMondayAt(8, 0, now))).toBe("2026-07-13T08:00");
+  });
+
+  it("snaps schedule times to 15-minute steps", () => {
+    const base = new Date(2026, 6, 9, 10, 7, 0, 0);
+    expect(toDatetimeLocalValue(roundToScheduleMinuteStep(base, "nearest"))).toBe("2026-07-09T10:00");
+    expect(toDatetimeLocalValue(roundToScheduleMinuteStep(base, "ceil"))).toBe("2026-07-09T10:15");
+    expect(normalizeDatetimeLocalValue("2026-07-09T10:22")).toBe("2026-07-09T10:15");
+    expect(listScheduleTimeSlots().length).toBe(96);
+  });
+
+  it("uses Today/Tomorrow for nearby send times", () => {
+    const now = new Date(2026, 8, 20, 15, 0, 0, 0);
+    expect(formatFriendlyWhen(new Date(2026, 8, 20, 16, 30, 0, 0).toISOString(), { now })).toMatch(
+      /^Today at /,
+    );
+    expect(formatFriendlyWhen(new Date(2026, 8, 21, 11, 0, 0, 0).toISOString(), { now })).toMatch(
+      /^Tomorrow at /,
+    );
+    expect(formatFriendlyWhen(new Date(2026, 8, 22, 8, 0, 0, 0).toISOString(), { now })).not.toMatch(
+      /Today|Tomorrow/,
+    );
+    expect(formatFriendlyWhen("2026-09-21T15:00:00.000Z", { dueNow: true, now })).toBe("Due now");
   });
 });

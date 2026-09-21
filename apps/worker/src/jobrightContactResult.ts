@@ -10,6 +10,14 @@ import type { ContactResult } from "./jobright.js";
 export const JOBRIGHT_CONTACT_RESULT_TEXT =
   /Contact Info (Not )?Found|No Contact Info Found|No contact found|Contact not found|Could(?:n't| not) find(?: any)? contact/i;
 
+/** Jobright's outbound-mailer upsell — not Find Any Email lookup quota. Close it; do not treat as a miss. */
+export const JOBRIGHT_CREDIT_UPSELL_TEXT = /Out of Email Credits/i;
+
+/** True when Find Any Email still holds a profile URL (not wiped by a reload). */
+export function isFilledJobrightLinkedInUrl(value: string | undefined | null): boolean {
+  return /linkedin\.com\/in\//i.test((value ?? "").trim());
+}
+
 export function classifyJobrightContactToast(raw: string | undefined | null): "found" | "not_found" | "unknown" {
   const text = (raw ?? "").replace(/\s+/g, " ").trim();
   if (!text) {

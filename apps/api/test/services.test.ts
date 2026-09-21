@@ -1136,6 +1136,54 @@ describe("automatic email discovery bookkeeping", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("requestDiscovery({ forceJobright: true }) re-queues a prior timeout on Jobright, not Finder", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const candidate = store.upsertCandidate(
+      createCandidate({ fullName: "Timed Out", linkedinUrl: "https://linkedin.com/in/timed-out" }),
+    );
+    store.updateCandidate(candidate.id, {
+      lastError: "Timed out waiting for Jobright contact result.",
+      lastDiscoveryAttemptAt: new Date().toISOString(),
+      discoveryStage: "finder",
+      forceProvider: "finder",
+      discoveryAttempts: 0,
+    });
+
+    const revived = await requestDiscovery(store, candidate.id, { forceJobright: true });
+    expect(revived.discoveryStage).toBe("jobright");
+    expect(revived.forceProvider).toBeUndefined();
+    expect(revived.lastError).toBeUndefined();
+    expect(revived.lastDiscoveryAttemptAt).toBeUndefined();
+    expect(revived.discoveryClaimedAt).toBeUndefined();
+    expect(nextDiscoveryCandidate(store, new Date(), "jobright")?.id).toBe(candidate.id);
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("requestDiscovery({ forceJobright: true }) releases an orphaned in-flight claim", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
+    const store = new Store(join(directory, "store.sqlite"));
+    await store.load();
+
+    const candidate = store.upsertCandidate(
+      createCandidate({ fullName: "Orphan Claim", linkedinUrl: "https://linkedin.com/in/orphan-claim" }),
+    );
+    const claimed = nextDiscoveryCandidate(store);
+    expect(claimed?.discoveryClaimedAt).toBeTruthy();
+
+    const revived = await requestDiscovery(store, candidate.id, { forceJobright: true });
+    expect(revived.discoveryClaimedAt).toBeUndefined();
+    expect(revived.discoveryStage).toBe("jobright");
+    expect(nextDiscoveryCandidate(store, new Date(), "jobright")?.id).toBe(candidate.id);
+
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
   it("requestDiscovery preserves an in-flight claim instead of starting a duplicate lookup", async () => {
     const directory = await mkdtemp(join(tmpdir(), "recruiter-reachout-"));
     const store = new Store(join(directory, "store.sqlite"));

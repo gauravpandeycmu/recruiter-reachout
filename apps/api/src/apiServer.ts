@@ -1097,7 +1097,10 @@ export function createApiServer(store: Store, options: CreateApiServerOptions = 
 
     if (req.method === "POST" && url.pathname.match(/^\/api\/candidates\/[^/]+\/request-discovery$/)) {
       const id = url.pathname.split("/")[3] ?? "";
-      const body = (await readJsonAudited(req, "http.body", { method: req.method, path: url.pathname })) as { forceSalesql?: boolean };
+      const body = (await readJsonAudited(req, "http.body", { method: req.method, path: url.pathname })) as {
+        forceSalesql?: boolean;
+        forceJobright?: boolean;
+      };
       const result = await requestDiscovery(store, id, body);
       maybeWakeDiscovery();
       sendJson(res, 200, result);

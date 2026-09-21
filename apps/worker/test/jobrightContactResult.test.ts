@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifyJobrightContactToast,
   contactResultFromSignals,
+  isFilledJobrightLinkedInUrl,
   JOBRIGHT_CONTACT_RESULT_TEXT,
   pickJobrightRevealEmail,
 } from "../src/jobrightContactResult.js";
@@ -65,6 +66,13 @@ describe("contactResultFromSignals", () => {
   it("keeps a wait timeout as timedOut so Jobright retries instead of parking the person", () => {
     expect(contactResultFromSignals({ timedOut: true })).toEqual({ found: false, timedOut: true });
   });
+
+  it("does not treat Jobright's outbound-mailer upsell as a contact result", () => {
+    expect(contactResultFromSignals({ toastText: "Out of Email Credits Upgrade to Jobright Turbo" })).toEqual({
+      found: false,
+      timedOut: true,
+    });
+  });
 });
 
 describe("pickJobrightRevealEmail", () => {
@@ -80,5 +88,18 @@ describe("pickJobrightRevealEmail", () => {
 
   it("returns undefined when no field looks like an email", () => {
     expect(pickJobrightRevealEmail(["https://www.linkedin.com/in/jane/", "Hello there"])).toBeUndefined();
+  });
+});
+
+describe("isFilledJobrightLinkedInUrl", () => {
+  it("accepts a profile URL still sitting in Find Any Email", () => {
+    expect(isFilledJobrightLinkedInUrl("https://www.linkedin.com/in/annabel-bench/")).toBe(true);
+    expect(isFilledJobrightLinkedInUrl("  https://linkedin.com/in/jane-doe  ")).toBe(true);
+  });
+
+  it("rejects an empty box (reload wiped the fill)", () => {
+    expect(isFilledJobrightLinkedInUrl("")).toBe(false);
+    expect(isFilledJobrightLinkedInUrl("Paste any LinkedIn profile URL")).toBe(false);
+    expect(isFilledJobrightLinkedInUrl(undefined)).toBe(false);
   });
 });

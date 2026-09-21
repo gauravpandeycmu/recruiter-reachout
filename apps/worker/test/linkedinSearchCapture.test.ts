@@ -1,19 +1,36 @@
 // @vitest-environment jsdom
 import type { Page } from "playwright";
 import { describe, expect, it, vi } from "vitest";
-import { SCRAPE_VISIBLE_PEOPLE, captureCompanyRecruiters, type ScrapedLinkedInProfile } from "../src/linkedinSearchCapture.js";
+import { SCRAPE_VISIBLE_PEOPLE, captureCompanyRecruiters, tryApplyCurrentCompanyFilter, withLinkedInSearchPage, type ScrapedLinkedInProfile } from "../src/linkedinSearchCapture.js";
 
 function fakePage(overrides: {
   goto?: (url: string) => Promise<void>;
   url?: () => string;
   evaluate?: () => Promise<ScrapedLinkedInProfile[]>;
+  fill?: (value: string) => Promise<void>;
 } = {}): Page {
-  return {
+  const fill = vi.fn(overrides.fill ?? (async () => undefined));
+  const page = {
+    getByRole: () => ({ first: () => ({ waitFor: async () => undefined, click: async () => undefined }) }),
+    locator: (selector: string) => selector.startsWith("input")
+      ? { last: () => ({ waitFor: async () => undefined, fill }) }
+      : {
+          first: () => ({ waitFor: async () => undefined, click: async () => undefined }),
+          last: () => ({
+            waitFor: async () => undefined,
+            click: async () => undefined,
+            scrollIntoViewIfNeeded: async () => undefined,
+          }),
+        },
+    waitForURL: async () => undefined,
+    waitForSelector: vi.fn(async () => undefined),
     goto: vi.fn(overrides.goto ?? (async () => undefined)),
-    url: vi.fn(overrides.url ?? (() => "https://www.linkedin.com/search/results/people/")),
+    url: vi.fn(overrides.url ?? (() => "https://www.linkedin.com/search/results/people/?currentCompany=%5B%221%22%5D")),
     mouse: { wheel: vi.fn(async () => undefined) },
     evaluate: vi.fn(overrides.evaluate ?? (async () => [])),
   } as unknown as Page;
+  Object.assign(page, { fill });
+  return page;
 }
 
 /** Runs the page.evaluate payload against the jsdom document, like Playwright would. */
@@ -83,7 +100,67 @@ describe("LinkedIn search capture scraper", () => {
   });
 });
 
+describe("withLinkedInSearchPage", () => {
+  it("sets page=2+ on a filtered search URL and strips page=1", () => {
+    const filtered = "https://www.linkedin.com/search/results/people/?keywords=recruiter&currentCompany=%5B%221441%22%5D";
+    expect(withLinkedInSearchPage(filtered, 2)).toContain("page=2");
+    expect(withLinkedInSearchPage(filtered, 2)).toContain("currentCompany=");
+    expect(withLinkedInSearchPage(`${filtered}&page=2`, 1)).not.toMatch(/[?&]page=/);
+  });
+});
+
 describe("captureCompanyRecruiters", () => {
+  it("applies the company filter once, then paginates the filtered search", async () => {
+    vi.useFakeTimers();
+    try {
+      const gotos: string[] = [];
+      const page = fakePage({
+        goto: async (url) => {
+          gotos.push(url);
+        },
+        evaluate: async () => {
+          const n = Math.max(1, gotos.length);
+          return [{
+            fullName: `Person ${n}`,
+            firstName: "Person",
+            linkedinUrl: `https://www.linkedin.com/in/p${n}`,
+          }];
+        },
+      });
+
+      const resultPromise = captureCompanyRecruiters(page, { companyName: "Acme", pages: 3 });
+      await vi.runAllTimersAsync();
+      const result = await resultPromise;
+
+      expect(gotos).toHaveLength(3);
+      expect(gotos[0]).not.toMatch(/currentCompany/);
+      expect(gotos[0]).not.toMatch(/[?&]page=/);
+      expect(gotos[1]).toMatch(/currentCompany=/);
+      expect(gotos[1]).toMatch(/page=2/);
+      expect(gotos[2]).toMatch(/page=3/);
+      expect((page as Page & { fill: ReturnType<typeof vi.fn> }).fill).toHaveBeenCalledOnce();
+      expect(result.map((profile) => profile.linkedinUrl)).toEqual([
+        "https://www.linkedin.com/in/p1",
+        "https://www.linkedin.com/in/p2",
+        "https://www.linkedin.com/in/p3",
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not scrape or use keyword fallback when company filtering fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const page = fakePage({ url: () => "https://www.linkedin.com/search/results/people/?keywords=Recruiter" });
+      const result = captureCompanyRecruiters(page, { companyName: "Microsoft", pages: 1 });
+      const assertion = expect(result).rejects.toThrow(/Current company filter/);
+      await vi.runAllTimersAsync();
+      await assertion;
+      expect(page.goto).toHaveBeenCalledOnce();
+      expect(page.evaluate).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
   it("keeps profiles captured from earlier pages when a later page fails", async () => {
     vi.useFakeTimers();
     try {
@@ -132,5 +209,44 @@ describe("captureCompanyRecruiters", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("tryApplyCurrentCompanyFilter", () => {
+  it("selects the exact company and applies LinkedIn's filter", async () => {
+    vi.useFakeTimers();
+    try {
+      const trigger = { first: () => trigger, waitFor: vi.fn(async () => undefined), isVisible: vi.fn(async () => true), click: vi.fn(async () => undefined) };
+      const apply = { first: () => apply, last: () => apply, isVisible: vi.fn(async () => true), waitFor: vi.fn(async () => undefined), click: vi.fn(async () => undefined) };
+      const option = { first: () => option, isVisible: vi.fn(async () => true), waitFor: vi.fn(async () => undefined), click: vi.fn(async () => undefined) };
+      const input = { last: () => input, waitFor: vi.fn(async () => undefined), fill: vi.fn(async () => undefined) };
+      const page = {
+        getByRole: vi.fn((role: string, options?: { name: RegExp }) => {
+          if (role === "option") return option;
+          return options && /show results|apply/i.test(options.name.source) ? apply : trigger;
+        }),
+        locator: vi.fn((selector: string) => selector.startsWith("input") ? input : {
+          filter: () => option,
+          first: () => option,
+        }),
+        waitForURL: vi.fn(async () => undefined),
+        url: vi.fn(() => "https://www.linkedin.com/search/results/people/?keywords=Recruiter&currentCompany=%5B%221441%22%5D"),
+      } as unknown as Page;
+
+      const resultPromise = tryApplyCurrentCompanyFilter(page, "Figma");
+      await vi.runAllTimersAsync();
+      await expect(resultPromise).resolves.toBe(true);
+      expect(input.fill).toHaveBeenCalledWith("Figma");
+      expect(option.click).toHaveBeenCalledOnce();
+      expect(apply.click).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("falls back cleanly when LinkedIn's company filter is unavailable", async () => {
+    const hidden = { first: () => hidden, isVisible: vi.fn(async () => false) };
+    const page = { getByRole: vi.fn(() => hidden) } as unknown as Page;
+    await expect(tryApplyCurrentCompanyFilter(page, "Figma")).resolves.toBe(false);
   });
 });

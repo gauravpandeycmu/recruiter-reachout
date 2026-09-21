@@ -14,15 +14,22 @@ function runInThisShell() {
   child.on("exit", (code) => process.exit(code ?? 0));
 }
 
+function appleScriptString(value) {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
 if (process.platform === "darwin") {
   const quoted = root.replace(/'/g, `'\\''`);
-  spawn(
-    "osascript",
-    ["-e", `tell application "Terminal" to activate\ndo script "cd '${quoted}' && npm run dev"`],
-    { stdio: "inherit" },
-  ).on("exit", (code) => {
+  const cmd = `cd '${quoted}' && npm run dev`;
+  // One AppleScript statement. A newline inside a single `osascript -e`
+  // is flattened, which used to parse as `activate do script` and fail
+  // when the repo path contains spaces.
+  const source = `tell application "Terminal" to do script ${appleScriptString(cmd)}`;
+  const child = spawn("osascript", ["-e", source], { stdio: "inherit" });
+  child.on("exit", (code) => {
     if (code !== 0) {
-      runInThisShell();
+      console.error("Could not open Terminal.app. Start the stack yourself with: npm run dev");
+      process.exit(code ?? 1);
       return;
     }
     console.log("Opened Terminal.app with npm run dev");

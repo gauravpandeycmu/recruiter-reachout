@@ -12,16 +12,14 @@ export interface ScrapedLinkedInProfile {
 const LINKEDIN_GEO_UNITED_STATES = '["103644278"]';
 
 function buildLinkedInPeopleSearchUrl(input: {
-  companyName: string;
   titleKeyword?: string;
   location?: string;
   page?: number;
 }): string {
-  const company = input.companyName.trim();
   const location = (input.location ?? "United States").trim() || "United States";
   const titleKeyword = (input.titleKeyword ?? "recruiter").trim() || "recruiter";
   const linkedinParams = new URLSearchParams({
-    keywords: `${titleKeyword} ${company}`.trim(),
+    keywords: titleKeyword,
     origin: "GLOBAL_SEARCH_HEADER",
   });
   if (/united states|usa|^us$/i.test(location)) {
@@ -35,6 +33,63 @@ function buildLinkedInPeopleSearchUrl(input: {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const PEOPLE_RESULT_SELECTOR =
+  "div[role='listitem'] a[href*='/in/'], li.reusable-search__result-container a[href*='/in/']";
+
+export function withLinkedInSearchPage(url: string, pageNumber: number): string {
+  const parsed = new URL(url);
+  if (pageNumber <= 1) parsed.searchParams.delete("page");
+  else parsed.searchParams.set("page", String(pageNumber));
+  parsed.hash = "";
+  return parsed.toString();
+}
+
+function hasCurrentCompanyFilter(url: string): boolean {
+  try {
+    return new URL(url).searchParams.has("currentCompany");
+  } catch {
+    return /(?:[?&])currentCompany=/i.test(url);
+  }
+}
+
+async function waitForPeopleSearchResults(page: Page): Promise<void> {
+  await page.waitForSelector(PEOPLE_RESULT_SELECTOR, { timeout: 12_000 }).catch(() => undefined);
+}
+
+/**
+ * Upgrade the resilient keyword search to LinkedIn's exact current-company
+ * facet when its UI is available. Failure is deliberately non-fatal: LinkedIn
+ * changes this markup often, while the People + US + recruiter/company URL is
+ * still a useful fallback.
+ */
+export async function tryApplyCurrentCompanyFilter(page: Page, companyName: string): Promise<boolean> {
+  try {
+    const currentCompany = page.getByRole("button", { name: /^(?:filter by )?current compan(?:y|ies)$/i }).first();
+    await currentCompany.waitFor({ state: "visible", timeout: 15000 });
+    const trigger = currentCompany;
+    await trigger.click();
+
+    const input = page.locator('input[placeholder*="company" i], input[aria-label*="company" i]').last();
+    await input.waitFor({ state: "visible", timeout: 3000 });
+    await input.fill(companyName);
+
+    // LinkedIn ranks the intended company first. Selecting the first suggestion
+    // avoids brittle matching against industry subtitles and localized labels.
+    const selected = page.locator('[role="listbox"] button:visible, [role="listbox"] [role="button"]:visible, .basic-typeahead__selectable:visible').first();
+    await selected.waitFor({ state: "visible", timeout: 5000 });
+    await selected.click();
+
+    const apply = page.getByRole("link", { name: /^(show results|apply)$/i }).first();
+    await apply.waitFor({ state: "visible", timeout: 5000 });
+    await apply.click();
+    await page.waitForURL(/(?:[?&])currentCompany=/i, { timeout: 5000 });
+    return /(?:[?&])currentCompany=/i.test(page.url());
+  } catch (error) {
+    console.warn("LinkedIn company filter failed:", error instanceof Error ? error.message : String(error));
+    return false;
+  }
 }
 
 /**
@@ -195,13 +250,11 @@ export const SCRAPE_VISIBLE_PEOPLE = `(() => {
  * Scrapes LinkedIn people-search result cards from the current page DOM.
  */
 export async function scrapeVisiblePeopleResults(page: Page): Promise<ScrapedLinkedInProfile[]> {
-  // Scroll through the results so every card's avatar lazy-loads before we read it.
-  for (let i = 0; i < 8; i += 1) {
-    await page.mouse.wheel(0, 800);
-    await delay(400);
-  }
-  await page.mouse.wheel(0, -4000).catch(() => undefined);
-  await delay(1200);
+  // People search is ~10 cards, all in the DOM. Scroll the last card into
+  // view so lazy avatars load, instead of eight timed wheel ticks.
+  const lastCard = page.locator("div[role='listitem'], li.reusable-search__result-container").last();
+  await lastCard.scrollIntoViewIfNeeded().catch(() => undefined);
+  await delay(400);
 
   const found = (await page.evaluate(SCRAPE_VISIBLE_PEOPLE)) as ScrapedLinkedInProfile[] | undefined;
   return Array.isArray(found) ? found : [];
@@ -214,21 +267,52 @@ export async function captureCompanyRecruiters(
   const log = input.log ?? (() => undefined);
   const pages = Math.min(3, Math.max(1, input.pages));
   const byUrl = new Map<string, ScrapedLinkedInProfile>();
+  // Apply Current company once. Re-applying it on page 2/3 resets LinkedIn
+  // to page 1 of the filtered results, so three "pages" were the same ~10 people.
+  let filteredSearchUrl: string | undefined;
 
   for (let pageNumber = 1; pageNumber <= pages; pageNumber += 1) {
     try {
-      const url = buildLinkedInPeopleSearchUrl({
-        companyName: input.companyName,
-        location: "United States",
-        page: pageNumber,
-      });
-      log(`LinkedIn capture page ${pageNumber}/${pages}: ${url}`);
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-      await delay(2500);
+      if (!filteredSearchUrl) {
+        const url = buildLinkedInPeopleSearchUrl({ location: "United States" });
+        log(`LinkedIn capture page ${pageNumber}/${pages}: ${url}`);
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 });
+        await waitForPeopleSearchResults(page);
 
-      const current = page.url();
-      if (/\/login|\/checkpoint|\/authwall/i.test(current)) {
-        throw new Error("LinkedIn session is not logged in. Open Setup → LinkedIn login, then retry.");
+        if (/\/login|\/checkpoint|\/authwall/i.test(page.url())) {
+          throw new Error("LinkedIn session is not logged in. Open Setup → LinkedIn login, then retry.");
+        }
+
+        const exactCompanyFilter = await tryApplyCurrentCompanyFilter(page, input.companyName);
+        if (!exactCompanyFilter) {
+          throw new Error(`Could not apply LinkedIn's Current company filter for ${input.companyName}. No unfiltered profiles were imported. Please try again once LinkedIn has loaded.`);
+        }
+        log(`Applied LinkedIn current-company filter for ${input.companyName}.`);
+        await waitForPeopleSearchResults(page);
+        filteredSearchUrl = page.url();
+      } else {
+        const nextUrl = withLinkedInSearchPage(filteredSearchUrl, pageNumber);
+        log(`LinkedIn capture page ${pageNumber}/${pages}: ${nextUrl}`);
+        await page.goto(nextUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
+
+        if (/\/login|\/checkpoint|\/authwall/i.test(page.url())) {
+          throw new Error("LinkedIn session is not logged in. Open Setup → LinkedIn login, then retry.");
+        }
+        if (!hasCurrentCompanyFilter(page.url())) {
+          log(`Current-company filter missing on page ${pageNumber}; re-applying.`);
+          const exactCompanyFilter = await tryApplyCurrentCompanyFilter(page, input.companyName);
+          if (!exactCompanyFilter) {
+            throw new Error(`Could not apply LinkedIn's Current company filter for ${input.companyName}. No unfiltered profiles were imported. Please try again once LinkedIn has loaded.`);
+          }
+          filteredSearchUrl = page.url();
+          if (pageNumber > 1) {
+            await page.goto(withLinkedInSearchPage(filteredSearchUrl, pageNumber), {
+              waitUntil: "domcontentloaded",
+              timeout: 60_000,
+            });
+          }
+        }
+        await waitForPeopleSearchResults(page);
       }
 
       const found = await scrapeVisiblePeopleResults(page);
@@ -238,8 +322,11 @@ export async function captureCompanyRecruiters(
           byUrl.set(profile.linkedinUrl, profile);
         }
       }
+      if (found.length === 0) {
+        break;
+      }
       if (pageNumber < pages) {
-        await delay(2000 + Math.floor(Math.random() * 1500));
+        await delay(700 + Math.floor(Math.random() * 500));
       }
     } catch (error) {
       // A later page failing (LinkedIn checkpoint/rate-limit, a goto timeout)

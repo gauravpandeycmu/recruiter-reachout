@@ -298,6 +298,34 @@ describe("extension parser", () => {
     expect(result.candidates[0]?.company).toBe("Google");
   });
 
+  it("reads the plain selected company pill and drops LinkedIn tenure text", () => {
+    document.body.innerHTML = `
+      <nav aria-label="Search filters">
+        <button aria-pressed="true">People</button>
+        <button aria-pressed="true">United States</button>
+        <button aria-pressed="true">Figma</button>
+      </nav>
+      <ul>
+        <li class="reusable-search__result-container">
+          <a href="https://www.linkedin.com/in/hannah"><span aria-hidden="true">Hannah O'Toole</span></a>
+          <div class="entity-result__primary-subtitle">Early Career Recruiter at Figma since July 2025</div>
+        </li>
+        <li class="reusable-search__result-container">
+          <a href="https://www.linkedin.com/in/alyssa"><span aria-hidden="true">Alyssa Alvarez</span></a>
+          <div class="entity-result__primary-subtitle">Recruiting at Figma since August 2024</div>
+        </li>
+      </ul>
+    `;
+
+    const result = parseCurrentPage(
+      document,
+      "https://www.linkedin.com/search/results/people/?keywords=Recruiter&currentCompany=%5B%221234%22%5D",
+    );
+    expect(result.companySuggestion).toBe("Figma");
+    expect(result.candidates.length).toBeGreaterThan(0);
+    expect(result.candidates.every((candidate) => candidate.company === "Figma")).toBe(true);
+  });
+
   it("uses the common result-card employer when a selected company facet has no readable label", () => {
     document.body.innerHTML = `
       <ul>

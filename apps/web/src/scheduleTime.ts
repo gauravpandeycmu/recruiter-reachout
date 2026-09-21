@@ -1,3 +1,67 @@
+/** Send / Scheduled pickers only offer these minute marks. */
+export const SCHEDULE_TIME_MINUTE_STEP = 15;
+
+export type ScheduleMinuteRoundMode = "nearest" | "floor" | "ceil";
+
+/** Snap a local Date to the nearest 15-minute mark (Send + Scheduled pickers). */
+export function roundToScheduleMinuteStep(
+  date: Date,
+  mode: ScheduleMinuteRoundMode = "nearest",
+): Date {
+  const step = SCHEDULE_TIME_MINUTE_STEP;
+  const next = new Date(date);
+  next.setSeconds(0, 0);
+  const total = next.getHours() * 60 + next.getMinutes();
+  let rounded: number;
+  if (mode === "floor") {
+    rounded = Math.floor(total / step) * step;
+  } else if (mode === "ceil") {
+    rounded = total % step === 0 ? total : Math.ceil(total / step) * step;
+  } else {
+    rounded = Math.round(total / step) * step;
+  }
+  if (rounded >= 24 * 60) {
+    next.setDate(next.getDate() + 1);
+    rounded = 0;
+  }
+  next.setHours(Math.floor(rounded / 60), rounded % 60, 0, 0);
+  return next;
+}
+
+/** Normalize a datetime-local string to a 15-minute step (keeps invalid values as-is). */
+export function normalizeDatetimeLocalValue(
+  value: string,
+  mode: ScheduleMinuteRoundMode = "nearest",
+): string {
+  const parsed = parseDatetimeLocal(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return toDatetimeLocalValue(roundToScheduleMinuteStep(parsed, mode));
+}
+
+export function listScheduleTimeSlots(step = SCHEDULE_TIME_MINUTE_STEP): Array<{ hour: number; minute: number }> {
+  const slots: Array<{ hour: number; minute: number }> = [];
+  for (let total = 0; total < 24 * 60; total += step) {
+    slots.push({ hour: Math.floor(total / 60), minute: total % 60 });
+  }
+  return slots;
+}
+
+export function startOfLocalDay(date: Date): Date {
+  const next = new Date(date);
+  next.setHours(0, 0, 0, 0);
+  return next;
+}
+
+export function isSameLocalDay(a: Date, b: Date): boolean {
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  );
+}
+
 /** Format a Date for `<input type="datetime-local">` in the user's local timezone. */
 export function toDatetimeLocalValue(date: Date): string {
   const y = date.getFullYear();
@@ -42,6 +106,48 @@ export function nextOccurrence(hour: number, minute = 0, now = new Date()): Date
   const tomorrow = new Date(now);
   tomorrow.setDate(tomorrow.getDate() + 1);
   return atLocalHour(tomorrow, hour, minute);
+}
+
+function sameCalendarDay(a: Date, b: Date): boolean {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+
+function formatClock(date: Date): string {
+  return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+/**
+ * Compact schedule copy: “Today at 11:00 AM”, “Tomorrow at 8:00 AM”,
+ * otherwise a short weekday date. Past-due claimable slots can say “Due now”.
+ */
+export function formatFriendlyWhen(
+  iso: string,
+  options: { dueNow?: boolean; now?: Date } = {},
+): string {
+  if (options.dueNow) {
+    return "Due now";
+  }
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) {
+    return "—";
+  }
+  const now = options.now ?? new Date();
+  const tomorrow = new Date(now);
+  tomorrow.setDate(now.getDate() + 1);
+  const time = formatClock(date);
+  if (sameCalendarDay(date, now)) {
+    return `Today at ${time}`;
+  }
+  if (sameCalendarDay(date, tomorrow)) {
+    return `Tomorrow at ${time}`;
+  }
+  return date.toLocaleString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 /** Upcoming Monday at hour:minute. If today is Monday and that time already passed, uses next week. */

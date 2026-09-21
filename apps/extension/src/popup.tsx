@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { normalizeWhitespace } from "@recruiter/shared";
 import { isLinkedInProfileUrl, type PageCandidate } from "./parser";
 import { pickExtensionCompanyPrefill } from "./companyPrefill";
+import { buildExtensionRecruiterSearchUrl } from "./linkedinRecruiterSearch";
 import "./popup.css";
 
 const apiBase = "http://localhost:4000";
@@ -440,6 +441,17 @@ function Popup() {
     setStatus("Cleared the popup list. Dashboard recipients are unchanged.");
   }
 
+  async function openFilteredRecruiterSearch() {
+    const companyName = company.trim();
+    if (!companyName) {
+      setStatus("Enter a company name first.");
+      return;
+    }
+    localStorage.setItem(savedCompanyKey, companyName);
+    setStatus(`Opening LinkedIn recruiters at ${companyName} in the United States…`);
+    await chrome.tabs.create({ url: buildExtensionRecruiterSearchUrl(companyName), active: true });
+  }
+
   async function removeSavedFromDashboard() {
     const toRemove = rows.map((row) => row.candidate);
     if (toRemove.length === 0) {
@@ -524,6 +536,11 @@ function Popup() {
           }
         />
       </label>
+
+      <button className="search-launch" disabled={busy || !company.trim()} onClick={() => void openFilteredRecruiterSearch()}>
+        Find recruiters at this company
+        <small>Opens LinkedIn People with United States and company filters</small>
+      </button>
 
       <div className="action-row">
         <button

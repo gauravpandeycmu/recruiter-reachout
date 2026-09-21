@@ -727,6 +727,23 @@ export function inferSelectedCompanyFromSearchPage(
   }
   if (!hasCompanyFacet) return undefined;
 
+  // LinkedIn's selected company pill is normally just a green button whose
+  // accessible label is the company itself (for example, "Figma"). It does
+  // not consistently say "Current company", so read selected filter pills
+  // after confirming that the URL really contains a company facet.
+  const selectedPill = [...documentRef.querySelectorAll<HTMLElement>(
+    'button[aria-pressed="true"], button[aria-checked="true"], .search-reusables__filter-pill-button',
+  )]
+    .map((node) => normalizeWhitespace(node.textContent ?? node.getAttribute("aria-label") ?? ""))
+    .map((value) => value.replace(/[\s▾▼]+$/g, "").trim())
+    .find((value) =>
+      Boolean(value) &&
+      !/^(people|united states|locations?|actively hiring|all filters|1st|2nd|3rd\+?)$/i.test(value) &&
+      looksLikeCompanyName(value) &&
+      !looksLikeSchool(value),
+    );
+  if (selectedPill) return cleanCompanyName(selectedPill);
+
   const companies = candidates
     .map((candidate) => candidate.company?.trim())
     .filter((company): company is string => Boolean(company));
@@ -1324,7 +1341,12 @@ function cleanCompanyName(value: string): string {
   const withoutParens = keepAcronymParens
     ? trimmed.replace(/\(([A-Z0-9&.-]{2,12})\)\s*$/i, " ")
     : trimmed.replace(/\([^)]*\)/g, " ");
-  const cleaned = normalizeWhitespace(withoutParens.replace(/\s+ex\b.*$/i, "").replace(/[|·•,]+$/g, ""));
+  const cleaned = normalizeWhitespace(
+    withoutParens
+      .replace(/\s+ex\b.*$/i, "")
+      .replace(/\s+(?:since|for)\s+(?:the\s+last\s+)?(?:\d+\s+)?(?:days?|weeks?|months?|years?|[A-Z][a-z]+\s+\d{4}).*$/i, "")
+      .replace(/[|·•,]+$/g, ""),
+  );
   return keepAcronymParens ? `${cleaned} (${keepAcronymParens})`.trim() : cleaned;
 }
 

@@ -1,10 +1,14 @@
 import React, { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   atLocalHour,
+  formatFriendlyWhen,
   nextMondayAt,
+  normalizeDatetimeLocalValue,
   parseDatetimeLocal,
+  roundToScheduleMinuteStep,
   toDatetimeLocalValue,
 } from "./scheduleTime";
+import { ScheduleDateTimeField } from "./ScheduleDateTimeField";
 import { createRoot, type Root } from "react-dom/client";
 import { createPortal } from "react-dom";
 import type {
@@ -513,9 +517,9 @@ function defaultRescheduleStart(fromIso: string, now = new Date()): Date {
   const current = new Date(fromIso);
   if (!Number.isFinite(current.getTime()) || current.getTime() <= now.getTime() + 60_000) {
     // Past-due / imminent batches: default to right now so Save new time is not stuck on a dead clock.
-    return now;
+    return roundToScheduleMinuteStep(now, "ceil");
   }
-  return current;
+  return roundToScheduleMinuteStep(current, "nearest");
 }
 
 function formatShortWhen(iso: string): string {
@@ -534,20 +538,7 @@ function formatShortWhen(iso: string): string {
 
 /** Next-up card: past/due claimable slots say "Due now" instead of a stale clock time. */
 function formatNextUpWhen(iso: string, dueNow: boolean): string {
-  if (dueNow) {
-    return "Due now";
-  }
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "—";
-  const today = new Date();
-  const tomorrow = new Date(today);
-  tomorrow.setDate(today.getDate() + 1);
-  const sameDay = (a: Date, b: Date) =>
-    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
-  const time = date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  if (sameDay(date, today)) return `Today · ${time}`;
-  if (sameDay(date, tomorrow)) return `Tomorrow · ${time}`;
-  return formatShortWhen(iso);
+  return formatFriendlyWhen(iso, { dueNow });
 }
 
 type SendProgressRow = import("./sendProgress").SendProgressRow;
@@ -1311,7 +1302,9 @@ function App() {
     const stored = initialPrefs.activeSchedulePreset;
     const presetId = stored && SCHEDULE_PRESET_IDS.has(stored) ? stored : "now";
     const preset = SCHEDULE_PRESETS.find((entry) => entry.id === presetId);
-    return toDatetimeLocalValue(preset ? preset.resolve() : SCHEDULE_PRESETS[0]!.resolve());
+    return normalizeDatetimeLocalValue(
+      toDatetimeLocalValue(preset ? preset.resolve() : SCHEDULE_PRESETS[0]!.resolve()),
+    );
   });
   const [generateProgress, setGenerateProgress] = useState<{
     steps: Array<{ id: string; label: string }>;
@@ -2007,7 +2000,7 @@ function App() {
         ? WATCH_POLL_MS
         : null;
 
-  const scheduleSummary = useMemo(() => {
+  const scheduleDurationHint = useMemo(() => {
     const start =
       activeSchedulePreset === "now"
         ? new Date()
@@ -2017,24 +2010,7 @@ function App() {
     if (Number.isNaN(start.getTime()) || readyCandidates.length === 0) {
       return null;
     }
-    const last = new Date(start.getTime() + Math.max(0, readyCandidates.length - 1) * scheduleIntervalMinutes * 60_000);
-    return {
-      startLabel: start.toLocaleString(undefined, {
-        weekday: "short",
-        month: "short",
-        day: "numeric",
-        hour: "numeric",
-        minute: "2-digit",
-      }),
-      endLabel: last.toLocaleString(undefined, {
-        weekday: "short",
-        month: "short",
-        day: "numeric",
-        hour: "numeric",
-        minute: "2-digit",
-      }),
-      durationMin: Math.max(0, readyCandidates.length - 1) * scheduleIntervalMinutes,
-    };
+    return formatScheduledSendAllEstimate(readyCandidates.length, scheduleIntervalMinutes);
   }, [activeSchedulePreset, queueAppendStart, readyCandidates.length, scheduleStartAt, scheduleIntervalMinutes]);
 
   useEffect(() => {
@@ -2043,7 +2019,9 @@ function App() {
       setActiveSchedulePreset(null);
       return;
     }
-    setScheduleStartAt(toDatetimeLocalValue(queueAppendStart));
+    setScheduleStartAt(
+      normalizeDatetimeLocalValue(toDatetimeLocalValue(queueAppendStart), "ceil"),
+    );
   }, [activeSchedulePreset, queueAppendStart?.getTime()]);
 
   function applySchedulePreset(presetId: string) {
@@ -2051,13 +2029,17 @@ function App() {
     if (!preset) {
       return;
     }
-    setScheduleStartAt(toDatetimeLocalValue(preset.resolve()));
+    setScheduleStartAt(
+      normalizeDatetimeLocalValue(toDatetimeLocalValue(preset.resolve())),
+    );
     setActiveSchedulePreset(presetId);
   }
 
   function applyQueuePreset() {
     if (!queueAppendStart) return;
-    setScheduleStartAt(toDatetimeLocalValue(queueAppendStart));
+    setScheduleStartAt(
+      normalizeDatetimeLocalValue(toDatetimeLocalValue(queueAppendStart), "ceil"),
+    );
     setActiveSchedulePreset("queue");
   }
 
@@ -4023,7 +4005,7 @@ function App() {
       import: 94,
     };
     // ~12–18s per LinkedIn page in practice; keep bar moving while we poll.
-    const scrapeExpectedMs = Math.max(12_000, pages * 14_000);
+    const scrapeExpectedMs = Math.max(8_000, pages * 8_000);
 
     setBusy(true);
     setCaptureStatus("");
@@ -4734,7 +4716,8 @@ function App() {
                         </button>
                       </div>
                     )}
-                  </div>                  <div className="discovery-status">
+                  </div>
+                  <div className="discovery-status">
                     <div className="discovery-progress-panel">
                       <div className="discovery-progress-meta">
                         <span className={`worker-dot ${workerStatus?.online ? "online" : "offline"}`} />
@@ -4778,14 +4761,24 @@ function App() {
                           <small>Off by default to protect limited lookup credits. When enabled, the app tries SalesQL, Apollo, Hunter, and the remaining providers in order.</small>
                         </span>
                       </label>
+                      {discoveredCount < displayCandidates.length && (
+                        <button
+                          type="button"
+                          className="discovery-fallback-button"
+                          disabled={salesqlSweepBusy}
+                          onClick={() => void runSalesqlSweep()}
+                        >
+                          {salesqlSweepBusy ? (
+                            "Queueing checks…"
+                          ) : (
+                            <>
+                              Check all {displayCandidates.length - discoveredCount} remaining
+                              <span className="discovery-fallback-button-sub">using fallback providers</span>
+                            </>
+                          )}
+                        </button>
+                      )}
                     </div>
-                    {discoveredCount < displayCandidates.length && (
-                      <button disabled={salesqlSweepBusy} onClick={() => void runSalesqlSweep()}>
-                        {salesqlSweepBusy
-                          ? "Queueing checks…"
-                          : `Check all ${displayCandidates.length - discoveredCount} remaining`}
-                      </button>
-                    )}
                   </div>
                 </div>
 
@@ -4954,29 +4947,20 @@ function App() {
                       )}
                     </div>
                     <div className="schedule-controls">
-                      <label>
-                        Batch start
-                        <input
-                          type="datetime-local"
+                      <div className="schedule-datetime-wrap">
+                        <span className="schedule-datetime-wrap-label">Batch start</span>
+                        <ScheduleDateTimeField
                           value={scheduleStartAt}
-                          onChange={(event) => {
-                            setScheduleStartAt(event.target.value);
+                          disabled={busy}
+                          onChange={(next) => {
+                            setScheduleStartAt(normalizeDatetimeLocalValue(next));
                             setActiveSchedulePreset(null);
                           }}
                         />
-                      </label>
+                      </div>
                     </div>
-                    {scheduleSummary && (
-                      <p className="schedule-summary">
-                        {readyCandidates.length} email{readyCandidates.length === 1 ? "" : "s"} · starts {scheduleSummary.startLabel}
-                        {readyCandidates.length > 1
-                          ? ` · ends ~${scheduleSummary.endLabel} (${
-                              scheduleSummary.durationMin < 1
-                                ? `${Math.round(scheduleSummary.durationMin * 60)} sec`
-                                : `${scheduleSummary.durationMin} min`
-                            } span)`
-                          : ""}
-                      </p>
+                    {scheduleDurationHint && (
+                      <p className="schedule-summary">Takes {scheduleDurationHint}</p>
                     )}
                     {showScheduledLaterBanner && (
                       <div className="scheduled-later-banner anim-banner" role="status">
@@ -5172,9 +5156,6 @@ function App() {
                       </ol>
                     </div>
                   )}
-                  <p className="hint">
-                    Mails go out at their scheduled times — keep your laptop on and this app running so they can send.
-                  </p>
                 </div>
               </>
           </section>
@@ -5536,6 +5517,9 @@ function App() {
                       readOnly
                       rows={5}
                     />
+                    {footer.enabled && (
+                      <div className="editable-preview-footer" dangerouslySetInnerHTML={{ __html: footerToHtml(footer) }} />
+                    )}
                   </div>
                   <div className="resume-picker">
                     <p className="eyebrow">Resume attachment</p>
@@ -5614,9 +5598,9 @@ function App() {
               </section>
               <section>
                 <span>3</span>
-                <div><strong>Add several people from LinkedIn</strong><p>On a LinkedIn people-search page, filter by the company or include the recruiter role and company in the search. Open the extension and choose <b>Save all visible</b>.</p></div>
+                <div><strong>Open a filtered LinkedIn search</strong><p>Open the extension, enter a company, and choose <b>Find recruiters at this company</b>. It opens People results with United States and the company filter prepared. Then use <b>Save all visible</b>.</p></div>
               </section>
-              <section className="send-help-email-step"><span>4</span><div><strong>Email lookup and provider limits</strong><p>Jobright runs first automatically and is unlimited. If it does not find an email, <b>Check all remaining</b> tries the other providers. Those services have monthly credit limits, so use the fallback lookup when it is worth spending those credits.</p></div></section>
+              <section className="send-help-email-step"><span>4</span><div><strong>Email lookup and provider limits</strong><p>Jobright runs first automatically and is unlimited. If it does not find an email, <b>Check all remaining using fallback providers</b> tries the other providers. Those services have monthly credit limits, so use the fallback lookup when it is worth spending those credits.</p></div></section>
               <section className="send-help-compact-step"><span>5</span><div><strong>Generate and send</strong><p>Add the job information, generate, review, and send now or schedule.</p></div></section>
             </div>
           </aside>
@@ -5663,9 +5647,6 @@ function App() {
                   const removableCount = items.filter((item) => item.jobStatus !== "in_progress").length;
                   const overdueCount = items.filter((item) => isScheduledItemOverdue(item)).length;
                   const companyPastDue = overdueCount > 0;
-                  const attachedResume =
-                    items.find((item) => item.resumeFileName)?.resumeFileName ??
-                    resumes.find((resume) => resume.id === selectedResumeId)?.fileName;
                   const peoplePageCount = Math.max(1, Math.ceil(items.length / SCHEDULED_PEOPLE_PAGE_SIZE));
                   const peoplePage = Math.min(
                     peoplePageCount - 1,
@@ -5695,8 +5676,7 @@ function App() {
                               {items.length} {items.length === 1 ? "send" : "sends"} ·{" "}
                               {companyPastDue
                                 ? `${overdueCount} past due`
-                                : `first ${formatShortWhen(items[0]!.scheduledFor)}`}
-                              {attachedResume ? ` · ${attachedResume}` : ""}
+                                : formatFriendlyWhen(items[0]!.scheduledFor)}
                               {items.some((item) => item.failureReason)
                                 ? ` · ${items.filter((item) => item.failureReason).length} need retry`
                                 : ""}
@@ -5762,25 +5742,6 @@ function App() {
                         <div className="scheduled-group-body-clip">
                           <div className="scheduled-group-body">
                           <div className="scheduled-batch-email">
-                            <div className="scheduled-batch-email-head">
-                              <div>
-                                <p className="eyebrow">Shared email</p>
-                                <p className="hint">
-                                  One template for everyone in this batch.{" "}
-                                  <code>{"{firstName}"}</code> is replaced with each person’s name in their queued
-                                  send (so Kate gets “Hi Kate”, Ziggy gets “Hi Ziggy”, etc.).
-                                </p>
-                                {items[0]?.firstName && items[0]?.body && !items[0].body.includes("{firstName}") && (
-                                  <p className="hint scheduled-personalize-example">
-                                    Queued example for {items[0].firstName}:{" "}
-                                    <em>
-                                      {(items[0].body.replace(/\s+/g, " ").trim().slice(0, 88) || "—") +
-                                        (items[0].body.replace(/\s+/g, " ").trim().length > 88 ? "…" : "")}
-                                    </em>
-                                  </p>
-                                )}
-                              </div>
-                            </div>
                             <div
                               className={`scheduled-template-preview${
                                 editingScheduledCompany === company ? " is-editing" : ""
@@ -5986,23 +5947,22 @@ function App() {
                                         type="button"
                                         className={`schedule-chip${active ? " active" : ""}`}
                                         disabled={rescheduleBusy}
-                                        onClick={() => setRescheduleAt(value)}
+                                        onClick={() => setRescheduleAt(normalizeDatetimeLocalValue(value))}
                                       >
                                         {preset.label}
                                       </button>
                                     );
                                   })}
                                 </div>
-                                <label className="scheduled-reschedule-field">
+                                <div className="scheduled-reschedule-field scheduled-reschedule-datetime">
                                   <span>Or pick a custom time</span>
-                                  <input
-                                    className="scheduled-reschedule-input"
-                                    type="datetime-local"
+                                  <ScheduleDateTimeField
                                     value={rescheduleAt}
-                                    onChange={(event) => setRescheduleAt(event.target.value)}
                                     disabled={rescheduleBusy}
+                                    disablePastDates={false}
+                                    onChange={(next) => setRescheduleAt(normalizeDatetimeLocalValue(next))}
                                   />
-                                </label>
+                                </div>
                                 <p className="hint scheduled-reschedule-hint">
                                   Moves the whole {company} batch — later sends keep the same spacing.
                                 </p>
@@ -6060,7 +6020,7 @@ function App() {
                                     >
                                       {sendingNow ? "Sending now" : pastDue ? "Past due" : "Scheduled"}
                                     </span>
-                                    <time dateTime={item.scheduledFor}>{formatShortWhen(item.scheduledFor)}</time>
+                                    <time dateTime={item.scheduledFor}>{formatFriendlyWhen(item.scheduledFor)}</time>
                                     <div className="scheduled-item-actions">
                                       <button
                                         type="button"
@@ -7347,7 +7307,10 @@ function candidateChip(
         return { label: "Ready", tone: "ready" };
       }
       if (candidate.lastError) {
-        return { label: "Retrying…", tone: "pending" };
+        return {
+          label: /timed out/i.test(candidate.lastError) ? "Timed out" : "Lookup failed",
+          tone: "pending",
+        };
       }
       return { label: "Queued", tone: "pending" };
   }

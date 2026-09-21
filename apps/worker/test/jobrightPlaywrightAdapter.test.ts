@@ -3,7 +3,9 @@ import {
   clearJobrightContactResultCard,
   createJobrightPlaywrightAdapter,
   dismissJobrightBlockingOverlays,
+  dismissJobrightCreditUpsell,
   dismissJobrightPromoOverlays,
+  JOBRIGHT_EMPTY_SEARCH_ERROR,
 } from "../src/jobrightPlaywrightAdapter.js";
 
 function fakeInvisible(count = 0) {
@@ -168,6 +170,38 @@ describe("dismissJobrightPromoOverlays", () => {
   });
 });
 
+describe("dismissJobrightCreditUpsell", () => {
+  it("closes the outbound-mailer credits modal via X, not Upgrade", async () => {
+    let modalVisible = true;
+    const close = {
+      isVisible: vi.fn(async () => true),
+      click: vi.fn(async () => {
+        modalVisible = false;
+      }),
+    };
+    const modal = {
+      isVisible: vi.fn(async () => modalVisible),
+      waitFor: vi.fn(async () => undefined),
+      locator: vi.fn(() => ({ first: () => close })),
+      first: function first() {
+        return this;
+      },
+    };
+    const page = {
+      locator: vi.fn((selector: string) => {
+        if (selector === ".ant-modal") {
+          return {
+            filter: vi.fn(() => modal),
+          };
+        }
+        return fakeInvisible();
+      }),
+    };
+    expect(await dismissJobrightCreditUpsell(page as never)).toBe(true);
+    expect(close.click).toHaveBeenCalled();
+  });
+});
+
 describe("clearJobrightContactResultCard", () => {
   it("returns false when no contact result card is visible", async () => {
     const page = {
@@ -314,12 +348,27 @@ describe("waitForContactResult", () => {
     return loc;
   }
 
+  function overlayStubs() {
+    return {
+      locator: vi.fn(() => ({
+        filter: () => ({
+          first: () => ({
+            isVisible: async () => false,
+            waitFor: async () => {},
+            locator: () => ({ first: () => ({ isVisible: async () => false, click: async () => {} }) }),
+          }),
+        }),
+      })),
+    };
+  }
+
   it("returns found: false (not timedOut) when Jobright shows a miss toast", async () => {
     const miss = resultLocator("Contact Info Not Found!", true);
     const connectNow = resultLocator("", false);
     const page = {
       getByText: vi.fn(() => miss),
       getByRole: vi.fn(() => connectNow),
+      ...overlayStubs(),
     };
     const adapter = createJobrightPlaywrightAdapter(page as never);
     await expect(adapter.waitForContactResult(1_000)).resolves.toEqual({ found: false });
@@ -330,6 +379,7 @@ describe("waitForContactResult", () => {
     const page = {
       getByText: vi.fn(() => none),
       getByRole: vi.fn(() => none),
+      ...overlayStubs(),
     };
     const adapter = createJobrightPlaywrightAdapter(page as never);
     await expect(adapter.waitForContactResult(1_000)).resolves.toEqual({ found: false, timedOut: true });
@@ -341,11 +391,64 @@ describe("waitForContactResult", () => {
     const page = {
       getByText: vi.fn(() => found),
       getByRole: vi.fn(() => connectNow),
+      ...overlayStubs(),
     };
     const adapter = createJobrightPlaywrightAdapter(page as never);
     await expect(adapter.waitForContactResult(1_000)).resolves.toMatchObject({
       found: true,
       titleAndCompany: expect.stringContaining("Ephin"),
     });
+  });
+});
+
+describe("clickSearch", () => {
+  function searchPage(value: string) {
+    const button = { click: vi.fn(async () => {}) };
+    const input = {
+      count: vi.fn(async () => 1),
+      first: function first() {
+        return this;
+      },
+      or: function or() {
+        return this;
+      },
+      isVisible: vi.fn(async () => false),
+      inputValue: vi.fn(async () => value),
+      locator: vi.fn(() => button),
+      press: vi.fn(async () => {}),
+    };
+    const page = {
+      getByPlaceholder: vi.fn(() => input),
+      locator: vi.fn(() => input),
+      getByText: vi.fn(() => fakeInvisible()),
+      getByRole: vi.fn(() => roleLocator()),
+      evaluate: vi.fn(async () => undefined),
+      goto: vi.fn(async () => {}),
+      reload: vi.fn(async () => {}),
+      keyboard: { press: vi.fn(async () => {}) },
+    };
+    return { page, button, input };
+  }
+
+  it("does not reload after fill, and searches the URL that is still in the box", async () => {
+    const { page, button, input } = searchPage("https://www.linkedin.com/in/annabel-bench/");
+    const adapter = createJobrightPlaywrightAdapter(page as never, {
+      jobUrl: "https://jobright.ai/jobs/info/example",
+    });
+    await adapter.clickSearch();
+    expect(button.click).toHaveBeenCalled();
+    expect(input.press).toHaveBeenCalledWith("Enter");
+    expect(page.goto).not.toHaveBeenCalled();
+    expect(page.reload).not.toHaveBeenCalled();
+  });
+
+  it("fails immediately when the box is empty instead of waiting 90s for a toast", async () => {
+    const { page, button } = searchPage("");
+    const adapter = createJobrightPlaywrightAdapter(page as never, {
+      jobUrl: "https://jobright.ai/jobs/info/example",
+    });
+    await expect(adapter.clickSearch()).rejects.toThrow(JOBRIGHT_EMPTY_SEARCH_ERROR);
+    expect(button.click).not.toHaveBeenCalled();
+    expect(page.goto).not.toHaveBeenCalled();
   });
 });

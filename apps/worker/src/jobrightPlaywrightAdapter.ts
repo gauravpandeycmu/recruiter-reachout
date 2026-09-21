@@ -2,9 +2,14 @@ import type { Locator, Page } from "playwright";
 import type { ContactResult, JobrightPageAdapter } from "./jobright.js";
 import {
   JOBRIGHT_CONTACT_RESULT_TEXT,
+  JOBRIGHT_CREDIT_UPSELL_TEXT,
   contactResultFromSignals,
+  isFilledJobrightLinkedInUrl,
   pickJobrightRevealEmail,
 } from "./jobrightContactResult.js";
+
+export const JOBRIGHT_EMPTY_SEARCH_ERROR =
+  "Find Any Email box was empty after fill — not searching.";
 
 const LINKEDIN_INPUT_PLACEHOLDER = /(?:paste|enter|add).*(?:linkedin|profile).*(?:url|link)?|linkedin.*(?:url|profile)/i;
 const CONNECT_NOW_TEXT = /Connect Now/i;
@@ -81,9 +86,11 @@ export async function dismissJobrightBlockingOverlays(
     })
     .catch(() => undefined);
 
-  // Orion resume-customize promo — EXIT / Not now. Safe while the contact toast
-  // is up; do this even when we skip ant-modals for Connect Now.
+  // Orion coachmarks + Jobright's outbound-mailer upsell. Neither is Find Any
+  // Email quota; both sit on top of search and make the toast wait look like a
+  // 90s timeout. Always clear them, including on the Connect Now path.
   await dismissJobrightPromoOverlays(page);
+  await dismissJobrightCreditUpsell(page);
 
   if (!dismissAntModals) {
     return;
@@ -127,22 +134,50 @@ export async function dismissJobrightBlockingOverlays(
  * Exported for unit tests.
  */
 export async function dismissJobrightPromoOverlays(page: Page): Promise<boolean> {
-  const resumePromo = page.getByText(/Boost Your Resume|Customize Your Resume|tailoring tool/i).first();
-  if (!(await resumePromo.isVisible().catch(() => false))) {
+  try {
+    const resumePromo = page
+      .getByText(/Boost Your Resume|Customize Your Resume|tailoring tool|Stand Out Among Applicants/i)
+      .first();
+    if (!(await resumePromo.isVisible().catch(() => false))) {
+      return false;
+    }
+    const exit = page.getByRole("button", { name: /^EXIT$/i }).first();
+    if (await exit.isVisible().catch(() => false)) {
+      await exit.click({ timeout: 2000 }).catch(() => undefined);
+      await resumePromo.waitFor({ state: "hidden", timeout: 2500 }).catch(() => undefined);
+      return true;
+    }
+    const notNow = page.getByRole("button", { name: /not now|maybe later|no thanks/i }).first();
+    if (await notNow.isVisible().catch(() => false)) {
+      await notNow.click({ timeout: 2000 }).catch(() => undefined);
+      return true;
+    }
+    return false;
+  } catch {
     return false;
   }
-  const exit = page.getByRole("button", { name: /^EXIT$/i }).first();
-  if (await exit.isVisible().catch(() => false)) {
-    await exit.click({ timeout: 2000 }).catch(() => undefined);
-    await resumePromo.waitFor({ state: "hidden", timeout: 2500 }).catch(() => undefined);
-    return true;
+}
+
+/**
+ * Jobright's "Out of Email Credits" modal is for *their* send/apply mailer
+ * (free tier refills ~2/day). Find Any Email lookups are a different product.
+ * Close the upsell; never click Upgrade / Try it now.
+ */
+export async function dismissJobrightCreditUpsell(page: Page): Promise<boolean> {
+  try {
+    const modal = page.locator(".ant-modal").filter({ hasText: JOBRIGHT_CREDIT_UPSELL_TEXT }).first();
+    if (!(await modal.isVisible().catch(() => false))) {
+      return false;
+    }
+    const close = modal.locator(".ant-modal-close, button[aria-label='Close'], .ant-modal-close-x").first();
+    if (await close.isVisible().catch(() => false)) {
+      await close.click({ force: true, timeout: 2_000 }).catch(() => undefined);
+    }
+    await modal.waitFor({ state: "hidden", timeout: 2_500 }).catch(() => undefined);
+    return !(await modal.isVisible().catch(() => false));
+  } catch {
+    return false;
   }
-  const notNow = page.getByRole("button", { name: /not now|maybe later|no thanks/i }).first();
-  if (await notNow.isVisible().catch(() => false)) {
-    await notNow.click({ timeout: 2000 }).catch(() => undefined);
-    return true;
-  }
-  return false;
 }
 
 /** How a leftover Jobright "Contact Info Found" card was cleared (for logs/tests). */
@@ -192,8 +227,8 @@ export function createJobrightPlaywrightAdapter(
 ): JobrightPageAdapter {
   const jobUrl = options.jobUrl?.trim();
 
-  async function ensureLinkedInInput() {
-    await dismissJobrightBlockingOverlays(page);
+  async function ensureLinkedInInput(options: { dismissAntModals?: boolean } = {}) {
+    await dismissJobrightBlockingOverlays(page, { dismissAntModals: options.dismissAntModals });
     await assertJobrightSession(page);
     let input = page.getByPlaceholder(LINKEDIN_INPUT_PLACEHOLDER).or(linkedInInputCandidates(page)).first();
     if ((await input.count()) === 0 || !(await input.first().isVisible().catch(() => false))) {
@@ -202,7 +237,7 @@ export function createJobrightPlaywrightAdapter(
       } else {
         await page.reload({ waitUntil: "domcontentloaded", timeout: 45_000 }).catch(() => undefined);
       }
-      await dismissJobrightBlockingOverlays(page);
+      await dismissJobrightBlockingOverlays(page, { dismissAntModals: options.dismissAntModals });
       await assertJobrightSession(page);
       input = page.getByPlaceholder(LINKEDIN_INPUT_PLACEHOLDER).or(linkedInInputCandidates(page)).first();
       await input.first().waitFor({ state: "attached", timeout: 25_000 });
@@ -230,6 +265,10 @@ export function createJobrightPlaywrightAdapter(
           await input.click({ force: true, timeout: 5_000 });
           // One fill — clear+fill races Ant Design remounts ("element was detached").
           await input.fill(url, { timeout: 10_000 });
+          const typed = await input.inputValue().catch(() => "");
+          if (!isFilledJobrightLinkedInUrl(typed)) {
+            throw new Error("Find Any Email did not keep the LinkedIn URL.");
+          }
           return;
         } catch (error) {
           lastError = error;
@@ -240,36 +279,54 @@ export function createJobrightPlaywrightAdapter(
     },
 
     async clickSearch(): Promise<void> {
-      await dismissJobrightBlockingOverlays(page);
-      const input = await ensureLinkedInInput();
+      // Never navigate or dismiss Ant modals here. fillLinkedInUrl already typed
+      // the URL; ensureLinkedInInput's goto/reload would wipe that fill, search
+      // an empty box, and sit on waitForContactResult for the full 90s.
       await dismissJobrightBlockingOverlays(page, { dismissAntModals: false });
+      const input = page.getByPlaceholder(LINKEDIN_INPUT_PLACEHOLDER).or(linkedInInputCandidates(page)).first();
+      const filled = await input.inputValue().catch(() => "");
+      if (!isFilledJobrightLinkedInUrl(filled)) {
+        throw new Error(JOBRIGHT_EMPTY_SEARCH_ERROR);
+      }
       // Search button has no accessible name; purge tour first then force-click.
       const button = input.locator("xpath=following::button[1]");
-      try {
-        await button.click({ force: true, timeout: 8_000 });
-        return;
-      } catch {
-        await dismissJobrightBlockingOverlays(page, { dismissAntModals: false });
-      }
-      try {
-        await button.click({ force: true, timeout: 5_000 });
-        return;
-      } catch {
-        // Ant Input.Search often submits on Enter when the button is stuck.
-      }
-      await input.press("Enter");
+      await button.click({ force: true, timeout: 8_000 }).catch(() => undefined);
+      // Force-click can hit the wrong sibling and still "succeed". Ant Input.Search
+      // submits on Enter; always send it so we do not sit 90s on a no-op click.
+      await input.press("Enter").catch(() => undefined);
     },
 
     async waitForContactResult(timeoutMs: number): Promise<ContactResult> {
       const resultCopy = page.getByText(JOBRIGHT_CONTACT_RESULT_TEXT);
       const connectNow = page.getByRole("button", { name: CONNECT_NOW_TEXT });
       const signal = resultCopy.or(connectNow).first();
+      await dismissJobrightPromoOverlays(page);
+      await dismissJobrightCreditUpsell(page);
       try {
         await signal.waitFor({ state: "visible", timeout: timeoutMs });
       } catch {
-        // Timeout ≠ confirmed miss — Jobright can be slow; surface as timedOut so
-        // orchestration returns error instead of a false not_found.
-        return contactResultFromSignals({ timedOut: true });
+        await dismissJobrightPromoOverlays(page);
+        await dismissJobrightCreditUpsell(page);
+        const retryMs = Math.min(8_000, Math.max(500, timeoutMs));
+        const appeared = await signal
+          .waitFor({ state: "visible", timeout: retryMs })
+          .then(() => true)
+          .catch(() => false);
+        if (!appeared) {
+          try {
+            const input = page.getByPlaceholder(LINKEDIN_INPUT_PLACEHOLDER).or(linkedInInputCandidates(page)).first();
+            const filled = await input.inputValue().catch(() => "");
+            const visibleText = (await page.locator("body").innerText().catch(() => "")).replace(/\s+/g, " ").slice(0, 500);
+            // eslint-disable-next-line no-console -- adapter has no worker log hook
+            console.log(
+              `[jobright] toast wait timed out url=${page.url()} filled=${isFilledJobrightLinkedInUrl(filled)} text=${visibleText}`,
+            );
+            await page.screenshot({ path: "/tmp/jobright-timeout.png", fullPage: true }).catch(() => undefined);
+          } catch {
+            // Dump is best-effort — still surface the timeout.
+          }
+          return contactResultFromSignals({ timedOut: true });
+        }
       }
       const heading = resultCopy.first();
       const card = heading.locator("xpath=ancestor::*[self::div][1]");

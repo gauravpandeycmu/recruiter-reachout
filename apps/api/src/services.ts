@@ -1317,7 +1317,7 @@ export async function recordDiscoveryResult(store: Store, candidateId: string, i
 export async function requestDiscovery(
   store: Store,
   candidateId: string,
-  options: { forceSalesql?: boolean } = {},
+  options: { forceSalesql?: boolean; forceJobright?: boolean } = {},
 ): Promise<RecruiterCandidate> {
   const candidate = store.listCandidates().find((item) => item.id === candidateId);
   if (!candidate) {
@@ -1328,15 +1328,31 @@ export async function requestDiscovery(
   }
   const inFlight = Boolean(candidate.discoveryClaimedAt);
   const neverChecked = (candidate.discoveryAttempts ?? 0) === 0 && !candidate.lastDiscoveryAttemptAt;
-  const continueWithFinder = options.forceSalesql || !neverChecked || candidate.discoveryStage === "finder";
+  const rerunJobright = Boolean(options.forceJobright) && !options.forceSalesql;
+  const continueWithFinder =
+    !rerunJobright && (options.forceSalesql || !neverChecked || candidate.discoveryStage === "finder");
   const updated = store.updateCandidate(candidateId, {
     status: candidate.status === "email_not_found" ? "new" : candidate.status,
-    discoveryAttempts: inFlight ? candidate.discoveryAttempts : 0,
-    lastDiscoveryAttemptAt: inFlight ? candidate.lastDiscoveryAttemptAt : neverChecked ? undefined : candidate.lastDiscoveryAttemptAt,
+    discoveryAttempts: inFlight && !rerunJobright ? candidate.discoveryAttempts : 0,
+    lastDiscoveryAttemptAt: rerunJobright || neverChecked ? undefined : candidate.lastDiscoveryAttemptAt,
     lastError: undefined,
-    discoveryClaimedAt: inFlight ? candidate.discoveryClaimedAt : undefined,
-    discoveryStage: inFlight ? (candidate.discoveryStage ?? "jobright") : continueWithFinder ? "finder" : "jobright",
-    forceProvider: options.forceSalesql ? "salesql" : continueWithFinder ? "finder" : undefined,
+    discoveryClaimedAt: rerunJobright ? undefined : inFlight ? candidate.discoveryClaimedAt : undefined,
+    discoveryStage: rerunJobright
+      ? "jobright"
+      : inFlight
+        ? (candidate.discoveryStage ?? "jobright")
+        : continueWithFinder
+          ? "finder"
+          : "jobright",
+    forceProvider: rerunJobright
+      ? undefined
+      : inFlight
+        ? candidate.forceProvider
+        : options.forceSalesql
+          ? "salesql"
+          : continueWithFinder
+            ? "finder"
+            : undefined,
   });
   if (!updated) {
     throw new Error("Candidate not found.");
